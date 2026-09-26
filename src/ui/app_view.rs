@@ -14,6 +14,8 @@ use crate::git::{self, BranchBrowser, BranchInfo, CommitInfo};
 use crate::workspace_store::{self, WorkspaceEntry, WorkspaceStore};
 use super::diff_window::{DiffSnapshot, DiffView};
 use super::file_tree::{self, TreeRow};
+#[cfg(target_os = "macos")]
+use super::mac_column_vibrancy::ColumnVibrancy;
 use super::splitter::{self, Axis, ResizeState};
 use super::theme;
 
@@ -37,6 +39,8 @@ pub struct AppView {
     files_resize_state: Rc<ResizeState>,
     head_meta_height: f32,
     head_meta_resize_state: Rc<ResizeState>,
+    #[cfg(target_os = "macos")]
+    sidebar_vibrancy: Option<ColumnVibrancy>,
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +85,8 @@ impl AppView {
             files_resize_state: Rc::new(ResizeState::default()),
             head_meta_height: splitter::DEFAULT_HEAD_META_HEIGHT,
             head_meta_resize_state: Rc::new(ResizeState::default()),
+            #[cfg(target_os = "macos")]
+            sidebar_vibrancy: None,
         }
     }
 
@@ -413,7 +419,7 @@ fn open_or_update_diff(
                 ..Default::default()
             }),
             window_decorations: Some(WindowDecorations::Client),
-            window_background: window_background_appearance(),
+            window_background: super::window_background_appearance(),
             ..Default::default()
         },
         move |_, cx| cx.new(|cx| DiffView::with_snapshot(snap, cx)),
@@ -434,16 +440,6 @@ fn traffic_light_position() -> Option<gpui::Point<gpui::Pixels>> {
 #[cfg(not(target_os = "macos"))]
 fn traffic_light_position() -> Option<gpui::Point<gpui::Pixels>> {
     None
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn window_background_appearance() -> gpui::WindowBackgroundAppearance {
-    gpui::WindowBackgroundAppearance::Blurred
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn window_background_appearance() -> gpui::WindowBackgroundAppearance {
-    gpui::WindowBackgroundAppearance::Opaque
 }
 
 impl Focusable for AppView {
@@ -473,13 +469,23 @@ impl Render for AppView {
         };
         let show_sidebar_split = !self.repos_collapsed;
 
+        #[cfg(target_os = "macos")]
+        {
+            let column_w = if self.repos_collapsed {
+                0.
+            } else {
+                self.sidebar_width
+            };
+            ColumnVibrancy::ensure_synced(&mut self.sidebar_vibrancy, window, column_w);
+        }
+
         div()
             .id("main")
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.handle_branch_key(event, cx)))
             .size_full()
             .flex()
             .overflow_hidden()
-            .bg(theme::white())
+            .when(cfg!(not(target_os = "macos")), |d| d.bg(theme::white()))
             .font_family(theme::UI_FONT)
             .track_focus(&self.focus)
             .child(render_sidebar(self, sidebar_w, cx))
