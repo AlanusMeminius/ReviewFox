@@ -435,23 +435,27 @@ pub fn vertical_on(
 }
 
 /// Wrap scrolled content with an overlay thumb (`flex_1` shell).
+///
+/// Both children are `absolute inset_0` so they take the flex item's definite
+/// size. In-flow `size_full` content next to the scrollbar entity was getting an
+/// indefinite/min width, so `text_ellipsis` collapsed titles/paths to a few glyphs.
 pub fn overlay_flex(content: impl IntoElement, scrollbar: Entity<VerticalScrollbar>) -> Div {
     div()
         .relative()
         .flex_1()
         .min_h(px(0.))
         .min_w(px(0.))
-        .child(content)
-        .child(scrollbar)
+        .child(div().absolute().inset_0().child(content))
+        .child(div().absolute().inset_0().child(scrollbar))
 }
 
-/// Fixed-height overlay shell (branch picker, comments strip).
+/// Fixed-size overlay shell (branch picker).
 pub fn overlay_box(content: impl IntoElement, scrollbar: Entity<VerticalScrollbar>) -> Div {
     div()
         .relative()
         .size_full()
-        .child(content)
-        .child(scrollbar)
+        .child(div().absolute().inset_0().child(content))
+        .child(div().absolute().inset_0().child(scrollbar))
 }
 
 /// Cap height (comments): shrink-to-fit up to `max_h`, overlay thumb on top.
@@ -464,8 +468,9 @@ pub fn overlay_max(
         .relative()
         .w_full()
         .max_h(max_height)
+        // Content stays in-flow so the shell can shrink-wrap; only the thumb overlays.
         .child(content)
-        .child(scrollbar)
+        .child(div().absolute().inset_0().child(scrollbar))
 }
 
 #[cfg(test)]
