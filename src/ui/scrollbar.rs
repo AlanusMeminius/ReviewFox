@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use gpui::{
     App, Context, CursorStyle, Div, Entity, Global, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, Task, Timer, UniformListScrollHandle,
-    Window, canvas, div, point, prelude::*, px, rgb,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, Task, Timer, Window, canvas, div,
+    point, prelude::*, px, rgb,
 };
 
 const THUMB_WIDTH: f32 = 6.;
@@ -31,45 +31,28 @@ pub enum Edge {
     Trailing,
 }
 
-enum Handle {
-    Div(ScrollHandle),
-    List(UniformListScrollHandle),
-}
+struct Handle(ScrollHandle);
 
 impl Handle {
     fn offset_y(&self) -> Pixels {
-        match self {
-            Self::Div(h) => h.offset().y,
-            Self::List(h) => h.0.borrow().base_handle.offset().y,
-        }
+        self.0.offset().y
     }
 
     fn max_offset_y(&self) -> Pixels {
-        match self {
-            Self::Div(h) => h.max_offset().height,
-            Self::List(h) => h.0.borrow().base_handle.max_offset().height,
-        }
+        self.0.max_offset().height
     }
 
     fn viewport_height(&self) -> Pixels {
-        match self {
-            Self::Div(h) => h.bounds().size.height,
-            Self::List(h) => h.0.borrow().base_handle.bounds().size.height,
-        }
+        self.0.bounds().size.height
     }
 
     fn set_offset_y(&self, y: Pixels) {
-        match self {
-            Self::Div(h) => {
-                let x = h.offset().x;
-                h.set_offset(point(x, y));
-            }
-            Self::List(h) => {
-                let base = &h.0.borrow().base_handle;
-                let x = base.offset().x;
-                base.set_offset(point(x, y));
-            }
-        }
+        let x = self.0.offset().x;
+        self.0.set_offset(point(x, y));
+    }
+
+    fn clone_scroll(&self) -> ScrollHandle {
+        self.0.clone()
     }
 }
 
@@ -138,6 +121,51 @@ pub fn sync_lockstep(handles: &[&ScrollHandle], last_y: &mut Option<Pixels>) {
     *last_y = Some(driver_y);
 }
 
+/// Diff L / gutter / R handles + overlay thumbs to refresh after programmatic sync.
+struct Lockstep {
+    handles: [ScrollHandle; 3],
+    thumbs: [Entity<VerticalScrollbar>; 2],
+    last_y: Option<Pixels>,
+}
+
+impl Global for Lockstep {}
+
+/// Register (or refresh) the Diff dual-pane lockstep group for this frame.
+pub fn bind_lockstep(
+    handles: [ScrollHandle; 3],
+    thumbs: [Entity<VerticalScrollbar>; 2],
+    cx: &mut App,
+) {
+    let last_y = cx
+        .try_global::<Lockstep>()
+        .map(|s| s.last_y)
+        .unwrap_or(None);
+    cx.set_global(Lockstep {
+        handles,
+        thumbs,
+        last_y,
+    });
+}
+
+/// Run when any overlay thumb sees its tracked offset change (wheel / drag).
+fn tick_lockstep(cx: &mut App) {
+    if !cx.has_global::<Lockstep>() {
+        return;
+    }
+    let handles = cx.global::<Lockstep>().handles.clone();
+    let thumbs = cx.global::<Lockstep>().thumbs.clone();
+    let mut last_y = cx.global::<Lockstep>().last_y;
+    let before = last_y;
+    sync_lockstep(&[&handles[0], &handles[1], &handles[2]], &mut last_y);
+    cx.global_mut::<Lockstep>().last_y = last_y;
+    if last_y == before {
+        return;
+    }
+    for thumb in &thumbs {
+        thumb.update(cx, |_, cx| cx.notify());
+    }
+}
+
 pub struct VerticalScrollbar {
     handle: Handle,
     edge: Edge,
@@ -151,19 +179,7 @@ pub struct VerticalScrollbar {
 impl VerticalScrollbar {
     fn for_div(edge: Edge) -> Self {
         Self {
-            handle: Handle::Div(ScrollHandle::new()),
-            edge,
-            drag_grab: None,
-            last_offset: None,
-            visible: true,
-            hovered: false,
-            hide_task: None,
-        }
-    }
-
-    fn for_list(edge: Edge) -> Self {
-        Self {
-            handle: Handle::List(UniformListScrollHandle::new()),
+            handle: Handle(ScrollHandle::new()),
             edge,
             drag_grab: None,
             last_offset: None,
@@ -174,17 +190,7 @@ impl VerticalScrollbar {
     }
 
     pub fn div_handle(&self) -> ScrollHandle {
-        match &self.handle {
-            Handle::Div(h) => h.clone(),
-            Handle::List(_) => panic!("div_handle on list scrollbar"),
-        }
-    }
-
-    pub fn list_handle(&self) -> UniformListScrollHandle {
-        match &self.handle {
-            Handle::List(h) => h.clone(),
-            Handle::Div(_) => panic!("list_handle on div scrollbar"),
-        }
+        self.handle.clone_scroll()
     }
 
     fn jump_to_thumb_top(&self, thumb_top: Pixels, geom: &ThumbGeom) {
@@ -236,6 +242,7 @@ impl Render for VerticalScrollbar {
         if self.last_offset != Some(offset) {
             self.last_offset = Some(offset);
             self.reveal(cx);
+            tick_lockstep(cx);
         } else if self.visible
             && self.hide_task.is_none()
             && !self.hovered
@@ -370,7 +377,6 @@ impl Render for VerticalScrollbar {
 #[derive(Default)]
 struct Registry {
     divs: HashMap<String, Entity<VerticalScrollbar>>,
-    lists: HashMap<String, Entity<VerticalScrollbar>>,
 }
 
 impl Global for Registry {}
@@ -407,25 +413,6 @@ pub fn vertical_on(
     (handle, entity)
 }
 
-/// Stable vertical scrollbar for a `uniform_list` + `track_scroll`.
-pub fn list(
-    id: impl Into<String>,
-    cx: &mut App,
-) -> (UniformListScrollHandle, Entity<VerticalScrollbar>) {
-    let id = id.into();
-    if let Some(existing) = cx
-        .try_global::<Registry>()
-        .and_then(|reg| reg.lists.get(&id).cloned())
-    {
-        let handle = existing.read(cx).list_handle();
-        return (handle, existing);
-    }
-    let entity = cx.new(|_| VerticalScrollbar::for_list(Edge::Trailing));
-    registry(cx).lists.insert(id, entity.clone());
-    let handle = entity.read(cx).list_handle();
-    (handle, entity)
-}
-
 /// Wrap scrolled content with an overlay thumb (`flex_1` shell).
 pub fn overlay_flex(content: impl IntoElement, scrollbar: Entity<VerticalScrollbar>) -> Div {
     div()
@@ -442,6 +429,20 @@ pub fn overlay_box(content: impl IntoElement, scrollbar: Entity<VerticalScrollba
     div()
         .relative()
         .size_full()
+        .child(content)
+        .child(scrollbar)
+}
+
+/// Cap height (comments): shrink-to-fit up to `max_h`, overlay thumb on top.
+pub fn overlay_max(
+    max_height: Pixels,
+    content: impl IntoElement,
+    scrollbar: Entity<VerticalScrollbar>,
+) -> Div {
+    div()
+        .relative()
+        .w_full()
+        .max_h(max_height)
         .child(content)
         .child(scrollbar)
 }

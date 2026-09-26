@@ -1,6 +1,6 @@
 use gpui::{
     App, ClipboardItem, Context, Div, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Pixels, Render, ScrollHandle, StatefulInteractiveElement, Styled,
+    KeyDownEvent, ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled,
     Window, WindowControlArea, div, prelude::*, px, rgb, svg,
 };
 use std::collections::HashSet;
@@ -40,8 +40,6 @@ pub struct DiffView {
     tree_path_fingerprint: Vec<String>,
     /// Gutter scroll handle (no overlay thumb); lockstep with L/R panes.
     gutter_scroll: ScrollHandle,
-    /// Last lockstep offset so we can detect which pane drove the scroll.
-    diff_scroll_y: Option<Pixels>,
 }
 
 impl DiffView {
@@ -57,7 +55,6 @@ impl DiffView {
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
             gutter_scroll: ScrollHandle::new(),
-            diff_scroll_y: None,
         }
     }
 
@@ -231,15 +228,16 @@ impl Render for DiffView {
             theme::DIFF_TREE_WIDTH
         };
 
-        // Lockstep L / gutter / R before paint (handles are registry-stable).
-        let (left_scroll, _) =
+        // Bind L / gutter / R so overlay thumb offset changes tick lockstep.
+        let (left_scroll, left_sb) =
             scrollbar::vertical_on("diff-code-left-sb", Edge::Leading, cx);
-        let (right_scroll, _) =
+        let (right_scroll, right_sb) =
             scrollbar::vertical_on("diff-code-right-sb", Edge::Trailing, cx);
         let gutter_scroll = self.gutter_scroll.clone();
-        scrollbar::sync_lockstep(
-            &[&left_scroll, &gutter_scroll, &right_scroll],
-            &mut self.diff_scroll_y,
+        scrollbar::bind_lockstep(
+            [left_scroll, gutter_scroll, right_scroll],
+            [left_sb, right_sb],
+            cx,
         );
 
         div()
@@ -582,6 +580,7 @@ fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement 
                                 .size_full()
                                 .track_scroll(&left_scroll)
                                 .overflow_y_scroll()
+                                .overflow_x_hidden()
                                 .child(code_pane(true, rows, view, cx)),
                             left_sb,
                         ))
@@ -592,7 +591,8 @@ fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement 
                                 .flex_none()
                                 .h_full()
                                 .track_scroll(&gutter_scroll)
-                                .overflow_y_scroll()
+                                // Prototype A: overflow hidden — scroll only via lockstep set_offset.
+                                .overflow_hidden()
                                 .child(center_gutter(rows)),
                         )
                         .child(scrollbar::overlay_flex(
@@ -601,6 +601,7 @@ fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement 
                                 .size_full()
                                 .track_scroll(&right_scroll)
                                 .overflow_y_scroll()
+                                .overflow_x_hidden()
                                 .child(code_pane(false, rows, view, cx)),
                             right_sb,
                         )),
@@ -677,14 +678,16 @@ fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElem
     let (scroll, sb) = scrollbar::vertical("diff-comments-sb", cx);
     div()
         .flex_none()
-        .h(px(160.))
+        .max_h(px(160.))
         .border_t_1()
         .border_color(theme::line())
         .bg(rgb(0xfafbfd))
-        .child(scrollbar::overlay_box(
+        .child(scrollbar::overlay_max(
+            px(160.),
             div()
                 .id("diff-comments-scroll")
-                .size_full()
+                .w_full()
+                .max_h(px(160.))
                 .px_3()
                 .py_2()
                 .track_scroll(&scroll)
