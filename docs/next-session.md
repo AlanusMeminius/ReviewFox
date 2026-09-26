@@ -10,6 +10,7 @@
 - **Export** (`src/export.rs`): narrative snippets at anchors (±2 context) → clipboard via Diff **Export** button
 - **Viewing-flow UX** (2026-09-26): nested ChangedPath trees (main read-only + Diff clickable), ± stats + M/A/D, `Open Diff` button (only refresh path for Diff), unified Diff scroll, dual heads, gap/ribbon/checkbox polish, IBM Plex font names, `ChangedPath` in CONTEXT
 - **Workspace sidebar** (2026-09-26): persist `{last, pinned, workspaces}` to Application Support; restore `last` on launch; sidebar is **Recent** (0–1, no context menu) + **Pin** (hidden when empty, newest on top) + **Repositories** (non-pinned only, alpha by display name); right-click Pin → Unpin|Remove, Repositories → Pin|Remove; Open Repo / branch select / click row write immediately; CLI argv / `REVIEWFOX_REPO` removed.
+- **Overlay scrollbars** (2026-09-26): BeadsViewer-shaped overlay thumbs on sidebar / commits / file tree / head-meta / branch picker / Diff tree / comments; Diff dual-pane per-pane scroll (old left / new right) + gutter lockstep (ADR 0003).
 
 ## Still deferred
 
@@ -18,7 +19,6 @@
 - ViewOptions UI toggle
 - Proper text input (draft bar is keystroke-based)
 - Real branch switcher / commit filter
-- True per-pane scrollbars (today: one synced scroll for L+gutter+R)
 - True diagonal gap hatch (flat `gap_bg` + `╱` stand-in)
 - Bundle IBM Plex fonts if OS lacks them
 - Syntax highlighting
