@@ -96,8 +96,7 @@ impl AppView {
         Rc::new(move |requested, window, cx: &mut App| {
             view.update(cx, |this, cx| {
                 let available = f32::from(window.viewport_size().width);
-                let width =
-                    splitter::clamp_sidebar_width(requested, available, this.files_width);
+                let width = splitter::clamp_sidebar_width(requested, available);
                 if this.sidebar_width != width {
                     this.sidebar_width = width;
                     cx.notify();
@@ -117,7 +116,12 @@ impl AppView {
                 } else {
                     this.sidebar_width
                 };
-                let width = splitter::clamp_files_width(requested, available, sidebar);
+                // HorizontalTrailing reports distance to viewport right; float is inset.
+                let width = splitter::clamp_files_width(
+                    requested - theme::CHANGES_INSET,
+                    available,
+                    sidebar,
+                );
                 if this.files_width != width {
                     this.files_width = width;
                     cx.notify();
@@ -498,14 +502,18 @@ impl Render for AppView {
                     self.sidebar_resize_state.clone(),
                 ))
             })
-            .child(render_commits(self, cx))
-            .child(splitter::handle(
-                "files-resize-handle",
-                Axis::HorizontalTrailing,
-                self.files_resize_handler(cx),
-                self.files_resize_state.clone(),
-            ))
-            .child(render_files(self, cx))
+            // Stage: commits full-bleed; Changes floats on top (capsule-changes A).
+            .child(
+                div()
+                    .id("stage")
+                    .relative()
+                    .h_full()
+                    .flex_1()
+                    .min_w(px(splitter::MIN_COMMITS_WIDTH))
+                    .overflow_hidden()
+                    .child(render_commits(self, cx))
+                    .child(render_files(self, cx)),
+            )
             .when(self.repo_menu.is_some(), |d| d.child(render_repo_menu(self, cx)))
     }
 }
@@ -669,6 +677,8 @@ fn sidebar_repo_row(
         .px_2()
         .py_1()
         .rounded_lg()
+        .min_w(px(0.))
+        .overflow_hidden()
         .cursor_pointer()
         .when(active, |d| d.bg(theme::capsule()))
         .hover(|d| d.bg(theme::hover()))
@@ -685,6 +695,10 @@ fn sidebar_repo_row(
         })
         .child(
             div()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
                 .text_sm()
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme::text())
@@ -692,10 +706,12 @@ fn sidebar_repo_row(
         )
         .child(
             div()
-                .text_xs()
-                .text_color(theme::muted())
+                .min_w(px(0.))
                 .overflow_hidden()
                 .text_ellipsis()
+                .whitespace_nowrap()
+                .text_xs()
+                .text_color(theme::muted())
                 .child(path_str),
         )
         .into_any_element()
@@ -768,17 +784,19 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
         MainState::Ready(loaded) => (loaded.branch.clone(), loaded.comparison.label()),
         MainState::Empty | MainState::Error(_) => ("—".into(), "—".into()),
     };
+    // Definite right edge so text_ellipsis sees the pane width (same idea as
+    // overlay_flex absolute inset). Leave shadow clearance so the thumb does
+    // not sit under the Changes cast.
+    let float_gap = px(theme::changes_float_clearance(view.files_width));
 
     div()
         .id("commits")
-        .h_full()
-        .flex_1()
-        .min_w(px(splitter::MIN_COMMITS_WIDTH))
+        .absolute()
+        .inset_0()
+        .right(float_gap)
         .flex()
         .flex_col()
         .bg(theme::white())
-        .border_r_1()
-        .border_color(theme::line())
         .child(
             div()
                 .h(theme::CHROME_HEIGHT)
@@ -803,20 +821,33 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                         .flex()
                         .items_center()
                         .gap_1()
+                        .min_w(px(0.))
+                        .overflow_hidden()
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::hover()))
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_branch_picker(cx)))
                         .child(
                             svg()
                                 .size_4()
+                                .flex_none()
                                 .path("branch.svg")
                                 .text_color(theme::muted()),
                         )
-                        .child(div().text_xs().text_color(theme::text()).child(branch))
+                        .child(
+                            div()
+                                .min_w(px(0.))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .text_xs()
+                                .text_color(theme::text())
+                                .child(branch),
+                        ),
                 )
                 .child(div().flex_1())
                 .child(
                     div()
+                        .flex_none()
                         .font_family(theme::MONO_FONT)
                         .text_xs()
                         .text_color(theme::muted())
@@ -874,21 +905,31 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                                 }))
                                 .child(
                                     div()
+                                        .w_full()
                                         .min_w(px(0.))
+                                        .overflow_hidden()
                                         .child(
                                             div()
+                                                .w_full()
+                                                .min_w(px(0.))
                                                 .text_sm()
                                                 .font_weight(gpui::FontWeight::MEDIUM)
                                                 .text_color(theme::text())
                                                 .overflow_hidden()
                                                 .text_ellipsis()
+                                                .whitespace_nowrap()
                                                 .child(summary),
                                         )
                                         .child(
                                             div()
+                                                .w_full()
+                                                .min_w(px(0.))
                                                 .font_family(theme::MONO_FONT)
                                                 .text_xs()
                                                 .text_color(theme::muted())
+                                                .overflow_hidden()
+                                                .text_ellipsis()
+                                                .whitespace_nowrap()
                                                 .child(meta),
                                         ),
                                 )
@@ -993,32 +1034,59 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         MainState::Ready(loaded) => head_commit_meta(loaded),
         MainState::Empty | MainState::Error(_) => None,
     };
+    let inset = px(theme::CHANGES_INSET);
 
     div()
         .id("files")
-        .h_full()
+        .absolute()
+        .top(inset)
+        .right(inset)
+        .bottom(inset)
         .w(px(view.files_width))
-        .flex_none()
         .flex()
         .flex_col()
         .bg(theme::white())
+        .rounded(px(theme::CHANGES_RADIUS))
+        .shadow(theme::changes_capsule_shadow())
+        .overflow_hidden()
+        // Left-edge resize (HorizontalTrailing measures from viewport right).
         .child(
             div()
-                .h(theme::CHROME_HEIGHT)
+                .absolute()
+                .left(px(0.))
+                .top(px(0.))
+                .bottom(px(0.))
+                .w(px(5.))
+                .child(splitter::handle(
+                    "files-resize-handle",
+                    Axis::HorizontalTrailing,
+                    view.files_resize_handler(cx),
+                    view.files_resize_state.clone(),
+                )),
+        )
+        // No titlebar — faint section label + Open Diff in the corner.
+        .child(
+            div()
+                .relative()
                 .flex_none()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_3()
+                .pt_2()
+                .pl_3()
+                .pr(px(36.))
+                .pb_1()
                 .child(
                     div()
-                        .flex_1()
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::muted())
+                        .text_color(theme::faint())
                         .child(format!("Changes ({})", paths.len())),
                 )
-                .child(open_diff_button(can_open, cx)),
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(6.))
+                        .right(px(8.))
+                        .child(open_diff_button(can_open, cx)),
+                ),
         )
         .child({
             let (scroll, sb) = scrollbar::vertical("file-tree-sb", cx);
@@ -1199,8 +1267,11 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
         .border_t_1()
         .border_color(theme::line())
         .bg(theme::white())
+        // Match capsule bottom radii (parent overflow clip alone still reads square).
+        .rounded_b(px(theme::CHANGES_RADIUS))
         .child(
             div()
+                .min_w(px(0.))
                 .text_xs()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme::text())

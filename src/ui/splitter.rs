@@ -50,15 +50,20 @@ pub fn default_files_width() -> f32 {
     f32::from(theme::FILES_WIDTH)
 }
 
-pub fn clamp_sidebar_width(requested: f32, available: f32, files_width: f32) -> f32 {
+/// Changes floats over commits — sidebar only needs to leave a readable commits strip.
+pub fn clamp_sidebar_width(requested: f32, available: f32) -> f32 {
     let maximum = MAX_SIDEBAR_WIDTH
-        .min((available - files_width - MIN_COMMITS_WIDTH).max(MIN_SIDEBAR_WIDTH));
+        .min((available - MIN_COMMITS_WIDTH).max(MIN_SIDEBAR_WIDTH));
     requested.clamp(MIN_SIDEBAR_WIDTH, maximum)
 }
 
+/// Floating Changes width: leave `MIN_COMMITS_WIDTH` readable left of the capsule
+/// (+ inset + shadow clearance).
 pub fn clamp_files_width(requested: f32, available: f32, sidebar_width: f32) -> f32 {
+    let stage = (available - sidebar_width).max(0.);
+    let clear = theme::CHANGES_INSET + theme::CHANGES_SHADOW_GAP;
     let maximum = MAX_FILES_WIDTH
-        .min((available - sidebar_width - MIN_COMMITS_WIDTH).max(MIN_FILES_WIDTH));
+        .min((stage - MIN_COMMITS_WIDTH - clear).max(MIN_FILES_WIDTH));
     requested.clamp(MIN_FILES_WIDTH, maximum)
 }
 
@@ -160,20 +165,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sidebar_clamp_keeps_commits_and_files() {
-        assert_eq!(clamp_sidebar_width(100., 1280., 280.), 160.);
-        assert_eq!(clamp_sidebar_width(220., 1280., 280.), 220.);
-        assert_eq!(clamp_sidebar_width(500., 1280., 280.), 360.);
-        assert_eq!(clamp_sidebar_width(220., 720., 280.), 160.);
+    fn sidebar_clamp_keeps_commits_strip() {
+        assert_eq!(clamp_sidebar_width(100., 1280.), 160.);
+        assert_eq!(clamp_sidebar_width(220., 1280.), 220.);
+        assert_eq!(clamp_sidebar_width(500., 1280.), 360.);
+        // 720 − 280 commits = 440, but MAX_SIDEBAR caps at 360
+        assert_eq!(clamp_sidebar_width(400., 720.), 360.);
+        // tight window: 400 − 280 = 120 → floor at MIN_SIDEBAR
+        assert_eq!(clamp_sidebar_width(220., 400.), 160.);
     }
 
     #[test]
-    fn files_clamp_keeps_commits_and_sidebar() {
+    fn files_clamp_keeps_commits_strip_beside_float() {
         assert_eq!(clamp_files_width(100., 1280., 220.), 200.);
         assert_eq!(clamp_files_width(280., 1280., 220.), 280.);
         assert_eq!(clamp_files_width(600., 1280., 220.), 480.);
-        // 720 − 220 − 280 commits = 220 max
-        assert_eq!(clamp_files_width(400., 720., 220.), 220.);
+        // stage 500 − 280 − 8 − 8 = 204 → clamp stays 204 (above MIN_FILES)
+        assert_eq!(clamp_files_width(400., 720., 220.), 204.);
     }
 
     #[test]

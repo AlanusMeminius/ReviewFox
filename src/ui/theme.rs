@@ -1,6 +1,6 @@
 //! Visual tokens aligned with BeadsViewer + accepted prototype A.
 
-use gpui::{Pixels, Rgba, rgb};
+use gpui::{BoxShadow, Hsla, Pixels, Rgba, hsla, point, px, rgb};
 
 pub const SIDEBAR_WIDTH: Pixels = gpui::px(220.);
 pub const FILES_WIDTH: Pixels = gpui::px(280.);
@@ -9,6 +9,37 @@ pub const CHROME_HEIGHT: Pixels = gpui::px(36.);
 pub const TOGGLE_SIZE: Pixels = gpui::px(26.);
 pub const GUTTER_WIDTH: Pixels = gpui::px(64.);
 pub const ROW_HEIGHT: Pixels = gpui::px(20.);
+
+/// Inset of the floating Changes capsule from the stage edges.
+pub const CHANGES_INSET: f32 = 8.;
+/// Gap between commits/scrollbar and the capsule — same as the right-edge inset.
+pub const CHANGES_SHADOW_GAP: f32 = CHANGES_INSET;
+/// Corner radius of the floating Changes capsule.
+pub const CHANGES_RADIUS: f32 = 12.;
+
+/// Right inset for the commits column: capsule width + stage inset + matching left gap.
+pub fn changes_float_clearance(files_width: f32) -> f32 {
+    files_width + CHANGES_INSET + CHANGES_SHADOW_GAP
+}
+
+/// Soft all-around cast — edge via shadow only (no hard border). See prototype/capsule-changes.html.
+pub fn changes_capsule_shadow() -> Vec<BoxShadow> {
+    let ink = |a: f32| -> Hsla { hsla(220. / 360., 0.38, 0.14, a) };
+    vec![
+        BoxShadow {
+            color: ink(0.08),
+            offset: point(px(0.), px(4.)),
+            blur_radius: px(12.),
+            spread_radius: px(0.),
+        },
+        BoxShadow {
+            color: ink(0.12),
+            offset: point(px(0.), px(12.)),
+            blur_radius: px(32.),
+            spread_radius: px(0.),
+        },
+    ]
+}
 
 /// Prototype A fonts; OS falls back if not installed.
 pub const UI_FONT: &str = "IBM Plex Sans";

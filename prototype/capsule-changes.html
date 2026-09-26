@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ReviewFox — floating Changes A (throwaway)</title>
+  <!--
+    PROTOTYPE — throwaway. Not production.
+    Question: Commit full-bleed on the right; Changes floats as inset rounded capsule
+    (shadow-only edge, no hard border), spanning to window top with NO Changes titlebar.
+    VERDICT (2026-09-26): A accepted + shadow-only edge → folded into src/ui/app_view.rs.
+    open prototype/capsule-changes.html
+  -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --text: #172033;
+      --muted: #596579;
+      --faint: #98a2b3;
+      --line: #dfe3ea;
+      --surface: #ffffff;
+      --sidebar: #f4f5f7;
+      --hover: #e9ebef;
+      --selected: #e5e7eb;
+      --range: #f1f5ff;
+      --accent: #2457d6;
+      --add: #1a7f4b;
+      --del: #b42318;
+      --chrome: 36px;
+      --menu-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: "IBM Plex Sans", sans-serif;
+      color: var(--text);
+      background: #c5ccd6;
+      overflow: hidden;
+    }
+    button { font: inherit; }
+    .proto-root {
+      height: 100%; padding: 16px;
+      display: flex; align-items: stretch; justify-content: center;
+    }
+    .desk { max-width: 1180px; width: 100%; height: 100%; min-width: 0; }
+
+    .win {
+      height: 100%;
+      background: var(--surface);
+      border: 1px solid #b4bcc8;
+      border-radius: 10px;
+      box-shadow: 0 16px 36px rgba(23, 32, 51, 0.16);
+      display: flex; overflow: hidden; min-width: 0;
+    }
+
+    .traffic { display: flex; gap: 6px; align-items: center; flex-shrink: 0; width: 52px; }
+    .traffic i { width: 10px; height: 10px; border-radius: 50%; display: block; }
+    .traffic .r { background: #ff5f57; }
+    .traffic .y { background: #febc2e; }
+    .traffic .g { background: #28c840; }
+
+    .icon-btn {
+      width: 26px; height: 26px; border: 0; border-radius: 6px;
+      background: transparent; color: var(--muted); cursor: pointer;
+      display: grid; place-items: center; flex-shrink: 0;
+    }
+    .icon-btn:hover { background: var(--hover); }
+    .icon-btn svg { width: 16px; height: 16px; }
+    .icon-btn:disabled { color: var(--faint); cursor: default; }
+    .icon-btn:disabled:hover { background: transparent; }
+
+    .mono { font-family: "IBM Plex Mono", monospace; }
+    .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* —— Sidebar (current: Recent / Pin / Repositories) —— */
+    .side {
+      width: 220px; flex-shrink: 0;
+      background: var(--sidebar);
+      display: flex; flex-direction: column; min-width: 0; overflow: hidden;
+    }
+    .side.collapsed { width: 0; }
+    .side-chrome {
+      height: var(--chrome); flex-shrink: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 8px 0 12px;
+    }
+    .side-body { flex: 1; overflow: auto; padding: 4px 8px 12px; }
+    .side-label {
+      font-size: 11px; font-weight: 600; color: var(--faint);
+      padding: 8px 8px 6px;
+    }
+    .repo {
+      display: flex; flex-direction: column; gap: 2px;
+      padding: 8px 10px; margin-bottom: 2px;
+      border-radius: 8px; cursor: pointer;
+    }
+    .repo:hover { background: var(--hover); }
+    .repo.active { background: var(--selected); }
+    .repo .name { font-size: 13px; font-weight: 500; }
+    .repo .path { font-size: 11px; color: var(--muted); }
+
+    /* —— Stage: commits full-bleed; Changes floats on top —— */
+    .stage {
+      flex: 1; min-width: 0;
+      position: relative;
+      display: flex; flex-direction: column;
+      background: #fff;
+    }
+    .commits-chrome {
+      height: var(--chrome); flex-shrink: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 300px 0 12px; /* branch row clears the float */
+      position: relative; z-index: 2;
+    }
+    .branch-toggle {
+      display: flex; align-items: center; gap: 4px;
+      padding: 2px 6px; border-radius: 6px; cursor: pointer;
+      font-size: 12px;
+    }
+    .branch-toggle:hover { background: var(--hover); }
+    .branch-toggle svg { width: 16px; height: 16px; color: var(--muted); }
+    .cmp {
+      margin-left: auto;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px; color: var(--muted);
+    }
+
+    .commits {
+      flex: 1; overflow: auto; min-height: 0;
+      /* readable strip left of the floating Changes */
+      padding: 4px 300px 8px 0;
+    }
+    .commit {
+      margin: 2px 8px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .commit:hover { background: #f6f8fb; }
+    .commit.in-range { background: var(--range); }
+    .commit.in-range:hover { background: var(--range); }
+    .commit .msg { font-size: 13px; font-weight: 500; }
+    .commit .sub {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px; color: var(--muted); margin-top: 2px;
+    }
+
+    /* A: rounded capsule — covers top chrome band; inset R/B; shadow-only edge (no hard border) */
+    .changes {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      bottom: 8px;
+      width: 280px;
+      z-index: 5;
+      display: flex; flex-direction: column;
+      background: #fff;
+      border: 0;
+      border-radius: 12px;
+      /* soft all-around cast — edge via shadow only (no hard border) */
+      box-shadow:
+        0 4px 12px rgba(23, 32, 51, 0.08),
+        0 12px 32px rgba(23, 32, 51, 0.12);
+      overflow: hidden;
+    }
+    /* Open Diff sits in the float corner — not a 36px titlebar row */
+    .changes-open {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      z-index: 2;
+    }
+    .changes-label {
+      flex-shrink: 0;
+      font-size: 11px; font-weight: 600; color: var(--faint);
+      letter-spacing: 0.02em;
+      padding: 10px 36px 4px 12px;
+    }
+
+    .tree { flex: 1; overflow: auto; padding: 2px 6px 8px; font-size: 12px; min-height: 0; }
+    .tree details { margin: 0; }
+    .tree summary {
+      list-style: none; cursor: pointer;
+      display: flex; align-items: center; gap: 4px;
+      height: 22px; padding: 0 6px; margin: 0 4px;
+      border-radius: 8px; user-select: none;
+    }
+    .tree summary::-webkit-details-marker { display: none; }
+    .tree summary:hover { background: #f6f8fb; }
+    .tree .twisty {
+      width: 12px; color: var(--faint); font-size: 9px; text-align: center; flex-shrink: 0;
+    }
+    .tree details[open] > summary .twisty { transform: rotate(90deg); display: inline-block; }
+    .tree .folder-kids { padding-left: 14px; }
+    .tree .folder-name {
+      font-size: 12px; font-weight: 500; color: var(--muted);
+    }
+    .tree .leaf {
+      display: flex; align-items: center; gap: 6px;
+      height: 22px; padding: 0 6px 0 18px; margin: 0 4px;
+      border-radius: 8px; cursor: pointer;
+    }
+    .tree .leaf:hover { background: #f6f8fb; }
+    .tree .leaf.active { background: var(--range); }
+    .tree .badge {
+      font-family: "IBM Plex Mono", monospace; font-size: 10px; font-weight: 500; width: 12px;
+    }
+    .tree .badge.M { color: #9a6700; }
+    .tree .badge.A { color: var(--add); }
+    .tree .badge.D { color: var(--del); }
+    .tree .stats {
+      margin-left: auto;
+      font-family: "IBM Plex Mono", monospace; font-size: 11px;
+      display: flex; gap: 4px;
+    }
+    .tree .stats .p { color: var(--add); }
+    .tree .stats .m { color: var(--del); }
+
+    .head-meta {
+      flex-shrink: 0;
+      height: 120px;
+      border-top: 1px solid var(--line);
+      padding: 8px 12px;
+      display: flex; flex-direction: column; gap: 4px;
+      overflow: hidden;
+    }
+    .head-meta .sum {
+      font-size: 12px; font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .head-meta .meta {
+      font-size: 11px; color: var(--muted);
+      display: flex; align-items: center; gap: 4px; min-width: 0;
+    }
+    .head-meta .meta .hash {
+      font-family: "IBM Plex Mono", monospace; cursor: pointer;
+    }
+    .head-meta .meta .hash:hover { color: var(--accent); }
+    .head-meta .body {
+      flex: 1; overflow: auto;
+      font-size: 11px; color: var(--muted); white-space: pre-wrap;
+    }
+
+    .state-dump {
+      position: fixed; right: 10px; bottom: 14px; z-index: 9998;
+      width: 300px; max-height: 40vh; overflow: auto;
+      background: #0f172a; color: #e2e8f0;
+      font-family: "IBM Plex Mono", monospace; font-size: 10px;
+      padding: 10px; border-radius: 8px; opacity: 0.92; white-space: pre-wrap;
+    }
+    .verdict {
+      position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+      z-index: 9999;
+      background: #111827; color: #f9fafb;
+      border-radius: 999px; padding: 8px 16px;
+      box-shadow: 0 8px 28px rgba(0,0,0,.35);
+      font-size: 13px; user-select: none; text-align: center;
+    }
+    .verdict .hint { color: #9ca3af; font-size: 11px; margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <div class="proto-root">
+    <div class="desk" id="desk"></div>
+  </div>
+  <pre class="state-dump" id="stateDump"></pre>
+  <div class="verdict">
+    <div>A · Inset capsule · through top · no titlebar</div>
+    <div class="hint">throwaway · mirrors current main shell</div>
+  </div>
+
+  <script>
+    const MOCK = {
+      reposCollapsed: false,
+      branch: "feature/capsule-changes",
+      comparison: { base: "a1b2c3d", head: "e4f5a6b", label: "a1b2c3d..e4f5a6b" },
+      selectedFile: "src/ui/app_view.rs",
+      recent: { id: "rf", name: "ReviewFox", path: "~/Dev/ReviewFox", active: true },
+      pins: [{ id: "bv", name: "BeadsViewer", path: "~/Dev/BeadsViewer", active: false }],
+      repos: [
+        { id: "rf", name: "ReviewFox", path: "~/Dev/ReviewFox", active: true },
+        { id: "ot", name: "other-crate", path: "~/Dev/other-crate", active: false },
+      ],
+      commits: [
+        {
+          sha: "e4f5a6b",
+          msg: "Float Changes as capsule over commits",
+          author: "alan",
+          time: "now",
+          body: "Inset float, full-bleed commits, no Changes titlebar.",
+          inRange: true,
+        },
+        {
+          sha: "d3c2b1a",
+          msg: "Workspace sidebar: Recent / Pin / Repositories",
+          author: "alan",
+          time: "2h",
+          body: "",
+          inRange: true,
+        },
+        {
+          sha: "c7d8e9f",
+          msg: "Wire Comparison from commit selection",
+          author: "alan",
+          time: "1d",
+          body: "",
+          inRange: false,
+        },
+        {
+          sha: "b6a5c4d",
+          msg: "Overlay scrollbars on beads rails",
+          author: "alan",
+          time: "2d",
+          body: "",
+          inRange: false,
+        },
+        {
+          sha: "a1b2c3d",
+          msg: "Accept Beads-rail shell from prototype A",
+          author: "alan",
+          time: "3d",
+          body: "",
+          inRange: false,
+        },
+        {
+          sha: "9f8e7d6",
+          msg: "GPUI scaffold + custom Alignment Diff",
+          author: "alan",
+          time: "5d",
+          body: "",
+          inRange: false,
+        },
+      ],
+      tree: [
+        {
+          name: "src",
+          kids: [
+            {
+              name: "ui",
+              kids: [
+                { path: "src/ui/app_view.rs", name: "app_view.rs", status: "M", plus: 48, minus: 12 },
+                { path: "src/ui/theme.rs", name: "theme.rs", status: "M", plus: 4, minus: 0 },
+                { path: "src/ui/splitter.rs", name: "splitter.rs", status: "A", plus: 22, minus: 0 },
+              ],
+            },
+            { path: "src/export.rs", name: "export.rs", status: "M", plus: 6, minus: 1 },
+            { path: "src/workspace_store.rs", name: "workspace_store.rs", status: "M", plus: 18, minus: 3 },
+          ],
+        },
+        { path: "CONTEXT.md", name: "CONTEXT.md", status: "M", plus: 40, minus: 2 },
+      ],
+    };
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+      );
+    }
+    function sidebarToggleIcon() {
+      return `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+        <rect x="2" y="2.5" width="12" height="11" rx="1.5"/>
+        <path d="M6.5 2.5v11"/>
+      </svg>`;
+    }
+    function branchIcon() {
+      return `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+        <circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="8" r="1.5"/>
+        <path d="M4.5 5v5.5M4.5 8h5.5"/>
+      </svg>`;
+    }
+    function diffIcon() {
+      return `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+        <rect x="2" y="2.5" width="5" height="11" rx="1"/><rect x="9" y="2.5" width="5" height="11" rx="1"/>
+      </svg>`;
+    }
+    function plusIcon() {
+      return `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
+        <path d="M8 3.5v9M3.5 8h9"/>
+      </svg>`;
+    }
+
+    function repoRow(r) {
+      return `<div class="repo ${r.active ? "active" : ""}" data-repo="${esc(r.id)}">
+        <div class="name">${esc(r.name)}</div>
+        <div class="path truncate">${esc(r.path)}</div>
+      </div>`;
+    }
+
+    function fileCount(nodes) {
+      return nodes.reduce((n, x) => n + (x.kids ? fileCount(x.kids) : 1), 0);
+    }
+
+    function renderTree(nodes, open = true) {
+      return nodes
+        .map((n) => {
+          if (n.kids) {
+            return `<details ${open ? "open" : ""}>
+              <summary>
+                <span class="twisty">▶</span>
+                <span class="folder-name">${esc(n.name)}</span>
+              </summary>
+              <div class="folder-kids">${renderTree(n.kids, true)}</div>
+            </details>`;
+          }
+          const active = n.path === MOCK.selectedFile ? "active" : "";
+          return `<div class="leaf ${active}" data-file="${esc(n.path)}">
+            <span class="badge ${esc(n.status)}">${esc(n.status)}</span>
+            <span class="truncate">${esc(n.name)}</span>
+            <span class="stats"><span class="p">+${n.plus}</span><span class="m">−${n.minus}</span></span>
+          </div>`;
+        })
+        .join("");
+    }
+
+    function headMeta() {
+      const head = MOCK.commits.find((c) => c.sha === MOCK.comparison.head) || MOCK.commits[0];
+      const selected = MOCK.commits.filter((c) => c.inRange).length;
+      const range = selected > 1 ? ` · <span class="mono" style="color:var(--faint)">${esc(MOCK.comparison.label)}</span>` : "";
+      return `<div class="head-meta">
+        <div class="sum">${esc(head.msg)}</div>
+        <div class="meta">
+          <span class="hash" title="Copy full oid">${esc(head.sha)}</span>
+          <span>·</span>
+          <span class="truncate">${esc(head.author)}</span>
+          <span>·</span>
+          <span>${esc(head.time)}</span>${range}
+        </div>
+        <div class="body">${esc(head.body || "")}</div>
+      </div>`;
+    }
+
+    function render() {
+      const n = fileCount(MOCK.tree);
+      const desk = document.getElementById("desk");
+      desk.innerHTML = `
+        <div class="win">
+          <aside class="side ${MOCK.reposCollapsed ? "collapsed" : ""}">
+            <div class="side-chrome">
+              <div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+              <button type="button" class="icon-btn" data-act="toggle-repos" title="Hide sidebar">${sidebarToggleIcon()}</button>
+              <button type="button" class="icon-btn" title="Open Repo">${plusIcon()}</button>
+            </div>
+            <div class="side-body">
+              <div class="side-label">Recent</div>
+              ${repoRow(MOCK.recent)}
+              <div class="side-label">Pin</div>
+              ${MOCK.pins.map(repoRow).join("")}
+              <div class="side-label">Repositories</div>
+              ${MOCK.repos.map(repoRow).join("")}
+            </div>
+          </aside>
+
+          <section class="stage">
+            <div class="commits-chrome">
+              ${
+                MOCK.reposCollapsed
+                  ? `<div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+                     <button type="button" class="icon-btn" data-act="toggle-repos">${sidebarToggleIcon()}</button>
+                     <button type="button" class="icon-btn">${plusIcon()}</button>`
+                  : ""
+              }
+              <div class="branch-toggle" title="Branch picker">
+                ${branchIcon()}
+                <span>${esc(MOCK.branch)}</span>
+              </div>
+              <span class="cmp">${esc(MOCK.comparison.label)}</span>
+            </div>
+
+            <div class="commits">
+              ${MOCK.commits
+                .map(
+                  (c) => `
+                <div class="commit ${c.inRange ? "in-range" : ""}" data-sha="${esc(c.sha)}">
+                  <div class="msg truncate">${esc(c.msg)}</div>
+                  <div class="sub">${esc(c.sha)} · ${esc(c.author)} · ${esc(c.time)}</div>
+                </div>`
+                )
+                .join("")}
+            </div>
+
+            <!-- Floating Changes: through to top; no titlebar row -->
+            <aside class="changes">
+              <button type="button" class="icon-btn changes-open" data-act="open-diff" title="Open Diff">${diffIcon()}</button>
+              <div class="changes-label">Changes (${n})</div>
+              <div class="tree">${renderTree(MOCK.tree)}</div>
+              ${headMeta()}
+            </aside>
+          </section>
+        </div>`;
+
+      bind(desk);
+      document.getElementById("stateDump").textContent = JSON.stringify(
+        {
+          variant: "A (selected)",
+          tweaks: ["inset capsule + menu shadow", "through to top", "no Changes titlebar"],
+          mirrors: "current app_view: Recent/Pin/Repos, branch toggle, head-meta",
+          reposCollapsed: MOCK.reposCollapsed,
+          selectedFile: MOCK.selectedFile,
+          range: MOCK.commits.filter((c) => c.inRange).map((c) => c.sha),
+        },
+        null,
+        2
+      );
+    }
+
+    function bind(desk) {
+      desk.querySelectorAll("[data-act='toggle-repos']").forEach((el) =>
+        el.addEventListener("click", () => {
+          MOCK.reposCollapsed = !MOCK.reposCollapsed;
+          render();
+        })
+      );
+      desk.querySelectorAll("[data-act='open-diff']").forEach((el) =>
+        el.addEventListener("click", () => alert("PROTOTYPE: Open Diff"))
+      );
+      desk.querySelectorAll("[data-file]").forEach((el) =>
+        el.addEventListener("click", () => {
+          MOCK.selectedFile = el.getAttribute("data-file");
+          render();
+        })
+      );
+      desk.querySelectorAll("[data-repo]").forEach((el) =>
+        el.addEventListener("click", () => {
+          const id = el.getAttribute("data-repo");
+          [MOCK.recent, ...MOCK.pins, ...MOCK.repos].forEach((r) => {
+            if (r) r.active = r.id === id;
+          });
+          render();
+        })
+      );
+      desk.querySelectorAll("[data-sha]").forEach((el) =>
+        el.addEventListener("click", (e) => {
+          const sha = el.getAttribute("data-sha");
+          if (e.shiftKey) {
+            const idx = MOCK.commits.findIndex((c) => c.sha === sha);
+            const first = MOCK.commits.findIndex((c) => c.inRange);
+            const from = Math.min(first >= 0 ? first : idx, idx);
+            const to = Math.max(first >= 0 ? first : idx, idx);
+            MOCK.commits.forEach((c, i) => (c.inRange = i >= from && i <= to));
+          } else {
+            MOCK.commits.forEach((c) => (c.inRange = c.sha === sha));
+          }
+          const range = MOCK.commits.filter((c) => c.inRange);
+          if (range.length) {
+            MOCK.comparison.head = range[0].sha;
+            const last = range[range.length - 1];
+            const lastIdx = MOCK.commits.findIndex((c) => c.sha === last.sha);
+            MOCK.comparison.base =
+              lastIdx + 1 < MOCK.commits.length ? MOCK.commits[lastIdx + 1].sha : last.sha + "^";
+            MOCK.comparison.label = `${MOCK.comparison.base}..${MOCK.comparison.head}`;
+          }
+          render();
+        })
+      );
+    }
+
+    render();
+  </script>
+</body>
+</html>
