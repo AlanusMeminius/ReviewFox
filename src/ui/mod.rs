@@ -1,6 +1,7 @@
 mod app_view;
 mod diff_window;
 mod file_tree;
+mod scrollbar;
 mod splitter;
 mod theme;
 

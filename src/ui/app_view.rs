@@ -14,6 +14,7 @@ use crate::git::{self, BranchBrowser, BranchInfo, CommitInfo};
 use crate::workspace_store::{self, WorkspaceEntry, WorkspaceStore};
 use super::diff_window::{DiffSnapshot, DiffView};
 use super::file_tree::{self, TreeRow};
+use super::scrollbar;
 use super::splitter::{self, Axis, ResizeState};
 use super::theme;
 
@@ -572,25 +573,54 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
                         .window_control_area(WindowControlArea::Drag),
                 ),
         )
-        .child(
-            div()
-                .flex_1()
-                .px_2()
-                .pt_1()
-                .child(
-                    div()
-                        .px_2()
-                        .pb_1()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::faint())
-                        .child("Recent"),
-                )
-                .children(recent_row.into_iter().map(|(path, name, path_str, active)| {
-                    sidebar_repo_row("recent-repo", path, name, path_str, active, None, cx)
-                }))
-                .when_some(pin_section, |d, pinned_rows| {
-                    d.child(
+        .child({
+            let (scroll, sb) = scrollbar::vertical("sidebar-repos-sb", cx);
+            scrollbar::overlay_flex(
+                div()
+                    .id("sidebar-repos-scroll")
+                    .size_full()
+                    .px_2()
+                    .pt_1()
+                    .track_scroll(&scroll)
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .px_2()
+                            .pb_1()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme::faint())
+                            .child("Recent"),
+                    )
+                    .children(recent_row.into_iter().map(|(path, name, path_str, active)| {
+                        sidebar_repo_row("recent-repo", path, name, path_str, active, None, cx)
+                    }))
+                    .when_some(pin_section, |d, pinned_rows| {
+                        d.child(
+                            div()
+                                .px_2()
+                                .pt_1()
+                                .pb_1()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme::faint())
+                                .child("Pin"),
+                        )
+                        .children(pinned_rows.into_iter().enumerate().map(
+                            |(i, (path, name, path_str, active))| {
+                                sidebar_repo_row(
+                                    ("pin-repo", i),
+                                    path,
+                                    name,
+                                    path_str,
+                                    active,
+                                    Some(RepoMenuKind::Pin),
+                                    cx,
+                                )
+                            },
+                        ))
+                    })
+                    .child(
                         div()
                             .px_2()
                             .pt_1()
@@ -598,42 +628,22 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
                             .text_xs()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme::faint())
-                            .child("Pin"),
+                            .child("Repositories"),
                     )
-                    .children(pinned_rows.into_iter().enumerate().map(|(i, (path, name, path_str, active))| {
+                    .children(repos.into_iter().enumerate().map(|(i, (path, name, path_str, active))| {
                         sidebar_repo_row(
-                            ("pin-repo", i),
+                            ("repo", i),
                             path,
                             name,
                             path_str,
                             active,
-                            Some(RepoMenuKind::Pin),
+                            Some(RepoMenuKind::Repositories),
                             cx,
                         )
-                    }))
-                })
-                .child(
-                    div()
-                        .px_2()
-                        .pt_1()
-                        .pb_1()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::faint())
-                        .child("Repositories"),
-                )
-                .children(repos.into_iter().enumerate().map(|(i, (path, name, path_str, active))| {
-                    sidebar_repo_row(
-                        ("repo", i),
-                        path,
-                        name,
-                        path_str,
-                        active,
-                        Some(RepoMenuKind::Repositories),
-                        cx,
-                    )
-                })),
-        )
+                    })),
+                sb,
+            )
+        })
 }
 
 fn sidebar_repo_row(
@@ -816,60 +826,67 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                 .text_color(rgb(0xb42318))
                 .child(msg.clone())
                 .into_any_element(),
-            MainState::Ready(loaded) => div()
-                .id("commit-list")
-                .size_full()
-                .overflow_y_scroll()
-                .children(loaded.commits.iter().enumerate().map(|(i, commit)| {
-                    let in_range = loaded.in_range.get(i).copied().unwrap_or(false);
-                    let summary = commit.summary.clone();
-                    let meta = format!(
-                        "{} · {} · {}",
-                        commit.oid.short(),
-                        commit.author,
-                        commit.time_label
-                    );
+            MainState::Ready(loaded) => {
+                let (scroll, sb) = scrollbar::vertical("commit-list-sb", cx);
+                scrollbar::overlay_flex(
                     div()
-                        .id(("commit", i))
-                        .mx_2()
-                        .my_0p5()
-                        .px_3()
-                        .py_2()
-                        .rounded_lg()
-                        .cursor_pointer()
-                        .when(in_range, |d| d.bg(theme::range()))
-                        .hover(move |d| {
-                            if in_range {
-                                d.bg(theme::range())
-                            } else {
-                                d.bg(rgb(0xf6f8fb))
-                            }
-                        })
-                        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                            this.select_commit(i, event.modifiers().shift, cx);
-                        }))
-                        .child(
+                        .id("commit-list")
+                        .size_full()
+                        .track_scroll(&scroll)
+                        .overflow_y_scroll()
+                        .children(loaded.commits.iter().enumerate().map(|(i, commit)| {
+                            let in_range = loaded.in_range.get(i).copied().unwrap_or(false);
+                            let summary = commit.summary.clone();
+                            let meta = format!(
+                                "{} · {} · {}",
+                                commit.oid.short(),
+                                commit.author,
+                                commit.time_label
+                            );
                             div()
-                                .min_w(px(0.))
+                                .id(("commit", i))
+                                .mx_2()
+                                .my_0p5()
+                                .px_3()
+                                .py_2()
+                                .rounded_lg()
+                                .cursor_pointer()
+                                .when(in_range, |d| d.bg(theme::range()))
+                                .hover(move |d| {
+                                    if in_range {
+                                        d.bg(theme::range())
+                                    } else {
+                                        d.bg(rgb(0xf6f8fb))
+                                    }
+                                })
+                                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                                    this.select_commit(i, event.modifiers().shift, cx);
+                                }))
                                 .child(
                                     div()
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme::text())
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .child(summary),
+                                        .min_w(px(0.))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(gpui::FontWeight::MEDIUM)
+                                                .text_color(theme::text())
+                                                .overflow_hidden()
+                                                .text_ellipsis()
+                                                .child(summary),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_family(theme::MONO_FONT)
+                                                .text_xs()
+                                                .text_color(theme::muted())
+                                                .child(meta),
+                                        ),
                                 )
-                                .child(
-                                    div()
-                                        .font_family(theme::MONO_FONT)
-                                        .text_xs()
-                                        .text_color(theme::muted())
-                                        .child(meta),
-                                ),
-                        )
-                }))
-                .into_any_element(),
+                        })),
+                    sb,
+                )
+                .into_any_element()
+            }
         }))
         .when(view.branch_picker.is_some(), |d| {
             // Ponytail: last child paints last → popover above the commit list
@@ -878,20 +895,18 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
 }
 
 fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
-    let Some(picker) = &view.branch_picker else { return div().into_any_element(); };
+    let Some(picker) = &view.branch_picker else {
+        return div().into_any_element();
+    };
+    let (scroll, sb) = scrollbar::vertical("branch-picker-sb", cx);
     div()
         .id("branch-picker")
-        .child(div().px_2().py_1().text_xs().text_color(theme::muted()).child(format!("Filter: {}", picker.query)))
         .absolute()
         .top(theme::CHROME_HEIGHT)
         .left(px(4.))
         .w(px(320.))
-        .max_h(px(420.))
-        .overflow_y_scroll()
+        .h(px(420.))
         .p_1()
-        .flex()
-        .flex_col()
-        .gap_1()
         .bg(theme::white())
         .rounded_lg()
         .shadow_lg()
@@ -901,18 +916,60 @@ fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoE
             this.branch_picker = None;
             cx.notify();
         }))
-        .children(picker.matches.iter().enumerate().map(|(i, branch)| {
-            let name = branch.name.clone();
-            div().id(("branch", i)).px_3().py_2().rounded_md()
-                .cursor_pointer()
-                .when(i == picker.selected, |d| d.bg(theme::range()))
-                .hover(|d| d.bg(theme::hover()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_branch(&name, cx);
-                }))
-                .child(div().text_sm().text_color(theme::text()).overflow_hidden().text_ellipsis().child(branch.name.clone()))
-                .child(div().text_xs().text_color(theme::muted()).overflow_hidden().text_ellipsis().whitespace_nowrap().child(format!("{} · {} · {}", branch.tip.author, branch.tip.time_label, branch.tip.summary)))
-        })).into_any_element()
+        .child(scrollbar::overlay_box(
+            div()
+                .id("branch-picker-scroll")
+                .size_full()
+                .track_scroll(&scroll)
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .child(format!("Filter: {}", picker.query)),
+                )
+                .children(picker.matches.iter().enumerate().map(|(i, branch)| {
+                    let name = branch.name.clone();
+                    div()
+                        .id(("branch", i))
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when(i == picker.selected, |d| d.bg(theme::range()))
+                        .hover(|d| d.bg(theme::hover()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_branch(&name, cx);
+                        }))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme::text())
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(branch.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::muted())
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(format!(
+                                    "{} · {} · {}",
+                                    branch.tip.author, branch.tip.time_label, branch.tip.summary
+                                )),
+                        )
+                })),
+            sb,
+        ))
+        .into_any_element()
 }
 
 fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -953,14 +1010,16 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                 )
                 .child(open_diff_button(can_open, cx)),
         )
-        .child(
-            div()
-                .id("file-tree")
-                .flex_1()
-                .min_h(px(0.))
-                .px_1()
-                .overflow_y_scroll()
-                .children(rows.into_iter().enumerate().map(|(i, row)| match row {
+        .child({
+            let (scroll, sb) = scrollbar::vertical("file-tree-sb", cx);
+            scrollbar::overlay_flex(
+                div()
+                    .id("file-tree")
+                    .size_full()
+                    .px_1()
+                    .track_scroll(&scroll)
+                    .overflow_y_scroll()
+                    .children(rows.into_iter().enumerate().map(|(i, row)| match row {
                     TreeRow::Dir { depth, name, path } => {
                         let collapsed = view.collapsed_dirs.contains(&path);
                         let toggle_path = path.clone();
@@ -1081,7 +1140,9 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                             )
                     }
                 })),
-        )
+                sb,
+            )
+        })
         .when_some(head_meta, |d, meta| {
             d.child(splitter::handle(
                 "head-meta-resize-handle",
@@ -1169,16 +1230,18 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
                 }),
         )
         .when(has_body, |d| {
-            d.child(
+            let (scroll, sb) = scrollbar::vertical("head-meta-body-sb", cx);
+            d.child(scrollbar::overlay_flex(
                 div()
                     .id("head-meta-body")
-                    .flex_1()
-                    .min_h(px(0.))
+                    .size_full()
+                    .track_scroll(&scroll)
                     .overflow_y_scroll()
                     .text_xs()
                     .text_color(theme::muted())
                     .child(body),
-            )
+                sb,
+            ))
         })
 }
 

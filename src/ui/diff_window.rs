@@ -1,7 +1,7 @@
 use gpui::{
     App, ClipboardItem, Context, Div, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
-    WindowControlArea, div, prelude::*, px, rgb, svg,
+    KeyDownEvent, ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled,
+    Window, WindowControlArea, div, prelude::*, px, rgb, svg,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -10,6 +10,7 @@ use crate::domain::{ChangedPath, Comparison, DisplayRow, PathStatus, Review, Row
 use crate::export;
 use crate::git::{self, FileDiff};
 use super::file_tree::{self, TreeRow};
+use super::scrollbar::{self, Edge};
 use super::splitter::{self, Axis, ResizeState};
 use super::theme;
 
@@ -41,6 +42,8 @@ pub struct DiffView {
     collapsed_dirs: HashSet<String>,
     /// Reset collapsed_dirs when this no longer matches current ChangedPath list.
     tree_path_fingerprint: Vec<String>,
+    /// Gutter scroll handle (no overlay thumb); lockstep with L/R panes.
+    gutter_scroll: ScrollHandle,
 }
 
 impl DiffView {
@@ -57,6 +60,7 @@ impl DiffView {
             export_status: None,
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
+            gutter_scroll: ScrollHandle::new(),
         }
     }
 
@@ -232,6 +236,18 @@ impl Render for DiffView {
         };
         let show_tree_split = !self.tree_collapsed;
 
+        // Bind L / gutter / R so overlay thumb offset changes tick lockstep.
+        let (left_scroll, left_sb) =
+            scrollbar::vertical_on("diff-code-left-sb", Edge::Leading, cx);
+        let (right_scroll, right_sb) =
+            scrollbar::vertical_on("diff-code-right-sb", Edge::Trailing, cx);
+        let gutter_scroll = self.gutter_scroll.clone();
+        scrollbar::bind_lockstep(
+            [left_scroll, gutter_scroll, right_scroll],
+            [left_sb, right_sb],
+            cx,
+        );
+
         div()
             .id("diff")
             .size_full()
@@ -301,15 +317,17 @@ fn render_tree_pane(
                         .window_control_area(WindowControlArea::Drag),
                 ),
         )
-        .child(
-            div()
-                .id("diff-tree-body")
-                .flex_1()
-                .min_h(px(0.))
-                .px_1()
-                .pt_1()
-                .overflow_y_scroll()
-                .children(rows.into_iter().enumerate().map(|(i, row)| match row {
+        .child({
+            let (scroll, sb) = scrollbar::vertical("diff-tree-sb", cx);
+            scrollbar::overlay_flex(
+                div()
+                    .id("diff-tree-body")
+                    .size_full()
+                    .px_1()
+                    .pt_1()
+                    .track_scroll(&scroll)
+                    .overflow_y_scroll()
+                    .children(rows.into_iter().enumerate().map(|(i, row)| match row {
                     TreeRow::Dir { depth, name, path } => {
                         let collapsed = view.collapsed_dirs.contains(&path);
                         let toggle_path = path.clone();
@@ -443,7 +461,9 @@ fn render_tree_pane(
                             )
                     }
                 })),
-        )
+                sb,
+            )
+        })
 }
 
 fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
@@ -525,26 +545,57 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                 ),
         )
         .child(render_body(view, cx))
-        .child(render_comments(view))
+        .child(render_comments(view, cx))
         .child(render_draft_bar(view))
 }
 
 fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     match view.snapshot.as_ref().map(|s| &s.file) {
         Some(FileDiff::Text { rows, .. }) => {
-            // One scroll for L+gutter+R → lockstep sync (ADR 0003 intent).
+            let (left_scroll, left_sb) =
+                scrollbar::vertical_on("diff-code-left-sb", Edge::Leading, cx);
+            let (right_scroll, right_sb) =
+                scrollbar::vertical_on("diff-code-right-sb", Edge::Trailing, cx);
+            let gutter_scroll = view.gutter_scroll.clone();
+
+            // Per-pane scroll (ADR 0003); dual-heads row dropped on dev.
             div()
                 .id("diff-scroll")
                 .flex_1()
                 .min_h(px(0.))
-                .overflow_y_scroll()
+                .flex()
+                .overflow_hidden()
+                .child(scrollbar::overlay_flex(
+                    div()
+                        .id("code-left-scroll")
+                        .size_full()
+                        .track_scroll(&left_scroll)
+                        .overflow_y_scroll()
+                        .overflow_x_hidden()
+                        .child(code_pane(true, rows, view, cx)),
+                    left_sb,
+                ))
                 .child(
                     div()
-                        .flex()
-                        .child(code_pane(true, rows, view, cx))
-                        .child(center_gutter(rows))
-                        .child(code_pane(false, rows, view, cx)),
+                        .id("gutter-scroll")
+                        .w(theme::GUTTER_WIDTH)
+                        .flex_none()
+                        .h_full()
+                        .track_scroll(&gutter_scroll)
+                        // Prototype A: overflow hidden — scroll only via lockstep set_offset.
+                        .overflow_hidden()
+                        .child(center_gutter(rows)),
                 )
+                .child(scrollbar::overlay_flex(
+                    div()
+                        .id("code-right-scroll")
+                        .size_full()
+                        .track_scroll(&right_scroll)
+                        .overflow_y_scroll()
+                        .overflow_x_hidden()
+                        .child(code_pane(false, rows, view, cx)),
+                    right_sb,
+                ))
                 .into_any_element()
         }
         Some(FileDiff::Binary) => placeholder("Binary file — no Alignment"),
@@ -553,7 +604,7 @@ fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement 
     }
 }
 
-fn render_comments(view: &DiffView) -> impl IntoElement {
+fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     let path = view
         .snapshot
         .as_ref()
@@ -569,39 +620,48 @@ fn render_comments(view: &DiffView) -> impl IntoElement {
         return div().into_any_element();
     }
 
+    let (scroll, sb) = scrollbar::vertical("diff-comments-sb", cx);
     div()
         .flex_none()
         .max_h(px(160.))
-        .overflow_hidden()
         .border_t_1()
         .border_color(theme::line())
         .bg(rgb(0xfafbfd))
-        .px_3()
-        .py_2()
-        .gap_1()
-        .children(comments.into_iter().map(|c| {
-            let label = match &c.anchor {
-                crate::domain::Anchor::Line { side, span, .. } => {
-                    format!("{} L{} · ", side.label(), span.start)
-                }
-                crate::domain::Anchor::File { .. } => "file · ".into(),
-            };
+        .child(scrollbar::overlay_max(
+            px(160.),
             div()
-                .id(("cmt", c.id as usize))
-                .text_xs()
-                .child(
+                .id("diff-comments-scroll")
+                .w_full()
+                .max_h(px(160.))
+                .px_3()
+                .py_2()
+                .track_scroll(&scroll)
+                .overflow_y_scroll()
+                .children(comments.into_iter().map(|c| {
+                    let label = match &c.anchor {
+                        crate::domain::Anchor::Line { side, span, .. } => {
+                            format!("{} L{} · ", side.label(), span.start)
+                        }
+                        crate::domain::Anchor::File { .. } => "file · ".into(),
+                    };
                     div()
-                        .flex()
-                        .gap_1()
+                        .id(("cmt", c.id as usize))
+                        .text_xs()
                         .child(
                             div()
-                                .font_family(theme::MONO_FONT)
-                                .text_color(theme::faint())
-                                .child(label),
+                                .flex()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_family(theme::MONO_FONT)
+                                        .text_color(theme::faint())
+                                        .child(label),
+                                )
+                                .child(div().text_color(theme::text()).child(c.body)),
                         )
-                        .child(div().text_color(theme::text()).child(c.body)),
-                )
-        }))
+                })),
+            sb,
+        ))
         .into_any_element()
 }
 
@@ -666,8 +726,7 @@ fn code_pane(
 
     div()
         .id(id)
-        .flex_1()
-        .min_w(px(0.))
+        .w_full()
         .font_family(theme::MONO_FONT)
         .text_xs()
         .children(rows.into_iter().enumerate().map(move |(i, row)| {
