@@ -817,9 +817,10 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                         .child(label),
                 ),
         )
-        .child(div().flex_1().overflow_hidden().child(match &view.state {
-            MainState::Empty => div().into_any_element(),
+        .child(match &view.state {
+            MainState::Empty => div().flex_1().into_any_element(),
             MainState::Error(msg) => div()
+                .flex_1()
                 .px_3()
                 .py_3()
                 .text_sm()
@@ -828,6 +829,9 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                 .into_any_element(),
             MainState::Ready(loaded) => {
                 let (scroll, sb) = scrollbar::vertical("commit-list-sb", cx);
+                // Same shape as file-tree: overlay_flex must be a flex_col child so
+                // flex_1 gets a viewport height; nesting under a non-flex wrapper made
+                // the scroller grow with content → max_offset stayed 0 → no thumb.
                 scrollbar::overlay_flex(
                     div()
                         .id("commit-list")
@@ -887,7 +891,7 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                 )
                 .into_any_element()
             }
-        }))
+        })
         .when(view.branch_picker.is_some(), |d| {
             // Ponytail: last child paints last → popover above the commit list
             d.child(render_branch_picker(view, cx))
