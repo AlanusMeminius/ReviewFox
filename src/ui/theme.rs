@@ -37,8 +37,19 @@ pub fn line() -> Rgba {
 pub fn white() -> Rgba {
     rgb(0xffffff)
 }
+#[cfg(target_os = "macos")]
 pub fn sidebar() -> Rgba {
-    // ponytail: opaque stand-in for BeadsViewer frosted rgba; blur comes from window
+    // Clear so DIY NSVisualEffectView::Sidebar under the Metal view shows through.
+    Rgba {
+        r: 0.,
+        g: 0.,
+        b: 0.,
+        a: 0.,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn sidebar() -> Rgba {
     rgb(0xf4f5f7)
 }
 pub fn hover() -> Rgba {

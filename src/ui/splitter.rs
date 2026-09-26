@@ -33,6 +33,8 @@ pub const MAX_SIDEBAR_WIDTH: f32 = 360.;
 pub const MIN_COMMITS_WIDTH: f32 = 280.;
 pub const MIN_FILES_WIDTH: f32 = 200.;
 pub const MAX_FILES_WIDTH: f32 = 480.;
+/// Hit-target thickness for resize handles (ADR 0004).
+pub const HANDLE_WIDTH: f32 = 5.;
 /// Floor for Diff dual-pane (L|gutter|R) when clamping the file-tree column.
 pub const MIN_DIFF_CONTENT_WIDTH: f32 = 400.;
 
@@ -132,10 +134,23 @@ pub fn handle(
         );
 
     el = match axis {
-        Axis::HorizontalLeading | Axis::HorizontalTrailing => {
-            el.w(px(5.)).h_full().cursor_col_resize()
-        }
-        Axis::Vertical => el.h(px(5.)).w_full().cursor_row_resize(),
+        // Leading sits over column vibrancy on macOS — leave clear.
+        Axis::HorizontalLeading => el
+            .w(px(HANDLE_WIDTH))
+            .h_full()
+            .cursor_col_resize(),
+        // Trailing / vertical sit between white panes; fill so transparent
+        // window root doesn't punch through (macOS Sidebar frost path).
+        Axis::HorizontalTrailing => el
+            .w(px(HANDLE_WIDTH))
+            .h_full()
+            .bg(theme::white())
+            .cursor_col_resize(),
+        Axis::Vertical => el
+            .h(px(HANDLE_WIDTH))
+            .w_full()
+            .bg(theme::white())
+            .cursor_row_resize(),
     };
     el
 }

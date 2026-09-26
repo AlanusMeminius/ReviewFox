@@ -1,6 +1,8 @@
 mod app_view;
 mod diff_window;
 mod file_tree;
+#[cfg(target_os = "macos")]
+mod mac_column_vibrancy;
 mod scrollbar;
 mod splitter;
 mod theme;
@@ -105,12 +107,18 @@ fn traffic_light_position() -> Option<gpui::Point<gpui::Pixels>> {
     None
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn window_background_appearance() -> WindowBackgroundAppearance {
+#[cfg(target_os = "macos")]
+pub(crate) fn window_background_appearance() -> WindowBackgroundAppearance {
+    // Column frost is a DIY NSVisualEffectView; avoid full-window Blurred.
+    WindowBackgroundAppearance::Transparent
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn window_background_appearance() -> WindowBackgroundAppearance {
     WindowBackgroundAppearance::Blurred
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn window_background_appearance() -> WindowBackgroundAppearance {
+pub(crate) fn window_background_appearance() -> WindowBackgroundAppearance {
     WindowBackgroundAppearance::Opaque
 }

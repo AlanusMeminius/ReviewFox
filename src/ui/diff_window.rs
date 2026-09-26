@@ -10,6 +10,8 @@ use crate::domain::{ChangedPath, Comparison, DisplayRow, PathStatus, Review, Row
 use crate::export;
 use crate::git::{self, FileDiff};
 use super::file_tree::{self, TreeRow};
+#[cfg(target_os = "macos")]
+use super::mac_column_vibrancy::ColumnVibrancy;
 use super::scrollbar::{self, Edge};
 use super::splitter::{self, Axis, ResizeState};
 use super::theme;
@@ -44,6 +46,8 @@ pub struct DiffView {
     tree_path_fingerprint: Vec<String>,
     /// Gutter scroll handle (no overlay thumb); lockstep with L/R panes.
     gutter_scroll: ScrollHandle,
+    #[cfg(target_os = "macos")]
+    tree_vibrancy: Option<ColumnVibrancy>,
 }
 
 impl DiffView {
@@ -61,6 +65,8 @@ impl DiffView {
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
             gutter_scroll: ScrollHandle::new(),
+            #[cfg(target_os = "macos")]
+            tree_vibrancy: None,
         }
     }
 
@@ -227,7 +233,7 @@ impl Focusable for DiffView {
 }
 
 impl Render for DiffView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_collapsed_dirs();
         let tree_w = if self.tree_collapsed {
             px(0.)
@@ -235,6 +241,16 @@ impl Render for DiffView {
             px(self.tree_width)
         };
         let show_tree_split = !self.tree_collapsed;
+
+        #[cfg(target_os = "macos")]
+        {
+            let column_w = if self.tree_collapsed {
+                0.
+            } else {
+                self.tree_width
+            };
+            ColumnVibrancy::ensure_synced(&mut self.tree_vibrancy, window, column_w);
+        }
 
         // Bind L / gutter / R so overlay thumb offset changes tick lockstep.
         let (left_scroll, left_sb) =
@@ -253,7 +269,7 @@ impl Render for DiffView {
             .size_full()
             .flex()
             .overflow_hidden()
-            .bg(theme::white())
+            .when(cfg!(not(target_os = "macos")), |d| d.bg(theme::white()))
             .font_family(theme::UI_FONT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
