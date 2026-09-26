@@ -33,6 +33,8 @@ pub const MAX_SIDEBAR_WIDTH: f32 = 360.;
 pub const MIN_COMMITS_WIDTH: f32 = 280.;
 pub const MIN_FILES_WIDTH: f32 = 200.;
 pub const MAX_FILES_WIDTH: f32 = 480.;
+/// Floor for Diff dual-pane (L|gutter|R) when clamping the file-tree column.
+pub const MIN_DIFF_CONTENT_WIDTH: f32 = 400.;
 
 pub const DEFAULT_HEAD_META_HEIGHT: f32 = 120.;
 pub const MIN_HEAD_META_HEIGHT: f32 = 72.;
@@ -56,6 +58,13 @@ pub fn clamp_files_width(requested: f32, available: f32, sidebar_width: f32) -> 
     let maximum = MAX_FILES_WIDTH
         .min((available - sidebar_width - MIN_COMMITS_WIDTH).max(MIN_FILES_WIDTH));
     requested.clamp(MIN_FILES_WIDTH, maximum)
+}
+
+/// Diff window tree|dual only — same sidebar min/max, no main commits reservation.
+pub fn clamp_diff_tree_width(requested: f32, available: f32) -> f32 {
+    let maximum = MAX_SIDEBAR_WIDTH
+        .min((available - MIN_DIFF_CONTENT_WIDTH).max(MIN_SIDEBAR_WIDTH));
+    requested.clamp(MIN_SIDEBAR_WIDTH, maximum)
 }
 
 pub fn clamp_height(requested: f32, available: f32) -> f32 {
@@ -150,6 +159,15 @@ mod tests {
         assert_eq!(clamp_files_width(600., 1280., 220.), 480.);
         // 720 − 220 − 280 commits = 220 max
         assert_eq!(clamp_files_width(400., 720., 220.), 220.);
+    }
+
+    #[test]
+    fn diff_tree_clamp_keeps_dual_pane() {
+        assert_eq!(clamp_diff_tree_width(100., 1280.), 160.);
+        assert_eq!(clamp_diff_tree_width(200., 1280.), 200.);
+        assert_eq!(clamp_diff_tree_width(500., 1280.), 360.);
+        // 560 − 400 content = 160 max
+        assert_eq!(clamp_diff_tree_width(300., 560.), 160.);
     }
 
     #[test]

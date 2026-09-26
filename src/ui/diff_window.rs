@@ -4,11 +4,13 @@ use gpui::{
     WindowControlArea, div, prelude::*, px, rgb, svg,
 };
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use crate::domain::{ChangedPath, Comparison, DisplayRow, PathStatus, Review, RowKind, Side};
 use crate::export;
 use crate::git::{self, FileDiff};
 use super::file_tree::{self, TreeRow};
+use super::splitter::{self, Axis, ResizeState};
 use super::theme;
 
 /// Own snapshot for the Diff window — not a live shared model with main.
@@ -29,6 +31,8 @@ struct Drafting {
 pub struct DiffView {
     focus: FocusHandle,
     tree_collapsed: bool,
+    tree_width: f32,
+    tree_resize_state: Rc<ResizeState>,
     pub snapshot: Option<DiffSnapshot>,
     review: Option<Review>,
     drafting: Option<Drafting>,
@@ -45,6 +49,8 @@ impl DiffView {
         Self {
             focus: cx.focus_handle(),
             tree_collapsed: false,
+            tree_width: f32::from(theme::DIFF_TREE_WIDTH),
+            tree_resize_state: Rc::new(ResizeState::default()),
             snapshot: Some(snapshot),
             review: Some(review),
             drafting: None,
@@ -52,6 +58,21 @@ impl DiffView {
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
         }
+    }
+
+    fn tree_resize_handler(&self, cx: &Context<Self>) -> splitter::ResizeHandler {
+        let view = cx.entity().downgrade();
+        Rc::new(move |requested, window, cx: &mut App| {
+            view.update(cx, |this, cx| {
+                let available = f32::from(window.viewport_size().width);
+                let width = splitter::clamp_diff_tree_width(requested, available);
+                if this.tree_width != width {
+                    this.tree_width = width;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
     }
 
     fn sync_collapsed_dirs(&mut self) {
@@ -193,20 +214,6 @@ impl DiffView {
         cx.notify();
     }
 
-    fn side_labels(&self) -> (String, String) {
-        let Some(s) = &self.snapshot else {
-            return ("—".into(), "—".into());
-        };
-        let name = s
-            .selected_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(s.selected_path.as_str());
-        (
-            format!("{} · {}", name, s.comparison.base_oid.short()),
-            format!("{} · {}", name, s.comparison.head_oid.short()),
-        )
-    }
 }
 
 impl Focusable for DiffView {
@@ -221,8 +228,9 @@ impl Render for DiffView {
         let tree_w = if self.tree_collapsed {
             px(0.)
         } else {
-            theme::DIFF_TREE_WIDTH
+            px(self.tree_width)
         };
+        let show_tree_split = !self.tree_collapsed;
 
         div()
             .id("diff")
@@ -236,6 +244,14 @@ impl Render for DiffView {
                 this.handle_key(event, cx);
             }))
             .child(render_tree_pane(self, tree_w, cx))
+            .when(show_tree_split, |d| {
+                d.child(splitter::handle(
+                    "diff-tree-resize-handle",
+                    Axis::HorizontalLeading,
+                    self.tree_resize_handler(cx),
+                    self.tree_resize_state.clone(),
+                ))
+            })
             .child(render_dual_pane(self, cx))
     }
 }
@@ -276,7 +292,7 @@ fn render_tree_pane(
                 .pl(px(12.))
                 .pr_2()
                 .children(traffic_lights_space())
-                .child(toggle_button("diff-tree-toggle", cx))
+                .child(toggle_button("diff-tree-toggle", false, cx))
                 .child(
                     div()
                         .id("diff-drag-tree")
@@ -469,10 +485,13 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                 .flex()
                 .items_center()
                 .gap_2()
-                .px_3()
                 .when(view.tree_collapsed, |row| {
-                    row.child(toggle_button("diff-tree-toggle-collapsed", cx))
+                    row.pl(px(12.))
+                        .pr_3()
+                        .children(traffic_lights_space())
+                        .child(toggle_button("diff-tree-toggle-collapsed", true, cx))
                 })
+                .when(!view.tree_collapsed, |row| row.px_3())
                 .child(
                     div()
                         .flex_1()
@@ -490,27 +509,7 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                         .text_color(theme::muted())
                         .child(subtitle),
                 )
-                .child(
-                    div()
-                        .id("export")
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(theme::line())
-                        .cursor_pointer()
-                        .hover(|d| d.bg(theme::hover()))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.export_to_clipboard(cx);
-                        }))
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme::text())
-                                .child("Export"),
-                        ),
-                )
+                .child(export_button(cx))
                 .children(view.export_status.as_ref().map(|status| {
                     div()
                         .text_xs()
@@ -533,28 +532,18 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
 fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     match view.snapshot.as_ref().map(|s| &s.file) {
         Some(FileDiff::Text { rows, .. }) => {
-            let (left_head, right_head) = view.side_labels();
+            // One scroll for L+gutter+R → lockstep sync (ADR 0003 intent).
             div()
+                .id("diff-scroll")
                 .flex_1()
                 .min_h(px(0.))
-                .flex()
-                .flex_col()
-                .overflow_hidden()
-                .child(dual_heads(&left_head, &right_head))
-                // One scroll for L+gutter+R → lockstep sync (ADR 0003 intent).
+                .overflow_y_scroll()
                 .child(
                     div()
-                        .id("diff-scroll")
-                        .flex_1()
-                        .min_h(px(0.))
-                        .overflow_y_scroll()
-                        .child(
-                            div()
-                                .flex()
-                                .child(code_pane(true, rows, view, cx))
-                                .child(center_gutter(rows))
-                                .child(code_pane(false, rows, view, cx)),
-                        ),
+                        .flex()
+                        .child(code_pane(true, rows, view, cx))
+                        .child(center_gutter(rows))
+                        .child(code_pane(false, rows, view, cx)),
                 )
                 .into_any_element()
         }
@@ -562,51 +551,6 @@ fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement 
         Some(FileDiff::Error(msg)) => placeholder(msg),
         None => placeholder("Open Diff from the main window"),
     }
-}
-
-fn dual_heads(left: &str, right: &str) -> impl IntoElement {
-    div()
-        .flex_none()
-        .h(px(24.))
-        .flex()
-        .border_b_1()
-        .border_color(theme::line())
-        .bg(rgb(0xfafbfd))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .px_3()
-                .flex()
-                .items_center()
-                .font_family(theme::MONO_FONT)
-                .text_xs()
-                .text_color(theme::muted())
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(left.to_string()),
-        )
-        .child(
-            div()
-                .w(theme::GUTTER_WIDTH)
-                .flex_none()
-                .border_x_1()
-                .border_color(theme::line()),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .px_3()
-                .flex()
-                .items_center()
-                .font_family(theme::MONO_FONT)
-                .text_xs()
-                .text_color(theme::muted())
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(right.to_string()),
-        )
 }
 
 fn render_comments(view: &DiffView) -> impl IntoElement {
@@ -873,7 +817,52 @@ fn ln_col(left: bool, rows: Vec<DisplayRow>) -> impl IntoElement {
         }))
 }
 
-fn toggle_button(id: &'static str, cx: &mut Context<DiffView>) -> impl IntoElement {
+fn export_button(cx: &mut Context<DiffView>) -> impl IntoElement {
+    div()
+        .id("export")
+        .w(theme::TOGGLE_SIZE)
+        .h(theme::TOGGLE_SIZE)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .cursor_pointer()
+        .text_color(theme::muted())
+        .tooltip(|_, cx| cx.new(|_| ExportTooltip).into())
+        .hover(|button| button.bg(theme::hover()))
+        .active(|button| button.bg(rgb(0xdfe3e9)))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.export_to_clipboard(cx);
+        }))
+        .child(
+            svg()
+                .size_4()
+                .path("export.svg")
+                .text_color(theme::muted()),
+        )
+}
+
+struct ExportTooltip;
+
+impl Render for ExportTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(0x273142))
+            .text_xs()
+            .text_color(theme::white())
+            .child("Export")
+    }
+}
+
+fn toggle_button(
+    id: &'static str,
+    collapsed: bool,
+    cx: &mut Context<DiffView>,
+) -> impl IntoElement {
     div()
         .id(id)
         .w(theme::TOGGLE_SIZE)
@@ -883,8 +872,10 @@ fn toggle_button(id: &'static str, cx: &mut Context<DiffView>) -> impl IntoEleme
         .items_center()
         .justify_center()
         .rounded_md()
+        .when(collapsed, |button| button.bg(theme::range()))
         .cursor_pointer()
-        .hover(|d| d.bg(theme::hover()))
+        .hover(|button| button.bg(theme::hover()))
+        .active(|button| button.bg(rgb(0xdfe3e9)))
         .on_click(cx.listener(|this, _, _, cx| {
             this.tree_collapsed = !this.tree_collapsed;
             cx.notify();
