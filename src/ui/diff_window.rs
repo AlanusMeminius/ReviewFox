@@ -738,9 +738,6 @@ fn center_gutter(rows: &[DisplayRow]) -> impl IntoElement {
         .w(theme::GUTTER_WIDTH)
         .flex_none()
         .flex()
-        .border_x_1()
-        .border_color(theme::line())
-        .bg(rgb(0xf7f8fb))
         .child(ln_col(true, rows_l))
         .child(ribbon_col(ribbons))
         .child(ln_col(false, rows_r))
@@ -792,18 +789,12 @@ fn ln_col(left: bool, rows: Vec<DisplayRow>) -> impl IntoElement {
         .id(id)
         .flex_1()
         .font_family(theme::MONO_FONT)
-        .text_xs()
+        .text_size(px(10.))
         .text_color(theme::faint())
         .when(left, |d| d.text_right().pr_1())
         .when(!left, |d| d.pl_1())
         .children(rows.into_iter().enumerate().map(move |(i, row)| {
             let ln = if left { row.old_ln } else { row.new_ln };
-            let bg = match row.kind {
-                RowKind::Replace => theme::mod_bg(),
-                RowKind::Insert if !left => theme::add_bg(),
-                RowKind::Delete if left => theme::del_bg(),
-                _ => rgb(0xf7f8fb),
-            };
             let ln_id = if left {
                 ("ln-l", i)
             } else {
@@ -812,7 +803,6 @@ fn ln_col(left: bool, rows: Vec<DisplayRow>) -> impl IntoElement {
             div()
                 .id(ln_id)
                 .h(theme::ROW_HEIGHT)
-                .bg(bg)
                 .child(ln.map(|n| n.to_string()).unwrap_or_default())
         }))
 }
