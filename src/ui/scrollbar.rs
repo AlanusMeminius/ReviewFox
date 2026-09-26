@@ -106,11 +106,18 @@ pub fn sync_lockstep(handles: &[&ScrollHandle], last_y: &mut Option<Pixels>) {
         return;
     }
     let ys: Vec<_> = handles.iter().map(|h| h.offset().y).collect();
-    let driver_y = ys
-        .iter()
-        .copied()
-        .find(|&y| Some(y) != *last_y)
-        .unwrap_or(ys[0]);
+    let driver_y = match *last_y {
+        // First observation: never prefer "handle[0] at 0" over a pane that already moved.
+        None => ys
+            .iter()
+            .copied()
+            .find(|&y| y != px(0.))
+            .unwrap_or(ys[0]),
+        Some(last) => match ys.iter().copied().find(|&y| y != last) {
+            Some(y) => y,
+            None => return,
+        },
+    };
     if Some(driver_y) == *last_y {
         return;
     }
@@ -147,13 +154,17 @@ pub fn bind_lockstep(
     });
 }
 
-/// Run when any overlay thumb sees its tracked offset change (wheel / drag).
-fn tick_lockstep(cx: &mut App) {
+/// Run when a Diff L/R overlay thumb sees its tracked offset change (wheel / drag).
+fn tick_lockstep(from: &Entity<VerticalScrollbar>, cx: &mut App) {
     if !cx.has_global::<Lockstep>() {
         return;
     }
-    let handles = cx.global::<Lockstep>().handles.clone();
     let thumbs = cx.global::<Lockstep>().thumbs.clone();
+    // Commit-list / tree thumbs also call reveal on scroll — ignore them here.
+    if !thumbs.iter().any(|t| t == from) {
+        return;
+    }
+    let handles = cx.global::<Lockstep>().handles.clone();
     let mut last_y = cx.global::<Lockstep>().last_y;
     let before = last_y;
     sync_lockstep(&[&handles[0], &handles[1], &handles[2]], &mut last_y);
@@ -162,7 +173,9 @@ fn tick_lockstep(cx: &mut App) {
         return;
     }
     for thumb in &thumbs {
-        thumb.update(cx, |_, cx| cx.notify());
+        if thumb != from {
+            thumb.update(cx, |_, cx| cx.notify());
+        }
     }
 }
 
@@ -235,14 +248,22 @@ impl VerticalScrollbar {
 impl Render for VerticalScrollbar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(geom) = ThumbGeom::compute(&self.handle) else {
-            return div().into_any_element();
+            // Stay out of layout / hit-testing so the scroll child receives the wheel.
+            return div()
+                .absolute()
+                .top(px(0.))
+                .left(px(0.))
+                .w(px(0.))
+                .h(px(0.))
+                .into_any_element();
         };
 
         let offset = self.handle.offset_y();
         if self.last_offset != Some(offset) {
             self.last_offset = Some(offset);
             self.reveal(cx);
-            tick_lockstep(cx);
+            let entity = cx.entity();
+            tick_lockstep(&entity, cx);
         } else if self.visible
             && self.hide_task.is_none()
             && !self.hovered
@@ -476,5 +497,38 @@ mod tests {
     #[test]
     fn peer_offset_zero_driver_max() {
         assert_eq!(peer_offset(px(-10.), px(0.), px(100.)), px(0.));
+    }
+
+    #[test]
+    fn sync_lockstep_keeps_right_scroll_when_last_y_unset() {
+        // Bug: old code treated left@0 as the driver whenever last_y was None,
+        // wiping a right-pane wheel scroll back to 0.
+        let left = ScrollHandle::new();
+        let gutter = ScrollHandle::new();
+        let right = ScrollHandle::new();
+        right.set_offset(point(px(0.), px(-80.)));
+        let mut last_y = None;
+        sync_lockstep(&[&left, &gutter, &right], &mut last_y);
+        assert_eq!(right.offset().y, px(-80.));
+        assert_eq!(left.offset().y, px(-80.));
+        assert_eq!(gutter.offset().y, px(-80.));
+        assert_eq!(last_y, Some(px(-80.)));
+    }
+
+    #[test]
+    fn sync_lockstep_follows_whichever_pane_moved() {
+        let left = ScrollHandle::new();
+        let gutter = ScrollHandle::new();
+        let right = ScrollHandle::new();
+        let mut last_y = Some(px(0.));
+        left.set_offset(point(px(0.), px(-40.)));
+        sync_lockstep(&[&left, &gutter, &right], &mut last_y);
+        assert_eq!(right.offset().y, px(-40.));
+        assert_eq!(last_y, Some(px(-40.)));
+
+        right.set_offset(point(px(0.), px(-90.)));
+        sync_lockstep(&[&left, &gutter, &right], &mut last_y);
+        assert_eq!(left.offset().y, px(-90.));
+        assert_eq!(gutter.offset().y, px(-90.));
     }
 }
