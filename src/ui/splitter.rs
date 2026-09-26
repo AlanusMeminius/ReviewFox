@@ -1,0 +1,186 @@
+//! Dual-axis pane resize: BeadsViewer interaction shell, Zed row-height semantics.
+//! See `docs/adr/0004-dual-axis-splitter.md`.
+
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui::{
+    App, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Size, Window,
+    canvas, div, prelude::*, px,
+};
+
+use super::theme;
+
+pub type ResizeHandler = Rc<dyn Fn(f32, &mut Window, &mut App)>;
+
+#[derive(Default)]
+pub struct ResizeState {
+    active: Cell<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    /// Vertical rule; size = pointer x (leading column width).
+    HorizontalLeading,
+    /// Vertical rule; size = viewport.width − x (trailing column width).
+    HorizontalTrailing,
+    /// Horizontal rule; size = viewport.height − y (south pane height).
+    Vertical,
+}
+
+pub const MIN_SIDEBAR_WIDTH: f32 = 160.;
+pub const MAX_SIDEBAR_WIDTH: f32 = 360.;
+pub const MIN_COMMITS_WIDTH: f32 = 280.;
+pub const MIN_FILES_WIDTH: f32 = 200.;
+pub const MAX_FILES_WIDTH: f32 = 480.;
+
+pub const DEFAULT_HEAD_META_HEIGHT: f32 = 120.;
+pub const MIN_HEAD_META_HEIGHT: f32 = 72.;
+pub const MIN_FILE_TREE_HEIGHT: f32 = 100.;
+
+pub fn default_sidebar_width() -> f32 {
+    f32::from(theme::SIDEBAR_WIDTH)
+}
+
+pub fn default_files_width() -> f32 {
+    f32::from(theme::FILES_WIDTH)
+}
+
+pub fn clamp_sidebar_width(requested: f32, available: f32, files_width: f32) -> f32 {
+    let maximum = MAX_SIDEBAR_WIDTH
+        .min((available - files_width - MIN_COMMITS_WIDTH).max(MIN_SIDEBAR_WIDTH));
+    requested.clamp(MIN_SIDEBAR_WIDTH, maximum)
+}
+
+pub fn clamp_files_width(requested: f32, available: f32, sidebar_width: f32) -> f32 {
+    let maximum = MAX_FILES_WIDTH
+        .min((available - sidebar_width - MIN_COMMITS_WIDTH).max(MIN_FILES_WIDTH));
+    requested.clamp(MIN_FILES_WIDTH, maximum)
+}
+
+pub fn clamp_height(requested: f32, available: f32) -> f32 {
+    let max_by_pct = available * 0.4;
+    let max_by_tree = (available - MIN_FILE_TREE_HEIGHT).max(MIN_HEAD_META_HEIGHT);
+    let maximum = max_by_pct.min(max_by_tree);
+    requested.clamp(MIN_HEAD_META_HEIGHT, maximum)
+}
+
+/// Map pointer → raw pane size in window space (handlers re-clamp with sibling widths).
+/// Vertical is clamped here (no sibling). Not `window.bounds()` — that is screen-global.
+pub fn size_at_pointer(axis: Axis, position: Point<Pixels>, viewport: Size<Pixels>) -> f32 {
+    match axis {
+        Axis::HorizontalLeading => f32::from(position.x),
+        Axis::HorizontalTrailing => f32::from(viewport.width - position.x),
+        Axis::Vertical => clamp_height(
+            f32::from(viewport.height - position.y),
+            f32::from(viewport.height),
+        ),
+    }
+}
+
+pub fn handle(
+    id: &'static str,
+    axis: Axis,
+    on_resize: ResizeHandler,
+    resize_state: Rc<ResizeState>,
+) -> impl IntoElement {
+    let down_state = resize_state.clone();
+    let move_state = resize_state.clone();
+    let up_state = resize_state;
+    let mut el = div()
+        .id(id)
+        .flex_none()
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    let down_state = down_state.clone();
+                    window.on_mouse_event(move |event: &MouseDownEvent, _, _, _| {
+                        if event.button == MouseButton::Left && bounds.contains(&event.position) {
+                            down_state.active.set(true);
+                        }
+                    });
+
+                    let move_state = move_state.clone();
+                    let on_resize = on_resize.clone();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, _, window, cx| {
+                        if !move_state.active.get() {
+                            return;
+                        }
+                        let size = size_at_pointer(axis, event.position, window.viewport_size());
+                        on_resize(size, window, cx);
+                    });
+
+                    let up_state = up_state.clone();
+                    window.on_mouse_event(move |event: &MouseUpEvent, _, _, _| {
+                        if event.button == MouseButton::Left {
+                            up_state.active.set(false);
+                        }
+                    });
+                },
+            )
+            .size_full(),
+        );
+
+    el = match axis {
+        Axis::HorizontalLeading | Axis::HorizontalTrailing => {
+            el.w(px(5.)).h_full().cursor_col_resize()
+        }
+        Axis::Vertical => el.h(px(5.)).w_full().cursor_row_resize(),
+    };
+    el
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_clamp_keeps_commits_and_files() {
+        assert_eq!(clamp_sidebar_width(100., 1280., 280.), 160.);
+        assert_eq!(clamp_sidebar_width(220., 1280., 280.), 220.);
+        assert_eq!(clamp_sidebar_width(500., 1280., 280.), 360.);
+        assert_eq!(clamp_sidebar_width(220., 720., 280.), 160.);
+    }
+
+    #[test]
+    fn files_clamp_keeps_commits_and_sidebar() {
+        assert_eq!(clamp_files_width(100., 1280., 220.), 200.);
+        assert_eq!(clamp_files_width(280., 1280., 220.), 280.);
+        assert_eq!(clamp_files_width(600., 1280., 220.), 480.);
+        // 720 − 220 − 280 commits = 220 max
+        assert_eq!(clamp_files_width(400., 720., 220.), 220.);
+    }
+
+    #[test]
+    fn height_clamp_keeps_tree_and_pct_cap() {
+        assert_eq!(clamp_height(40., 800.), 72.);
+        assert_eq!(clamp_height(120., 800.), 120.);
+        assert_eq!(clamp_height(400., 800.), 320.);
+        assert_eq!(clamp_height(150., 200.), 80.);
+    }
+
+    #[test]
+    fn trailing_size_is_distance_to_viewport_right() {
+        use gpui::{point, px, size};
+        let viewport = size(px(1280.), px(800.));
+        let at_files_edge = point(px(1000.), px(400.));
+        assert_eq!(
+            size_at_pointer(Axis::HorizontalTrailing, at_files_edge, viewport),
+            280.
+        );
+    }
+
+    #[test]
+    fn vertical_size_uses_viewport_not_screen_origin() {
+        use gpui::{point, px, size};
+
+        let viewport = size(px(1280.), px(800.));
+        let at_handle = point(px(1000.), px(680.));
+        assert_eq!(size_at_pointer(Axis::Vertical, at_handle, viewport), 120.);
+        let screen_origin_y = 200.;
+        let poisoned = (screen_origin_y + 800.) - 680.;
+        assert!(poisoned > 120.);
+        assert_ne!(clamp_height(poisoned, 800.), 120.);
+    }
+}
