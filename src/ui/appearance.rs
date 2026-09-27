@@ -56,7 +56,6 @@ fn default_code_font(installed: &[String]) -> &'static str {
 }
 
 /// Installed font names, read once at startup; what [`update`] resolves against.
-#[allow(dead_code)] // Read only by `update`.
 struct InstalledFonts(Vec<String>);
 
 impl Global for InstalledFonts {}
@@ -74,7 +73,6 @@ pub fn init(cx: &mut App) {
 /// Apply `edit` to `settings.json`, save it, and replace the Global when the
 /// resolved result changed. Observers of [`Appearance`] hear about it. A
 /// refused save still applies live, for this session only.
-#[allow(dead_code)] // No Settings page edits fonts yet.
 pub fn update(cx: &mut App, edit: impl FnOnce(&mut SettingsFile)) {
     let mut file = settings_store::load_file();
     edit(&mut file);

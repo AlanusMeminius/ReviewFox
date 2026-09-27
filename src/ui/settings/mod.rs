@@ -6,6 +6,7 @@ mod button;
 mod configured_card;
 mod nav;
 mod nav_tree;
+mod number_field;
 mod section_header;
 mod setting_row;
 mod token_row;
@@ -13,6 +14,7 @@ mod window;
 
 pub use button::{Button, ButtonSize, ButtonStyle};
 pub use configured_card::ConfiguredCard;
+pub use number_field::{NumberField, NumberFieldEvent};
 pub use section_header::SectionHeader;
 pub use setting_row::SettingRow;
 pub use window::{init, key_bindings, open_or_focus_settings};

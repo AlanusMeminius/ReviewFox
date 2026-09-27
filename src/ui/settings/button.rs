@@ -108,6 +108,7 @@ pub struct Button {
     small_label: bool,
     tooltip: Option<SharedString>,
     tab_index: Option<isize>,
+    disabled: bool,
     on_click: Option<ClickHandler>,
 }
 
@@ -132,6 +133,7 @@ impl Button {
             small_label: false,
             tooltip: None,
             tab_index: None,
+            disabled: false,
             on_click: None,
         }
     }
@@ -178,6 +180,12 @@ impl Button {
         self
     }
 
+    /// Faint, no hover, and [`Self::on_click`] never runs.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
     pub fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -192,7 +200,15 @@ impl RenderOnce for Button {
         let colors = self.style.colors();
         let height = self.size.height();
         let icon_only = self.label.is_none();
-        let icon_color = self.icon_color.unwrap_or_else(|| theme::muted().into());
+        let (text_color, icon_color): (Hsla, Hsla) = if self.disabled {
+            (theme::faint().into(), theme::faint().into())
+        } else {
+            (
+                theme::text().into(),
+                self.icon_color.unwrap_or_else(|| theme::muted().into()),
+            )
+        };
+        let on_click = self.on_click.filter(|_| !self.disabled);
 
         div()
             .id(self.id)
@@ -215,9 +231,12 @@ impl RenderOnce for Button {
             .bg(colors.background)
             .font_family(appearance::ui_font(cx))
             .ui_text_size(if self.small_label { 12. } else { 14. }, cx)
-            .text_color(theme::text())
-            .hover(|button| button.bg(colors.hover))
-            .active(|button| button.bg(colors.active))
+            .text_color(text_color)
+            .when(!self.disabled, |button| {
+                button
+                    .hover(|button| button.bg(colors.hover))
+                    .active(|button| button.bg(colors.active))
+            })
             .when_some(self.tab_index, |button, index| {
                 button
                     .tab_index(index)
@@ -226,7 +245,7 @@ impl RenderOnce for Button {
             .when_some(self.tooltip, |button, text| {
                 button.tooltip(move |_, cx| cx.new(|_| Tooltip(text.clone())).into())
             })
-            .when_some(self.on_click, |button, handler| {
+            .when_some(on_click, |button, handler| {
                 button
                     .cursor_pointer()
                     .on_click(move |event, window, cx| handler(event, window, cx))

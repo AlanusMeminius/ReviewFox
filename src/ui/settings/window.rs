@@ -12,14 +12,19 @@ use crate::settings_store::{self, DEFAULT_BASE_URL};
 
 use super::nav::{NavItem, SettingsNav};
 use super::nav_tree::{NavEntry, NavPage, NavState};
+use super::number_field;
 use super::token_row::{self, CardStatus, KeychainError, TokenRow};
-use super::{Button, ButtonSize, ButtonStyle, ConfiguredCard, SectionHeader, SettingRow};
+use super::{
+    Button, ButtonSize, ButtonStyle, ConfiguredCard, NumberField, NumberFieldEvent, SectionHeader,
+    SettingRow,
+};
+use crate::domain::DiffFontSize;
 use crate::ui::gitlab_connection::{self, GitLabConnection};
 #[cfg(target_os = "macos")]
 use crate::ui::mac_column_vibrancy::ColumnVibrancy;
 use crate::ui::scrollbar;
 use crate::ui::text_field::{TextField, TextFieldEvent, TextFieldStyle};
-use crate::ui::appearance::{self, UiTextSize};
+use crate::ui::appearance::{self, Appearance, UiTextSize};
 use crate::ui::theme;
 use crate::ui::window_controls::window_controls;
 
@@ -47,15 +52,26 @@ const CLOSE_KEY: &str = "cmd-w";
 #[cfg(not(target_os = "macos"))]
 const CLOSE_KEY: &str = "ctrl-w";
 
-/// Tab order: nav, GitLab URL, then the token input or the token card's buttons.
+/// Tab order: nav, GitLab URL, then the token input or the token card's buttons
+/// (up to two), then the font sizes. Only the selected page's controls render,
+/// so each page tabs through its own.
 const TAB_NAV: isize = 0;
 const TAB_URL: isize = 1;
 const TAB_TOKEN: isize = 2;
+const TAB_UI_FONT_SIZE: isize = 4;
+const TAB_CODE_FONT_SIZE: isize = 5;
 
 const URL_TITLE: &str = "GitLab URL";
 const URL_DESCRIPTION: &str = "Your self-hosted GitLab address. Leave empty for gitlab.com.";
 const URL_PLACEHOLDER: &str = "https://gitlab.com";
 const RESET_TO_DEFAULT: &str = "Reset to Default";
+
+const UI_FONT_PREVIEW: &[&str] = &[
+    "The quick brown fox jumps over the lazy dog",
+    "敏捷的棕色狐狸跳过了懒狗",
+    "0123456789",
+];
+const CODE_FONT_PREVIEW: &[&str] = &["fn main() { let 名称 = \"你好，世界\"; }", "0O o 1lI |"];
 
 /// Settings-window bindings, scoped to [`CONTEXT`] / [`NAV_CONTEXT`].
 pub fn key_bindings() -> Vec<KeyBinding> {
@@ -69,28 +85,40 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("right", NavExpand, Some(NAV_CONTEXT)),
         KeyBinding::new("left", NavCollapse, Some(NAV_CONTEXT)),
     ]
+    .into_iter()
+    .chain(number_field::key_bindings())
+    .collect()
 }
 
 /// Level-2 nav entries; each renders one block of its page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Section {
     GitLab,
+    Fonts,
 }
 
 impl Section {
     fn title(self) -> &'static str {
         match self {
             Section::GitLab => "GitLab",
+            Section::Fonts => "Fonts",
         }
     }
 }
 
 /// The nav tree. A new page or section is a new entry here plus its render arm.
-const PAGES: &[NavPage<Section>] = &[NavPage {
-    title: "Accounts",
-    sections: &[Section::GitLab],
-    expanded: true,
-}];
+const PAGES: &[NavPage<Section>] = &[
+    NavPage {
+        title: "Accounts",
+        sections: &[Section::GitLab],
+        expanded: true,
+    },
+    NavPage {
+        title: "Appearance",
+        sections: &[Section::Fonts],
+        expanded: true,
+    },
+];
 
 /// The nav entry of `section`.
 fn nav_entry(section: Section) -> NavEntry {
@@ -117,6 +145,8 @@ pub struct SettingsView {
     has_saved_token: bool,
     keychain_error: Option<KeychainError>,
     gitlab_connection: Rc<RefCell<GitLabConnection>>,
+    ui_font_size: Entity<NumberField>,
+    code_font_size: Entity<NumberField>,
     nav_focus: FocusHandle,
     nav: NavState,
     /// Last nav interaction came from the keyboard: show the focus border.
@@ -148,6 +178,28 @@ impl SettingsView {
         });
         let has_saved_token = settings_store::load_pat().is_some_and(|p| !p.trim().is_empty());
 
+        let appearance = cx.global::<Appearance>().clone();
+        let ui_font_size = cx.new(|cx| {
+            NumberField::new(
+                "settings-ui-font-size-field",
+                appearance.ui_font_size,
+                appearance::UI_FONT_SIZE_MIN..=appearance::UI_FONT_SIZE_MAX,
+                TAB_UI_FONT_SIZE,
+                window,
+                cx,
+            )
+        });
+        let code_font_size = cx.new(|cx| {
+            NumberField::new(
+                "settings-code-font-size-field",
+                appearance.code_font_size,
+                DiffFontSize::MIN..=DiffFontSize::MAX,
+                TAB_CODE_FONT_SIZE,
+                window,
+                cx,
+            )
+        });
+
         let base_url_focus = base_url.read(cx).focus_handle(cx);
         let subscriptions = vec![
             cx.subscribe(&base_url, |view, _, event: &TextFieldEvent, cx| match event {
@@ -158,6 +210,18 @@ impl SettingsView {
             cx.subscribe(&pat, |view, _, event: &TextFieldEvent, cx| match event {
                 TextFieldEvent::Confirm => view.commit_token(cx),
             }),
+            cx.subscribe(&ui_font_size, |_, _, event: &NumberFieldEvent, cx| match *event {
+                NumberFieldEvent::Change(size) => {
+                    appearance::update(cx, |file| file.ui_font_size = Some(size as f32))
+                }
+            }),
+            cx.subscribe(&code_font_size, |_, _, event: &NumberFieldEvent, cx| match *event {
+                NumberFieldEvent::Change(size) => {
+                    appearance::update(cx, |file| file.code_font_size = Some(size as f32))
+                }
+            }),
+            // Resets (and any other outside change) re-sync the size fields.
+            cx.observe_global::<Appearance>(|view, cx| view.sync_font_sizes(cx)),
         ];
 
         // The scroll handle lives in a global registry and outlives the window.
@@ -172,6 +236,8 @@ impl SettingsView {
             has_saved_token,
             keychain_error: None,
             gitlab_connection,
+            ui_font_size,
+            code_font_size,
             nav_focus: cx.focus_handle().tab_index(TAB_NAV).tab_stop(true),
             nav: NavState::new(PAGES),
             nav_keyboard: false,
@@ -227,6 +293,14 @@ impl SettingsView {
         self.base_url
             .update(cx, |field, cx| field.set_content(DEFAULT_BASE_URL, cx));
         self.commit_base_url(cx);
+    }
+
+    fn sync_font_sizes(&mut self, cx: &mut Context<Self>) {
+        let appearance = cx.global::<Appearance>().clone();
+        self.ui_font_size
+            .update(cx, |field, cx| field.set_value(appearance.ui_font_size, cx));
+        self.code_font_size
+            .update(cx, |field, cx| field.set_value(appearance.code_font_size, cx));
     }
 
     /// Enter in the token field: store it (whatever verify later says), then verify.
@@ -410,6 +484,7 @@ impl SettingsView {
                     .child(SectionHeader::new(section.title()))
                     .child(match section {
                         Section::GitLab => self.render_gitlab_section(cx),
+                        Section::Fonts => self.render_fonts_section(cx),
                     })
             })
             .collect();
@@ -554,6 +629,120 @@ impl SettingsView {
             )
             .child(token_row::DESCRIPTION_AFTER_LINK)
     }
+}
+
+// Appearance › Fonts.
+impl SettingsView {
+    /// Two groups, each a heading, its rows and a preview. Ticket 04's Family
+    /// row goes above Size in each group.
+    fn render_fonts_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let appearance = cx.global::<Appearance>();
+        let (ui_size, code_size) = (appearance.ui_font_size, appearance.code_font_size);
+        let ui_font = appearance.ui_font.name.clone();
+        let code_font = appearance.code_font.name.clone();
+
+        let ui_preview = font_preview(UI_FONT_PREVIEW)
+            .font_family(ui_font)
+            .ui_text_size(13., cx);
+        let code_preview = font_preview(CODE_FONT_PREVIEW)
+            .font_family(code_font)
+            .text_size(px(code_size as f32));
+
+        div()
+            .flex()
+            .flex_col()
+            .child(font_group(
+                "UI Font",
+                vec![self.render_size_row(
+                    "settings-ui-font-size",
+                    ui_size != appearance::UI_FONT_SIZE_DEFAULT,
+                    self.ui_font_size.clone(),
+                    |file| file.ui_font_size = None,
+                    cx,
+                )],
+                ui_preview,
+                false,
+                cx,
+            ))
+            .child(font_group(
+                "Code Font",
+                vec![self.render_size_row(
+                    "settings-code-font-size",
+                    code_size != DiffFontSize::DEFAULT,
+                    self.code_font_size.clone(),
+                    |file| file.code_font_size = None,
+                    cx,
+                )],
+                code_preview,
+                true,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// `Size` row; Reset to Default removes the field from `settings.json`.
+    fn render_size_row(
+        &self,
+        id: &'static str,
+        non_default: bool,
+        field: Entity<NumberField>,
+        reset: fn(&mut settings_store::SettingsFile),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        SettingRow::new(id, "Size")
+            .when(non_default, |row| {
+                row.title_action(
+                    Button::icon_only(ElementId::Name(format!("{id}-reset").into()), "undo.svg")
+                        .tooltip(RESET_TO_DEFAULT)
+                        .on_click(cx.listener(move |_, _, _, cx| appearance::update(cx, reset))),
+                )
+            })
+            .control(field)
+            .into_any_element()
+    }
+}
+
+/// A font group: heading, rows (each with its divider), then the preview. The
+/// section's last group ends with the 40px section bottom padding.
+fn font_group(
+    title: &'static str,
+    rows: Vec<AnyElement>,
+    preview: gpui::Div,
+    last: bool,
+    cx: &App,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .pt(px(24.))
+                .ui_text_size(14., cx)
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme::text())
+                .child(title),
+        )
+        .children(rows)
+        .child(
+            div()
+                .pt(px(16.))
+                .pb(px(if last { 40. } else { 16. }))
+                .child(preview),
+        )
+}
+
+/// Preview lines in a quiet box; the caller sets the family and size.
+fn font_preview(lines: &'static [&'static str]) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .p(px(12.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme::border_variant())
+        .text_color(theme::text())
+        .children(lines.iter().map(|&line| div().child(line)))
 }
 
 /// Bare drag band across the window: no title text (the page title already
