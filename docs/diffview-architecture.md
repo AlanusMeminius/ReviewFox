@@ -44,7 +44,7 @@ Computed lazily per Replace block the first time it becomes visible, memoized on
 - `scroll_s` is the **only** vertical scroll source. Wheel / trackpad (incl. momentum), scrollbar drag, hunk jump, match jump, anchor restore after fold all write `scroll_s`. No native `ScrollHandle` on the panes; `applied_*`, `scroll_nudge` go away.
 - `scroll_s` is clamped to `Viewport::s_range()`: lower bound = first `s` where either side's top leaves 0; upper bound = first `s` where both sides sit at their max. Outside that range the picture is identical, so clamping changes nothing visible and removes the dead zone.
 - Each side's top is snapped to device pixels; bridge endpoints follow.
-- Horizontal: per-side `x_offset`, independent, driven only by horizontal input over that pane (shift+wheel / trackpad X).
+- Horizontal: per-side `x_offset`, independent, driven only by horizontal input over that pane (shift+wheel / trackpad X). One axis per wheel event (`viewport::route_wheel`: shift with no X maps Y→X, else the dominant axis wins), so a horizontal swipe never moves `scroll_s`. Bound: `0..=max_x`, where the widest line is the whole side's longest shown line (chars × mono advance, raised by any wider shaped line seen), so it does not jump while scrolling. Only code text and word marks shift; row backgrounds, comment bars, line numbers, gutter, gaps, seams, waves and scrollbars stay. Reset on file open; kept and re-clamped on fold, Alignment, font size and resize.
 - Scrollbars are painted by the element: old on the outer left, new on the outer right (ADR-0003). Dragging a side's thumb maps that side's content position back to `scroll_s`; the other side follows §3.1. Styling reuses `scrollbar.rs` theme constants, not its lockstep.
 
 ## 5. Entities and data flow

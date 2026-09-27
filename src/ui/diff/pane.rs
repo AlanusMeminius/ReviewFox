@@ -6,7 +6,7 @@
 use gpui::{
     AnyElement, AnyView, App, Bounds, Context, Element, ElementId, Entity, EventEmitter,
     GlobalElementId, InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Position,
-    Render, Style, StyleRefinement, Styled, Task, Timer, Window, div,
+    Render, Style, StyleRefinement, Styled, Task, Timer, Window, div, font, px,
 };
 use std::cell::Cell;
 use std::rc::Rc;
@@ -20,7 +20,7 @@ use crate::git::FileDiff;
 use crate::ui::{scrollbar, theme};
 use super::element::{
     self, BarState, Decorations, FrameInput, Geom, ShapeCache, build_frame, insert_hitboxes,
-    line_number_digits, ln_col_width, thumb_for, top_at,
+    line_number_digits, ln_col_width, text_extent, thumb_for, top_at,
 };
 use super::layout::{HunkLand, Layout, Row};
 use super::viewport::{self, Viewport};
@@ -58,6 +58,18 @@ pub struct DualPane {
     /// source. See docs/dual-pane-diff.md §3.1. Kept inside
     /// `viewport::s_range` from the first measured frame on.
     scroll_s: f32,
+    /// Per-side horizontal scroll of the code text, in pixels, `[old, new]`.
+    /// Independent of each other and of `scroll_s`; moved only by horizontal
+    /// input over that pane. Reset on file open, kept (re-clamped) on fold,
+    /// Alignment, font size and resize.
+    x_offsets: [f32; 2],
+    /// Horizontal travel per side from the last prepaint (`0..=max_x`).
+    max_x: [f32; 2],
+    /// Widest shaped line seen per side since the last Layout rebuild / font
+    /// change. Only grows, so the bound never shrinks while scrolling.
+    widest_seen: [f32; 2],
+    /// Mono advance of `'0'` at `(font px, advance)`.
+    mono_advance: Option<(f32, f32)>,
     /// Element height, set in prepaint. 0 until the first frame.
     view_h: f32,
     /// Device pixels per logical pixel, from the last prepaint.
@@ -89,6 +101,10 @@ impl DualPane {
             comments: Vec::new(),
             drafting: None,
             scroll_s: 0.,
+            x_offsets: [0.; 2],
+            max_x: [0.; 2],
+            widest_seen: [0.; 2],
+            mono_advance: None,
             view_h: 0.,
             scale: 1.,
             hover_copy: None,
@@ -120,6 +136,7 @@ impl DualPane {
         self.set_hunk_index(None, cx);
         self.hunk_s = Some(0.);
         self.reset_scroll(cx);
+        self.x_offsets = [0.; 2];
         self.rebuild_layout();
         self.reveal_bars(cx);
         cx.notify();
@@ -178,6 +195,7 @@ impl DualPane {
     fn rebuild_layout(&mut self) {
         self.layout = None;
         self.shapes.clear();
+        self.widest_seen = [0.; 2];
         let Some(file) = self.file.as_ref() else {
             return;
         };
@@ -328,6 +346,7 @@ impl DualPane {
 
     pub fn set_font_size(&mut self, op: FontOp, cx: &mut Context<Self>) {
         let prev = self.row_h();
+        let prev_px = self.font_size.px() as f32;
         match op {
             FontOp::Inc => self.font_size.increase(),
             FontOp::Dec => self.font_size.decrease(),
@@ -337,6 +356,14 @@ impl DualPane {
         if prev > 0. {
             self.scroll_s *= next / prev;
         }
+        // Keep the same columns in view; the next prepaint re-clamps.
+        let next_px = self.font_size.px() as f32;
+        if prev_px > 0. {
+            for x in &mut self.x_offsets {
+                *x *= next_px / prev_px;
+            }
+        }
+        self.widest_seen = [0.; 2];
         self.shapes.clear();
         cx.notify();
     }
@@ -365,6 +392,34 @@ impl DualPane {
         self.sync_hunk_index(cx);
         self.reveal_bars(cx);
         cx.notify();
+    }
+
+    /// Horizontal wheel / trackpad over `side`'s code pane: move that side's
+    /// `x_offset` only. `scroll_s` and the other side stay put.
+    pub(super) fn scroll_x_by(&mut self, side: Side, dx: f32, cx: &mut Context<Self>) {
+        let ix = side_ix(side);
+        let x = viewport::clamp_x(self.x_offsets[ix] + dx, self.max_x[ix]);
+        if x != self.x_offsets[ix] {
+            self.x_offsets[ix] = x;
+            cx.notify();
+        }
+    }
+
+    /// Advance of one mono char at `font_px`, cached per size.
+    fn mono_advance(&mut self, font_px: f32, window: &Window) -> f32 {
+        if let Some((at, advance)) = self.mono_advance
+            && at == font_px
+        {
+            return advance;
+        }
+        let text = window.text_system();
+        let id = text.resolve_font(&font(theme::MONO_FONT));
+        let advance = text
+            .advance(id, px(font_px), '0')
+            .map(|s| f32::from(s.width))
+            .unwrap_or(font_px * 0.6);
+        self.mono_advance = Some((font_px, advance));
+        advance
     }
 
     /// Show both scrollbars and (re)arm the idle hide timer.
@@ -526,6 +581,7 @@ impl DualPane {
         self.view_h = f32::from(bounds.size.height);
         let row_h = self.row_h();
         let font_px = self.font_size.px() as f32;
+        let advance = self.mono_advance(font_px, window);
         let layout = self.layout.as_ref()?;
         let vp = Viewport::new(layout, self.scroll_s, self.view_h, row_h).snapped(self.scale);
         let s = vp.s();
@@ -533,7 +589,7 @@ impl DualPane {
         let tracks = [Side::Old, Side::New]
             .map(|side| thumb_for(self.view_h, vp.max_top(side), vp.top(side)).is_some());
         let hitboxes = insert_hitboxes(&geom, tracks, window);
-        let frame = build_frame(
+        let mut frame = build_frame(
             FrameInput {
                 layout,
                 vp: &vp,
@@ -550,6 +606,19 @@ impl DualPane {
             hitboxes,
             window,
         );
+        // Horizontal bound per side: the whole side's longest shown line,
+        // estimated as chars × mono advance (no shaping off screen), raised
+        // by any wider line actually shaped. Re-clamp here so resize, fold
+        // and font changes pull an offset back inside its travel.
+        for side in [Side::Old, Side::New] {
+            let ix = side_ix(side);
+            self.widest_seen[ix] = self.widest_seen[ix].max(frame.widest(side));
+            let longest = (layout.side(side).max_chars() as f32 * advance).max(self.widest_seen[ix]);
+            let pane_w = f32::from(geom.pane(side).size.width);
+            self.max_x[ix] = viewport::max_x(text_extent(longest), pane_w);
+            self.x_offsets[ix] = viewport::clamp_x(self.x_offsets[ix], self.max_x[ix]);
+            frame.set_x_offset(side, viewport::snap(self.x_offsets[ix], self.scale));
+        }
         let index = nearest_hunk_index(self.hunk_s.unwrap_or(s / row_h), &layout.hunk_lands);
         // A new view_h can re-clamp `scroll_s`.
         self.scroll_s = s;

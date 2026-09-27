@@ -492,6 +492,35 @@ fn empty_seam(other_n: usize, view_h: f32, row_h: f32) -> f32 {
     ((other_n as f32 - 1.) * row_h).min(anchor)
 }
 
+/// One wheel / trackpad event split into (horizontal, vertical) travel, in
+/// pixels, positive = right / down. Exactly one axis moves per event:
+///
+/// - Shift with no X delta maps the vertical delta to horizontal (a plain
+///   mouse wheel; Windows already delivers shift+wheel as X).
+/// - Otherwise the dominant axis wins and the other is dropped, so a mostly
+///   horizontal trackpad swipe does not also nudge `scroll_s`, and a mostly
+///   vertical one does not drift sideways. A tie goes to vertical.
+pub fn route_wheel(dx: f32, dy: f32, shift: bool) -> (f32, f32) {
+    if shift && dx == 0. {
+        (dy, 0.)
+    } else if dx.abs() > dy.abs() {
+        (dx, 0.)
+    } else {
+        (0., dy)
+    }
+}
+
+/// Horizontal travel of one code pane: how far its text (from the pane's inner
+/// edge to the end of the widest line, padding included) overflows the pane.
+pub fn max_x(text_extent: f32, pane_w: f32) -> f32 {
+    (text_extent - pane_w).max(0.)
+}
+
+/// Keep a side's `x_offset` inside `0..=max`.
+pub fn clamp_x(x: f32, max: f32) -> f32 {
+    x.clamp(0., max.max(0.))
+}
+
 /// Round logical pixel `v` to the device pixel grid at `scale`.
 pub fn snap(v: f32, scale: f32) -> f32 {
     if scale <= 0. {
@@ -961,5 +990,42 @@ mod tests {
             }
             assert!(vp.omit_links().len() <= 5);
         }
+    }
+
+    #[test]
+    fn wheel_routes_to_one_axis() {
+        // (dx, dy, shift) -> (h, v)
+        let cases = [
+            ((0., 30., false), (0., 30.)),
+            ((40., 0., false), (40., 0.)),
+            ((-40., 3., false), (-40., 0.)),
+            ((2., -25., false), (0., -25.)),
+            ((10., 10., false), (0., 10.)),
+            ((0., 30., true), (30., 0.)),
+            ((0., -30., true), (-30., 0.)),
+            // Windows: shift+wheel already arrives as X.
+            ((45., 0., true), (45., 0.)),
+            ((0., 0., false), (0., 0.)),
+        ];
+        for ((dx, dy, shift), want) in cases {
+            assert_eq!(route_wheel(dx, dy, shift), want, "dx {dx} dy {dy} shift {shift}");
+        }
+    }
+
+    #[test]
+    fn x_travel_is_the_overflow_of_the_widest_line() {
+        assert_eq!(max_x(900., 400.), 500.);
+        assert_eq!(max_x(300., 400.), 0.);
+        assert_eq!(max_x(0., 0.), 0.);
+    }
+
+    #[test]
+    fn x_offset_clamps_to_the_travel() {
+        assert_eq!(clamp_x(-5., 100.), 0.);
+        assert_eq!(clamp_x(50., 100.), 50.);
+        assert_eq!(clamp_x(250., 100.), 100.);
+        // A pane that grew past its text snaps back to the start.
+        assert_eq!(clamp_x(80., 0.), 0.);
+        assert_eq!(clamp_x(80., -3.), 0.);
     }
 }

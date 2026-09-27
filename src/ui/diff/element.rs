@@ -17,7 +17,7 @@ use gpui::{
 
 use super::layout::{Layout, LineKind, Row};
 use super::pane::DualPane;
-use super::viewport::{Viewport, snap};
+use super::viewport::{Viewport, route_wheel, snap};
 use crate::domain::Side;
 use crate::ui::scrollbar::{self, ThumbGeom};
 use crate::ui::theme;
@@ -145,6 +145,12 @@ pub(super) fn top_at(geom: &ThumbGeom, thumb_top: f32) -> f32 {
     -f32::from(geom.offset_for(px(thumb_top)))
 }
 
+/// Width a code pane needs to show a line `line_w` wide without clipping:
+/// inset, comment bar room, the text, and the same inset after it.
+pub(super) fn text_extent(line_w: f32) -> f32 {
+    TEXT_PAD + COMMENT_BAR + line_w + TEXT_PAD
+}
+
 pub(super) fn line_number_digits(layout: &Layout) -> u32 {
     let mut digits = 0u32;
     let mut n = layout.max_line_number().max(1);
@@ -180,6 +186,11 @@ struct SideFrame {
     seams: Vec<(f32, bool)>,
     empty_seam: Option<f32>,
     thumb: Option<Thumb>,
+    /// Widest shaped text among this frame's rows.
+    widest: f32,
+    /// Horizontal scroll of the code text, device-pixel snapped. Set after
+    /// the frame is built, once `widest` has fed the clamp.
+    x_offset: f32,
 }
 
 struct Thumb {
@@ -254,6 +265,7 @@ pub(super) fn build_frame(
             .drafting
             .and_then(|(s, ln)| (s == side).then_some(ln));
         let mut out = Vec::with_capacity(visible.len());
+        let mut widest = 0f32;
         for i in visible {
             let Some(row) = rows.row(i) else { continue };
             let shape = shapes
@@ -276,6 +288,9 @@ pub(super) fn build_frame(
                 Row::Omit(_) => (None, false, false, Vec::new()),
             };
             let kind_bg = kind_bg(kind);
+            if let Some(text) = &shape.text {
+                widest = widest.max(f32::from(text.width));
+            }
             out.push(RowPaint {
                 y0: y_of(i),
                 y1: y_of(i + 1),
@@ -317,6 +332,8 @@ pub(super) fn build_frame(
                 .is_empty()
                 .then(|| snap(top + vp.empty_seam(side), scale)),
             thumb,
+            widest,
+            x_offset: 0.,
         }
     });
     shapes.retain(&keep);
@@ -444,6 +461,15 @@ fn hline(x0: f32, x1: f32, y: f32, h: f32) -> Bounds<Pixels> {
 }
 
 impl Frame {
+    pub(super) fn widest(&self, side: Side) -> f32 {
+        self.sides[side_ix(side)].widest
+    }
+
+    /// Code text / word mark shift for `side` (already clamped and snapped).
+    pub(super) fn set_x_offset(&mut self, side: Side, x: f32) {
+        self.sides[side_ix(side)].x_offset = x;
+    }
+
     fn paint(&self, window: &mut Window, cx: &mut App) {
         let geom = self.geom;
         window.paint_quad(fill(geom.bounds, theme::white()));
@@ -475,15 +501,15 @@ impl Frame {
         let (x0, x1) = (f32::from(pane.left()), f32::from(pane.right()));
         let row_h = px(self.row_h);
         let mark_h = (self.row_h - 1.).max(1.);
+        // Clipped to the code pane: text scrolled left slides under the pane
+        // edge (and the gutter never sees it).
         window.with_content_mask(Some(ContentMask { bounds: pane }), |window| {
             for row in &frame.rows {
+                // Row backgrounds span the pane and do not scroll; text and
+                // word marks move by the side's `x_offset`.
                 window.paint_quad(fill(hline(x0, x1, row.y0, row.y1 - row.y0), row.bg));
-                let mut text_x = x0 + TEXT_PAD;
+                let mut text_x = x0 + TEXT_PAD - frame.x_offset;
                 if row.commented {
-                    window.paint_quad(fill(
-                        hline(x0, x0 + COMMENT_BAR, row.y0, row.y1 - row.y0),
-                        theme::accent(),
-                    ));
                     text_x += COMMENT_BAR;
                 }
                 for &(a, b) in &row.marks {
@@ -492,6 +518,13 @@ impl Frame {
                 }
                 if let Some(text) = &row.text {
                     text.paint(point(px(text_x), px(row.y0)), row_h, window, cx).ok();
+                }
+                // Row marker, pinned to the pane edge above scrolled text.
+                if row.commented {
+                    window.paint_quad(fill(
+                        hline(x0, x0 + COMMENT_BAR, row.y0, row.y1 - row.y0),
+                        theme::accent(),
+                    ));
                 }
             }
             paint_gaps(window, pane, &frame.gaps);
@@ -864,15 +897,27 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
 
     let entity = pane.clone();
     let wheel_hitbox = hitbox.clone();
+    let wheel_code = code.clone();
     window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
         if phase != DispatchPhase::Bubble || !wheel_hitbox.should_handle_scroll(window) {
             return;
         }
         let delta = event.delta.pixel_delta(window.line_height());
-        // AppKit scrollingDeltaY is negative when the user scrolls down.
-        let dy = -f32::from(delta.y);
+        // Deltas are negative when the user scrolls down / right (AppKit
+        // scrollingDelta, Windows wheel); flip to "content moves" signs.
+        let (dx, dy) = route_wheel(-f32::from(delta.x), -f32::from(delta.y), event.modifiers.shift);
         if dy != 0. {
             entity.update(cx, |pane, cx| pane.scroll_by(dy, cx));
+            cx.stop_propagation();
+        } else if dx != 0. {
+            // Horizontal input moves only the pane under the pointer; over
+            // the gutter it does nothing.
+            let side = [Side::Old, Side::New]
+                .into_iter()
+                .find(|&side| wheel_code[side_ix(side)].is_hovered(window));
+            if let Some(side) = side {
+                entity.update(cx, |pane, cx| pane.scroll_x_by(side, dx, cx));
+            }
             cx.stop_propagation();
         }
     });

@@ -172,6 +172,8 @@ pub struct SideLayout {
     seams: Vec<u32>,
     /// Line numbers with a DraftComment on this side.
     commented: HashSet<u32>,
+    /// Longest shown line in chars, computed on first use (bounds `x_offset`).
+    max_chars: OnceCell<usize>,
 }
 
 impl SideLayout {
@@ -182,6 +184,7 @@ impl SideLayout {
             omits: Vec::new(),
             seams: Vec::new(),
             commented: HashSet::new(),
+            max_chars: OnceCell::new(),
         }
     }
 
@@ -205,6 +208,19 @@ impl SideLayout {
 
     pub fn text(&self, line: &LineRow) -> &str {
         &self.text[line.bytes.clone()]
+    }
+
+    /// Char count of the longest shown line (folded-away lines excluded).
+    /// One pass over the side's text the first time it is asked; with a mono
+    /// advance it estimates the side's widest line without shaping it.
+    pub fn max_chars(&self) -> usize {
+        *self.max_chars.get_or_init(|| {
+            self.lines
+                .iter()
+                .map(|l| self.text(l).chars().count())
+                .max()
+                .unwrap_or(0)
+        })
     }
 
     /// What occupies visual row `i`.
@@ -610,6 +626,35 @@ pub(crate) mod tests {
                 Row::Omit(o) => format!("~{} {}-{}", o.id, o.from, o.to),
             })
             .collect()
+    }
+
+    #[test]
+    fn max_chars_is_the_longest_shown_line_per_side() {
+        let layout = build(
+            "ab
+longer line
+c
+",
+            "ab
+xyzw
+c
+",
+            vec![
+                eq(1, 1, 1),
+                AlignmentOp::Replace {
+                    olds: span(2, 1),
+                    news: span(2, 1),
+                },
+                eq(3, 3, 1),
+            ],
+            None,
+        );
+        assert_eq!(layout.old.max_chars(), 11);
+        assert_eq!(layout.new.max_chars(), 4);
+        let empty = build("", "é€x
+", vec![AlignmentOp::Insert { after_old: 0, news: span(1, 1) }], None);
+        assert_eq!(empty.old.max_chars(), 0);
+        assert_eq!(empty.new.max_chars(), 3);
     }
 
     #[test]
