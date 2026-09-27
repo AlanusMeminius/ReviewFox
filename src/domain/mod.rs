@@ -481,6 +481,122 @@ pub fn split_lines(text: &str) -> Vec<&str> {
     }
 }
 
+/// One token (or whitespace / punctuation run) inside a Replace line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenPart {
+    pub text: String,
+    pub changed: bool,
+}
+
+/// Intra-line marks for a Replace block. Same-line (1↔1) uses LCS token
+/// pairing; many-to-many uses set membership and does not invent row links.
+pub fn replace_marks(olds: &[&str], news: &[&str]) -> (Vec<Vec<TokenPart>>, Vec<Vec<TokenPart>>) {
+    if olds.len() == 1 && news.len() == 1 {
+        let (o, n) = pair_marks(olds[0], news[0]);
+        (vec![o], vec![n])
+    } else {
+        (block_marks(olds, news), block_marks(news, olds))
+    }
+}
+
+fn tokenize(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let bytes = s.as_bytes();
+    while start < bytes.len() {
+        let rest = &s[start..];
+        let end = if rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+            rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len())
+        } else if rest.starts_with(char::is_whitespace) {
+            rest.find(|c: char| !c.is_whitespace()).unwrap_or(rest.len())
+        } else {
+            rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1)
+        };
+        out.push(&s[start..start + end]);
+        start += end;
+    }
+    if out.is_empty() {
+        out.push(s);
+    }
+    out
+}
+
+fn pair_marks(old_text: &str, new_text: &str) -> (Vec<TokenPart>, Vec<TokenPart>) {
+    let a = tokenize(old_text);
+    let b = tokenize(new_text);
+    let ca = lcs_changed(&a, &b);
+    let cb = lcs_changed(&b, &a);
+    let old = a
+        .into_iter()
+        .zip(ca)
+        .map(|(t, chg)| TokenPart {
+            text: t.to_string(),
+            changed: chg && !t.trim().is_empty(),
+        })
+        .collect();
+    let neu = b
+        .into_iter()
+        .zip(cb)
+        .map(|(t, chg)| TokenPart {
+            text: t.to_string(),
+            changed: chg && !t.trim().is_empty(),
+        })
+        .collect();
+    (old, neu)
+}
+
+fn block_marks(lines: &[&str], other_lines: &[&str]) -> Vec<Vec<TokenPart>> {
+    let other: std::collections::HashSet<&str> = other_lines
+        .iter()
+        .flat_map(|line| tokenize(line))
+        .filter(|t| !t.trim().is_empty())
+        .collect();
+    lines
+        .iter()
+        .map(|line| {
+            tokenize(line)
+                .into_iter()
+                .map(|t| TokenPart {
+                    text: t.to_string(),
+                    changed: !t.trim().is_empty() && !other.contains(t),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Which tokens in `a` are not in an LCS with `b` (prototype `lcsChanged`).
+fn lcs_changed(a: &[&str], b: &[&str]) -> Vec<bool> {
+    let n = a.len();
+    let m = b.len();
+    let mut dp = vec![vec![0u16; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if a[i] == b[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let mut changed = vec![true; n];
+    let mut i = 0;
+    let mut j = 0;
+    while i < n && j < m {
+        if a[i] == b[j] {
+            changed[i] = false;
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    changed
+}
+
 fn line_text(lines: &[&str], ln: u32) -> String {
     lines
         .get(ln.saturating_sub(1) as usize)
@@ -1407,6 +1523,77 @@ mod tests {
                 side: Side::Old,
                 ln: 2,
             }
+        );
+    }
+
+    #[test]
+    fn same_line_replace_marks_differing_tokens() {
+        let (old_marks, new_marks) =
+            replace_marks(&["int timeoutMs = 10;"], &["int timeoutMs = 40;"]);
+        assert_eq!(old_marks.len(), 1);
+        assert_eq!(new_marks.len(), 1);
+        let old_changed: Vec<&str> = old_marks[0]
+            .iter()
+            .filter(|p| p.changed)
+            .map(|p| p.text.as_str())
+            .collect();
+        let new_changed: Vec<&str> = new_marks[0]
+            .iter()
+            .filter(|p| p.changed)
+            .map(|p| p.text.as_str())
+            .collect();
+        assert_eq!(old_changed, vec!["10"]);
+        assert_eq!(new_changed, vec!["40"]);
+        // Unchanged tokens stay unmarked.
+        assert!(
+            old_marks[0]
+                .iter()
+                .any(|p| p.text == "timeoutMs" && !p.changed)
+        );
+        assert!(
+            new_marks[0]
+                .iter()
+                .any(|p| p.text == "timeoutMs" && !p.changed)
+        );
+    }
+
+    #[test]
+    fn many_to_many_replace_marks_keep_block_first_rows() {
+        let olds = ["old-a", "old-b", "old-c"];
+        let news = ["new-a"];
+        let display = display_rows(
+            "old-a\nold-b\nold-c\n",
+            "new-a\n",
+            &Alignment {
+                ops: vec![AlignmentOp::Replace {
+                    olds: LineSpan { start: 1, count: 3 },
+                    news: LineSpan { start: 1, count: 1 },
+                }],
+            },
+        );
+        assert_eq!(display.old_rows.len(), 3);
+        assert_eq!(display.new_rows.len(), 1);
+        assert_eq!(display.bridges.len(), 1);
+        assert!(matches!(display.bridges[0], Bridge::Replace { .. }));
+
+        let (old_marks, new_marks) = replace_marks(&olds, &news);
+        assert_eq!(old_marks.len(), 3, "one mark row per old line — no padding");
+        assert_eq!(new_marks.len(), 1, "one mark row per new line — no partner invented");
+        // Block marks flag tokens absent from the other side; shared "-" / "a" stay unmarked.
+        let old_changed: Vec<&str> = old_marks
+            .iter()
+            .flat_map(|line| line.iter())
+            .filter(|p| p.changed)
+            .map(|p| p.text.as_str())
+            .collect();
+        assert_eq!(old_changed, vec!["old", "old", "b", "old", "c"]);
+        assert_eq!(
+            new_marks[0]
+                .iter()
+                .filter(|p| p.changed)
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new"]
         );
     }
 }

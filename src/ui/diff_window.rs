@@ -9,7 +9,8 @@ use std::rc::Rc;
 
 use crate::domain::{
     Bridge, ChangedPath, Comparison, DisplayRow, DisplayRows, FoldState, HunkJumpTarget,
-    PathStatus, Review, RowKind, ScrollKnot, Side, display_rows_folded, hunk_jump_target,
+    PathStatus, Review, RowKind, ScrollKnot, Side, TokenPart, ViewOptions, display_rows_folded,
+    hunk_jump_target, replace_marks,
 };
 
 const LN_COL: f32 = 32.;
@@ -67,6 +68,8 @@ pub struct DiffView {
     fold: FoldState,
     /// 0-based index of the Hunk at / nearest the viewport; drives chrome.
     hunk_index: Option<usize>,
+    /// Diff-computation knobs; does not change Comparison identity.
+    view_options: ViewOptions,
 }
 
 struct HoverBand {
@@ -116,7 +119,39 @@ impl DiffView {
             new_gaps: Vec::new(),
             fold: FoldState::collapsed(),
             hunk_index: None,
+            view_options: ViewOptions::default(),
         }
+    }
+
+    fn recompute_alignment(&mut self) {
+        let opts = self.view_options.clone();
+        let fold = self.fold.clone();
+        let Some(snap) = self.snapshot.as_mut() else {
+            return;
+        };
+        let FileDiff::Text {
+            display,
+            hunk_count,
+            alignment,
+            old_text,
+            new_text,
+        } = &mut snap.file
+        else {
+            return;
+        };
+        *alignment = git::compute_alignment(old_text, new_text, &opts);
+        *hunk_count = alignment.hunks().len();
+        *display = display_rows_folded(old_text, new_text, alignment, &fold);
+        self.hunk_index = None;
+    }
+
+    fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
+        self.view_options.ignore_whitespace = !self.view_options.ignore_whitespace;
+        self.with_anchor(|this| {
+            this.fold = FoldState::collapsed();
+            this.recompute_alignment();
+        });
+        cx.notify();
     }
 
     fn reset_scroll(&mut self) {
@@ -378,6 +413,7 @@ impl DiffView {
                 current.file = incoming.file;
                 self.reset_fold();
                 self.reset_scroll();
+                self.recompute_alignment();
             }
             _ => {
                 self.review = Some(Review::new(incoming.comparison.clone()));
@@ -386,11 +422,13 @@ impl DiffView {
                 self.snapshot = Some(incoming);
                 self.reset_fold();
                 self.reset_scroll();
+                self.recompute_alignment();
             }
         }
     }
 
     fn select_path(&mut self, path: String) {
+        let opts = self.view_options.clone();
         let Some(snap) = &mut self.snapshot else {
             return;
         };
@@ -403,7 +441,7 @@ impl DiffView {
             .find(|p| p.path == path)
             .map(|p| p.status)
             .unwrap_or(PathStatus::Modify);
-        let file = git::file_diff(&snap.comparison, &path, status, &Default::default());
+        let file = git::file_diff(&snap.comparison, &path, status, &opts);
         snap.selected_path = path;
         snap.file = file;
         self.drafting = None;
@@ -937,6 +975,13 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                 .child(chrome_button("collapse-eq", "Collapse", cx, |this, cx| {
                     this.collapse_unchanged(cx);
                 }))
+                .child(chrome_toggle(
+                    "ignore-ws",
+                    "Ignore WS",
+                    view.view_options.ignore_whitespace,
+                    cx,
+                    |this, cx| this.toggle_ignore_whitespace(cx),
+                ))
                 .child(export_button(cx))
                 .children(view.export_status.as_ref().map(|status| {
                     div()
@@ -1109,6 +1154,7 @@ fn code_pane(
     let row_h = f32::from(theme::ROW_HEIGHT);
     let pad = content_pad(rows.len(), view.view_h, row_h);
     let measure = left.then(|| cx.entity().downgrade());
+    let side_marks = replace_side_marks(left, display);
 
     div()
         .relative()
@@ -1148,6 +1194,7 @@ fn code_pane(
                             };
                             let row_id = if left { ("row-l", i) } else { ("row-r", i) };
                             let line = row.ln;
+                            let parts = side_marks.get(i).cloned().flatten();
                             div()
                                 .id(row_id)
                                 .h(theme::ROW_HEIGHT)
@@ -1170,7 +1217,7 @@ fn code_pane(
                                         this.begin_draft(side, line, window, cx);
                                     }
                                 }))
-                                .child(row.text)
+                                .child(render_row_text(row.text, parts))
                         }))
                         .when(pad > 0., |col| col.child(div().h(px(pad)).w_full())),
                 ),
@@ -1298,6 +1345,32 @@ fn chrome_button(
         .cursor_pointer()
         .text_xs()
         .text_color(theme::muted())
+        .hover(|button| button.bg(theme::hover()))
+        .active(|button| button.bg(rgb(0xdfe3e9)))
+        .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
+        .child(label)
+}
+
+fn chrome_toggle(
+    id: &'static str,
+    label: &'static str,
+    pressed: bool,
+    cx: &mut Context<DiffView>,
+    on_click: impl Fn(&mut DiffView, &mut Context<DiffView>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .h(theme::TOGGLE_SIZE)
+        .px_2()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .cursor_pointer()
+        .text_xs()
+        .when(pressed, |d| d.bg(theme::range()).text_color(theme::accent()))
+        .when(!pressed, |d| d.text_color(theme::muted()))
         .hover(|button| button.bg(theme::hover()))
         .active(|button| button.bg(rgb(0xdfe3e9)))
         .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
@@ -1445,6 +1518,69 @@ fn scroll_s_for_target(
         row_h,
         current_s,
     )
+}
+
+fn replace_side_marks(left: bool, display: &DisplayRows) -> Vec<Option<Vec<TokenPart>>> {
+    let n = if left {
+        display.old_rows.len()
+    } else {
+        display.new_rows.len()
+    };
+    let mut marks = vec![None; n];
+    for bridge in &display.bridges {
+        let Bridge::Replace {
+            old_from,
+            old_to,
+            new_from,
+            new_to,
+            ..
+        } = *bridge
+        else {
+            continue;
+        };
+        let olds: Vec<&str> = display.old_rows[old_from as usize..old_to as usize]
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect();
+        let news: Vec<&str> = display.new_rows[new_from as usize..new_to as usize]
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect();
+        let (old_m, new_m) = replace_marks(&olds, &news);
+        if left {
+            for (i, parts) in old_m.into_iter().enumerate() {
+                marks[old_from as usize + i] = Some(parts);
+            }
+        } else {
+            for (i, parts) in new_m.into_iter().enumerate() {
+                marks[new_from as usize + i] = Some(parts);
+            }
+        }
+    }
+    marks
+}
+
+fn render_row_text(text: String, parts: Option<Vec<TokenPart>>) -> impl IntoElement {
+    match parts {
+        Some(parts) if parts.iter().any(|p| p.changed) => div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .overflow_hidden()
+            .children(parts.into_iter().map(|p| {
+                if p.changed {
+                    div()
+                        .bg(theme::mod_chg())
+                        .rounded(px(2.))
+                        .child(p.text)
+                        .into_any_element()
+                } else {
+                    div().child(p.text).into_any_element()
+                }
+            }))
+            .into_any_element(),
+        _ => div().child(text).into_any_element(),
+    }
 }
 
 fn kind_bg(kind: RowKind) -> gpui::Rgba {

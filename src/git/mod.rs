@@ -574,23 +574,20 @@ fn file_diff_inner(
     })
 }
 
-pub fn compute_alignment(old_text: &str, new_text: &str, options: &ViewOptions) -> Alignment {
-    // ponytail: ignore_whitespace stays false in v1 slice; wire when UI toggle exists
-    let _ = options.ignore_whitespace;
+fn strip_whitespace(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
 
-    let old_lines = split_lines(old_text);
-    let new_lines = split_lines(new_text);
-    let diff = TextDiff::from_slices(&old_lines, &new_lines);
-
-    let mut ops = Vec::new();
-    for op in diff.ops() {
+fn alignment_from_diff_ops(ops: &[DiffOp]) -> Alignment {
+    let mut out = Vec::with_capacity(ops.len());
+    for op in ops {
         match *op {
             DiffOp::Equal {
                 old_index,
                 new_index,
                 len,
             } => {
-                ops.push(AlignmentOp::Equal {
+                out.push(AlignmentOp::Equal {
                     old: LineSpan {
                         start: old_index as u32 + 1,
                         count: len as u32,
@@ -606,7 +603,7 @@ pub fn compute_alignment(old_text: &str, new_text: &str, options: &ViewOptions) 
                 old_len,
                 new_index,
             } => {
-                ops.push(AlignmentOp::Delete {
+                out.push(AlignmentOp::Delete {
                     olds: LineSpan {
                         start: old_index as u32 + 1,
                         count: old_len as u32,
@@ -619,7 +616,7 @@ pub fn compute_alignment(old_text: &str, new_text: &str, options: &ViewOptions) 
                 new_index,
                 new_len,
             } => {
-                ops.push(AlignmentOp::Insert {
+                out.push(AlignmentOp::Insert {
                     after_old: old_index as u32,
                     news: LineSpan {
                         start: new_index as u32 + 1,
@@ -633,7 +630,7 @@ pub fn compute_alignment(old_text: &str, new_text: &str, options: &ViewOptions) 
                 new_index,
                 new_len,
             } => {
-                ops.push(AlignmentOp::Replace {
+                out.push(AlignmentOp::Replace {
                     olds: LineSpan {
                         start: old_index as u32 + 1,
                         count: old_len as u32,
@@ -646,7 +643,25 @@ pub fn compute_alignment(old_text: &str, new_text: &str, options: &ViewOptions) 
             }
         }
     }
-    Alignment { ops }
+    Alignment { ops: out }
+}
+
+pub fn compute_alignment(old_text: &str, new_text: &str, options: &ViewOptions) -> Alignment {
+    let old_lines = split_lines(old_text);
+    let new_lines = split_lines(new_text);
+
+    if options.ignore_whitespace {
+        // Diff on whitespace-stripped keys; indices still map to original lines.
+        let old_keys: Vec<String> = old_lines.iter().map(|l| strip_whitespace(l)).collect();
+        let new_keys: Vec<String> = new_lines.iter().map(|l| strip_whitespace(l)).collect();
+        let old_refs: Vec<&str> = old_keys.iter().map(|s| s.as_str()).collect();
+        let new_refs: Vec<&str> = new_keys.iter().map(|s| s.as_str()).collect();
+        let diff = TextDiff::from_slices(&old_refs, &new_refs);
+        alignment_from_diff_ops(diff.ops())
+    } else {
+        let diff = TextDiff::from_slices(&old_lines, &new_lines);
+        alignment_from_diff_ops(diff.ops())
+    }
 }
 
 #[cfg(test)]
@@ -738,6 +753,51 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ignore_whitespace_merges_whitespace_only_change_into_equal() {
+        let old = "keep\n  spaced  \nend\n";
+        let new = "keep\nspaced\nend\n";
+
+        let with_ws = compute_alignment(old, new, &ViewOptions::default());
+        assert_eq!(
+            with_ws.hunks().len(),
+            1,
+            "whitespace-only edit is a Hunk when ignore_whitespace is off"
+        );
+        assert!(
+            matches!(
+                with_ws.ops.as_slice(),
+                [
+                    AlignmentOp::Equal { .. },
+                    AlignmentOp::Replace { .. },
+                    AlignmentOp::Equal { .. },
+                ]
+            ),
+            "expected Equal-Replace-Equal, got {:?}",
+            with_ws.ops
+        );
+
+        let ignore = compute_alignment(
+            old,
+            new,
+            &ViewOptions {
+                ignore_whitespace: true,
+            },
+        );
+        assert!(
+            ignore.hunks().is_empty(),
+            "ignore_whitespace merges whitespace-only change into Equal; got {:?}",
+            ignore.ops
+        );
+        assert_eq!(
+            ignore.ops,
+            vec![AlignmentOp::Equal {
+                old: LineSpan { start: 1, count: 3 },
+                new: LineSpan { start: 1, count: 3 },
+            }]
+        );
     }
 
     #[test]

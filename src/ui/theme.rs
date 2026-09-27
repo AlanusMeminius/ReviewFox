@@ -56,6 +56,10 @@ pub fn accent() -> Rgba {
 pub fn mod_bg() -> Rgba {
     rgb(0xe8f0fe)
 }
+/// Darker span inside a Replace line for tokens that differ (prototype `--chg`).
+pub fn mod_chg() -> Rgba {
+    rgb(0xb9ceee)
+}
 pub fn add_bg() -> Rgba {
     rgb(0xe8f7ee)
 }
