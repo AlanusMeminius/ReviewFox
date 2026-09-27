@@ -226,12 +226,15 @@ impl AppView {
         let view = cx.entity().downgrade();
         Rc::new(move |size, window, cx: &mut App| {
             view.update(cx, |this, cx| {
-                let chrome = f32::from(theme::CHROME_HEIGHT);
+                // The band above the stage, i.e. what a viewport-relative drag has
+                // to clear before it reaches the island.
+                let chrome = f32::from(theme::TITLEBAR_HEIGHT);
+                let top = theme::CHANGES_TOP_INSET;
                 let inset = theme::CHANGES_INSET;
                 let available =
-                    f32::from(window.viewport_size().height) - chrome - inset * 2.;
+                    f32::from(window.viewport_size().height) - chrome - top - inset;
                 let height =
-                    splitter::clamp_mr_detail_height(size - chrome - inset, available);
+                    splitter::clamp_mr_detail_height(size - chrome - top, available);
                 if this.mr_detail_height != height {
                     this.mr_detail_height = height;
                     cx.notify();
@@ -1031,7 +1034,9 @@ impl Render for AppView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .when(cfg!(not(target_os = "macos")), |d| d.bg(theme::sidebar()))
+            // The window's one translucent layer; `#body`, `#repos` and `#stage`
+            // all stay clear so it is not painted twice.
+            .bg(theme::frost())
             .font_family(theme::UI_FONT)
             .track_focus(&self.focus)
             // The only band that reaches both window edges, so it can own the whole drag
@@ -1440,7 +1445,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
 
     div()
         .id("titlebar")
-        .h(theme::CHROME_HEIGHT)
+        .h(theme::TITLEBAR_HEIGHT)
         .flex_none()
         .flex()
         .items_center()
@@ -1452,6 +1457,13 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                 .h_full()
                 .flex()
                 .items_center()
+                // Centering alone puts the pill `CHANGES_TOP_INSET` closer to the
+                // window edge than to the island: both gaps are (T-H)/2, but the
+                // lower one also spans the inset. Padding by the inset makes the two
+                // exactly equal, (T + inset - H) / 2, for any pill height and any
+                // inset value. The caption buttons sit outside this zone so they
+                // still reach the physical corner.
+                .pt(px(theme::CHANGES_TOP_INSET))
                 .gap(px(theme::CHROME_GAP))
                 .pl(px(12.))
                 .overflow_hidden()
@@ -1476,6 +1488,8 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                 .h_full()
                 .flex()
                 .items_center()
+                // Balances the pills against the island below; see `titlebar-leading`.
+                .pt(px(theme::CHANGES_TOP_INSET))
                 .gap(px(theme::CHROME_GAP))
                 // Same inset the islands use, measured from the stage's left edge.
                 .pl(px(theme::CHANGES_INSET))
@@ -1536,7 +1550,7 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
         .flex_col()
         .pl(inset)
         .pr(inset)
-        .pt(inset)
+        .pt(px(theme::CHANGES_TOP_INSET))
         .pb(inset)
         .when(show_mr, |d| {
             d.child(render_mr_entry_detail(
@@ -2240,7 +2254,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     div()
         .id("files")
         .absolute()
-        .top(inset)
+        .top(px(theme::CHANGES_TOP_INSET))
         .right(inset)
         .bottom(inset)
         .w(px(view.files_width))

@@ -66,7 +66,7 @@ pub struct DiffView {
     /// Last `PaneEvent::HoverCopy`; shown in chrome.
     hover_copy: Option<String>,
     #[cfg(target_os = "macos")]
-    tree_vibrancy: Option<ColumnVibrancy>,
+    window_vibrancy: Option<ColumnVibrancy>,
     /// Diff-computation knobs; does not change Comparison identity.
     view_options: ViewOptions,
     /// In-file search query; empty = no hits.
@@ -126,7 +126,7 @@ impl DiffView {
             hunk_index: None,
             hover_copy: None,
             #[cfg(target_os = "macos")]
-            tree_vibrancy: None,
+            window_vibrancy: None,
             view_options: ViewOptions::default(),
             search_query: String::new(),
             search_scope: SearchScope::Both,
@@ -441,17 +441,46 @@ impl DiffView {
             .id("diff-shell")
             .size_full()
             .flex()
+            .flex_col()
             .overflow_hidden()
-            .child(render_tree_pane(self, tree_w, cx))
-            .when(show_tree_split, |d| {
-                d.child(splitter::handle(
-                    "diff-tree-resize-handle",
-                    Axis::HorizontalLeading,
-                    self.tree_resize_handler(cx),
-                    self.tree_resize_state.clone(),
-                ))
-            })
-            .child(render_dual_pane(self, window, cx))
+            // The only band that reaches both window edges, so it can own the whole
+            // drag surface and seat the caption buttons in the corner.
+            .child(render_titlebar(self, window, cx))
+            .child(
+                div()
+                    .id("diff-body")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .overflow_hidden()
+                    .child(render_tree_pane(self, tree_w, cx))
+                    .when(show_tree_split, |d| {
+                        d.child(splitter::handle(
+                            "diff-tree-resize-handle",
+                            Axis::HorizontalLeading,
+                            self.tree_resize_handler(cx),
+                            self.tree_resize_state.clone(),
+                        ))
+                    })
+                    // Frosted desk: the content island floats here, inset on all four
+                    // sides so the material reads around it.
+                    .child(
+                        div()
+                            .id("diff-stage")
+                            .relative()
+                            .h_full()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .bg(theme::sidebar())
+                            .flex()
+                            .pt(px(theme::CHANGES_TOP_INSET))
+                            .pb(px(theme::CHANGES_INSET))
+                            .pl(px(theme::CHANGES_INSET))
+                            .pr(px(theme::CHANGES_INSET))
+                            .child(render_dual_pane(self, cx)),
+                    ),
+            )
             .into_any_element()
     }
 }
@@ -485,12 +514,10 @@ impl Render for DiffView {
 
         #[cfg(target_os = "macos")]
         {
-            let column_w = if self.tree_collapsed {
-                0.
-            } else {
-                self.tree_width
-            };
-            ColumnVibrancy::ensure_synced(&mut self.tree_vibrancy, window, column_w);
+            // Full window, not a tree-column strip: the content island is inset on
+            // every side, so without material under the gutters they would be holes
+            // straight through to the desktop.
+            ColumnVibrancy::ensure_synced_window(&mut self.window_vibrancy, window);
         }
 
         div()
@@ -498,7 +525,9 @@ impl Render for DiffView {
             .relative()
             .size_full()
             .overflow_hidden()
-            .when(cfg!(not(target_os = "macos")), |d| d.bg(theme::white()))
+            // The window's one translucent layer; the tree column and the stage stay
+            // clear so it is never painted twice.
+            .bg(theme::frost())
             .font_family(theme::UI_FONT)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
@@ -507,6 +536,207 @@ impl Render for DiffView {
             .child(AnyView::from(shell).cached(StyleRefinement::default().size_full()))
             .child(pane::slot(&self.pane, self.pane_bounds.clone()))
     }
+}
+
+/// Width the leading zone reserves when the tree is collapsed. Same rule as the
+/// main window's titlebar, so the island's left edge stays under the titlebar's
+/// content instead of drifting.
+fn collapsed_leading_width() -> f32 {
+    let controls = 12. + f32::from(theme::TOGGLE_SIZE) + theme::CHROME_GAP;
+    #[cfg(target_os = "macos")]
+    let controls = controls + theme::TRAFFIC_LIGHTS_WIDTH;
+    controls
+}
+
+fn render_titlebar(
+    view: &DiffView,
+    window: &Window,
+    cx: &mut Context<DiffView>,
+) -> impl IntoElement {
+    // Leading zone spans exactly what sits left of the stage, so what follows starts
+    // on the stage's left edge and lines up with the island below.
+    let leading_w = if view.tree_collapsed {
+        px(collapsed_leading_width())
+    } else {
+        px(view.tree_width + splitter::HANDLE_WIDTH)
+    };
+    let (path, subtitle) = match &view.snapshot {
+        Some(s) => {
+            let n = view
+                .review
+                .as_ref()
+                .map(|r| r.comments_for_path(&s.selected_path).count())
+                .unwrap_or(0);
+            let mut sub = match &s.file {
+                FileDiff::Text { .. } => {
+                    let hunk_count = view.pane.read(cx).hunk_count().unwrap_or(0);
+                    let hunk_part = if hunk_count == 0 {
+                        "0 differences".into()
+                    } else {
+                        let n = view.hunk_index.unwrap_or(0) + 1;
+                        format!("hunk {n} of {hunk_count}")
+                    };
+                    format!(
+                        "{hunk_part} · {n} comment{}",
+                        if n == 1 { "" } else { "s" }
+                    )
+                }
+                FileDiff::Binary => "binary file".into(),
+                FileDiff::Error(e) => e.clone(),
+            };
+            if let Some(copy) = &view.hover_copy {
+                sub = format!("{sub} · {copy}");
+            }
+            (s.selected_path.clone(), sub)
+        }
+        None => ("—".into(), "No file selected".into()),
+    };
+
+    div()
+        .id("diff-titlebar")
+        .h(theme::TITLEBAR_HEIGHT)
+        .flex_none()
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .id("diff-titlebar-leading")
+                .w(leading_w)
+                .flex_none()
+                .h_full()
+                .flex()
+                .items_center()
+                // Centering alone puts the pill `CHANGES_TOP_INSET` closer to the
+                // window edge than to the island: both gaps are (T-H)/2, but the
+                // lower one also spans the inset. Padding by the inset makes the two
+                // exactly equal, (T + inset - H) / 2, for any pill height and any
+                // inset value. The caption buttons sit outside this zone so they
+                // still reach the physical corner.
+                .pt(px(theme::CHANGES_TOP_INSET))
+                .gap(px(theme::CHROME_GAP))
+                .pl(px(12.))
+                .overflow_hidden()
+                .children(traffic_lights_space())
+                .child(toggle_button("diff-tree-toggle", view.tree_collapsed, cx))
+                .child(
+                    div()
+                        .id("diff-titlebar-drag-leading")
+                        .h_full()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .window_control_area(WindowControlArea::Drag)
+                        .occlude(),
+                ),
+        )
+        .child(
+            div()
+                .id("diff-titlebar-main")
+                .flex_1()
+                .min_w(px(0.))
+                .h_full()
+                .flex()
+                .items_center()
+                // Balances the toolbar against the island below; see the note in the
+                // main window's `titlebar-leading`.
+                .pt(px(theme::CHANGES_TOP_INSET))
+                .gap_2()
+                // Same inset the island uses, measured from the stage's left edge.
+                .pl(px(theme::CHANGES_INSET))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .font_family(theme::MONO_FONT)
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(path),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(subtitle),
+                )
+                .child(chrome_button("prev-hunk", "↑", cx, |this, cx| {
+                    this.jump_hunk(-1, cx);
+                }))
+                .child(chrome_button("next-hunk", "↓", cx, |this, cx| {
+                    this.jump_hunk(1, cx);
+                }))
+                .child(chrome_button("expand-all", "Expand", cx, |this, cx| {
+                    this.with_pane(cx, |pane, cx| pane.expand_all(cx));
+                }))
+                .child(chrome_button("collapse-eq", "Collapse", cx, |this, cx| {
+                    this.with_pane(cx, |pane, cx| pane.collapse_unchanged(cx));
+                }))
+                .child(chrome_toggle(
+                    "ignore-ws",
+                    "Ignore WS",
+                    view.view_options.ignore_whitespace,
+                    cx,
+                    |this, cx| this.toggle_ignore_whitespace(cx),
+                ))
+                .child(chrome_button("font-dec", "A−", cx, |this, cx| {
+                    this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Dec, cx));
+                }))
+                .child(chrome_button("font-reset", "A", cx, |this, cx| {
+                    this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Reset, cx));
+                }))
+                .child(chrome_button("font-inc", "A+", cx, |this, cx| {
+                    this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Inc, cx));
+                }))
+                .child(chrome_toggle(
+                    "find",
+                    "Find",
+                    view.searching,
+                    cx,
+                    |this, cx| {
+                        if this.searching {
+                            this.searching = false;
+                            cx.notify();
+                        } else {
+                            this.searching = true;
+                            this.set_drafting(None, cx);
+                            cx.notify();
+                        }
+                    },
+                ))
+                .child(export_button(cx))
+                .children(view.export_status.as_ref().map(|status| {
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(theme::accent())
+                        .child(status.clone())
+                }))
+                .child(
+                    div()
+                        .id("diff-titlebar-drag")
+                        .h_full()
+                        .flex_1()
+                        // Crowded toolbar: the drag strip yields before the buttons do.
+                        .min_w(px(0.))
+                        .window_control_area(WindowControlArea::Drag)
+                        .occlude(),
+                )
+                .child(
+                    // Doubles as the trailing inset when no caption buttons follow.
+                    div()
+                        .id("diff-titlebar-drag-trailing")
+                        .h_full()
+                        .w(px(theme::CHANGES_INSET))
+                        .flex_none()
+                        .window_control_area(WindowControlArea::Drag)
+                        .occlude(),
+                ),
+        )
+        // Outside the zones' padding: close must land in the physical corner.
+        .children(super::window_controls::window_controls(window))
 }
 
 fn render_tree_pane(
@@ -534,27 +764,9 @@ fn render_tree_pane(
         .flex()
         .flex_col()
         .overflow_hidden()
+        // A clear column straight on the frosted desk, not an island - same role as
+        // the main window's workspace sidebar. Its chrome lives in `#diff-titlebar`.
         .bg(theme::sidebar())
-        .child(
-            div()
-                .h(theme::CHROME_HEIGHT)
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_2()
-                .pl(px(12.))
-                .pr_2()
-                .children(traffic_lights_space())
-                .child(toggle_button("diff-tree-toggle", false, cx))
-                .child(
-                    div()
-                        .id("diff-drag-tree")
-                        .h_full()
-                        .flex_1()
-                        .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
-                ),
-        )
         .child({
             let (scroll, sb) = scrollbar::vertical("diff-tree-sb", cx);
             scrollbar::overlay_flex(
@@ -704,156 +916,51 @@ fn render_tree_pane(
         })
 }
 
-fn render_dual_pane(
-    view: &DiffView,
-    window: &Window,
-    cx: &mut Context<DiffView>,
-) -> impl IntoElement {
-    let (path, subtitle) = match &view.snapshot {
-        Some(s) => {
-            let n = view
-                .review
-                .as_ref()
-                .map(|r| r.comments_for_path(&s.selected_path).count())
-                .unwrap_or(0);
-            let mut sub = match &s.file {
-                FileDiff::Text { .. } => {
-                    let hunk_count = view.pane.read(cx).hunk_count().unwrap_or(0);
-                    let hunk_part = if hunk_count == 0 {
-                        "0 differences".into()
-                    } else {
-                        let n = view.hunk_index.unwrap_or(0) + 1;
-                        format!("hunk {n} of {hunk_count}")
-                    };
-                    format!(
-                        "{hunk_part} · {n} comment{}",
-                        if n == 1 { "" } else { "s" }
-                    )
-                }
-                FileDiff::Binary => "binary file".into(),
-                FileDiff::Error(e) => e.clone(),
-            };
-            if let Some(copy) = &view.hover_copy {
-                sub = format!("{sub} · {copy}");
-            }
-            (s.selected_path.clone(), sub)
-        }
-        None => ("—".into(), "No file selected".into()),
-    };
+/// Whether the search bar renders above the pane inside the island. Mirrors the
+/// early return in [`render_search_bar`].
+fn has_search(view: &DiffView) -> bool {
+    view.searching || !view.search_query.is_empty()
+}
 
+/// Whether anything renders below the pane inside the island. The pane cannot
+/// round its own corners (see the note on the island's bottom inset), so this is
+/// what decides who owns the island's bottom edge.
+fn has_footer(view: &DiffView) -> bool {
+    if view.drafting.is_some() {
+        return true;
+    }
+    let path = view
+        .snapshot
+        .as_ref()
+        .map(|s| s.selected_path.clone())
+        .unwrap_or_default();
+    view.review
+        .as_ref()
+        .is_some_and(|r| r.comments_for_path(&path).next().is_some())
+}
+
+fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     div()
         .id("diff-main")
-        .h_full()
         .flex_1()
         .min_w(px(0.))
+        .min_h(px(0.))
         .flex()
         .flex_col()
         .bg(theme::white())
-        .child(
-            div()
-                .h(theme::CHROME_HEIGHT)
-                .flex_none()
-                .flex()
-                .items_center()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .when(view.tree_collapsed, |row| {
-                            row.pl(px(12.))
-                                .pr_3()
-                                .children(traffic_lights_space())
-                                .child(toggle_button("diff-tree-toggle-collapsed", true, cx))
-                        })
-                        .when(!view.tree_collapsed, |row| row.px_3())
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .font_family(theme::MONO_FONT)
-                                .text_xs()
-                                .text_color(theme::muted())
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(path),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::muted())
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(subtitle),
-                        )
-                        .child(chrome_button("prev-hunk", "↑", cx, |this, cx| {
-                            this.jump_hunk(-1, cx);
-                        }))
-                        .child(chrome_button("next-hunk", "↓", cx, |this, cx| {
-                            this.jump_hunk(1, cx);
-                        }))
-                        .child(chrome_button("expand-all", "Expand", cx, |this, cx| {
-                            this.with_pane(cx, |pane, cx| pane.expand_all(cx));
-                        }))
-                        .child(chrome_button("collapse-eq", "Collapse", cx, |this, cx| {
-                            this.with_pane(cx, |pane, cx| pane.collapse_unchanged(cx));
-                        }))
-                        .child(chrome_toggle(
-                            "ignore-ws",
-                            "Ignore WS",
-                            view.view_options.ignore_whitespace,
-                            cx,
-                            |this, cx| this.toggle_ignore_whitespace(cx),
-                        ))
-                        .child(chrome_button("font-dec", "A−", cx, |this, cx| {
-                            this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Dec, cx));
-                        }))
-                        .child(chrome_button("font-reset", "A", cx, |this, cx| {
-                            this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Reset, cx));
-                        }))
-                        .child(chrome_button("font-inc", "A+", cx, |this, cx| {
-                            this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Inc, cx));
-                        }))
-                        .child(chrome_toggle(
-                            "find",
-                            "Find",
-                            view.searching,
-                            cx,
-                            |this, cx| {
-                                if this.searching {
-                                    this.searching = false;
-                                    cx.notify();
-                                } else {
-                                    this.searching = true;
-                                    this.set_drafting(None, cx);
-                                    cx.notify();
-                                }
-                            },
-                        ))
-                        .child(export_button(cx))
-                        .children(view.export_status.as_ref().map(|status| {
-                            div()
-                                .text_xs()
-                                .text_color(theme::accent())
-                                .child(status.clone())
-                        }))
-                        .child(
-                            div()
-                                .id("diff-drag-main")
-                                .flex_1()
-                                // Crowded toolbar: the drag strip yields before the controls do.
-                                .min_w(px(0.))
-                                .h_full()
-                                .window_control_area(WindowControlArea::Drag)
-                                .occlude(),
-                        ),
-                )
-                // Outside the toolbar's padding: close must land in the physical corner.
-                .children(super::window_controls::window_controls(window)),
-        )
+        .rounded(px(theme::CHANGES_RADIUS))
+        .overflow_hidden()
+        // The pane paints at the window root (see `pane::slot`) and gpui clips
+        // children to the parent rect, not to its radius, so nothing here can round
+        // the pane against this card. Wherever the pane is the first or last child,
+        // hold it one radius clear of that edge and let the card draw its own corner;
+        // the search bar and the footer round themselves when they are present.
+        .when(!has_search(view), |island| {
+            island.pt(px(theme::CHANGES_RADIUS))
+        })
+        .when(!has_footer(view), |island| {
+            island.pb(px(theme::CHANGES_RADIUS))
+        })
         .child(render_search_bar(view, cx))
         .child(render_body(view, cx))
         .child(render_comments(view, cx))
@@ -886,6 +993,8 @@ fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
         .border_b_1()
         .border_color(theme::line())
         .bg(rgb(0xfafbfd))
+        // Always the island's first child; match the card radius.
+        .rounded_t(px(theme::CHANGES_RADIUS))
         .px_3()
         .py_1()
         .flex()
@@ -1006,6 +1115,11 @@ fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElem
         .border_t_1()
         .border_color(theme::line())
         .bg(rgb(0xfafbfd))
+        // Last child unless a draft bar follows: match the island radius so the
+        // card's bottom corners read round.
+        .when(view.drafting.is_none(), |strip| {
+            strip.rounded_b(px(theme::CHANGES_RADIUS))
+        })
         .child(scrollbar::overlay_max(
             px(160.),
             div()
@@ -1058,6 +1172,8 @@ fn render_draft_bar(view: &DiffView) -> impl IntoElement {
         .border_t_1()
         .border_color(theme::accent())
         .bg(theme::range())
+        // Always the island's last child; match the card radius.
+        .rounded_b(px(theme::CHANGES_RADIUS))
         .px_3()
         .py_2()
         .child(

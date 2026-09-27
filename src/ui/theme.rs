@@ -1,11 +1,16 @@
 //! Visual tokens aligned with BeadsViewer + accepted prototype A.
 
 use gpui::{BoxShadow, Hsla, Pixels, Rgba, hsla, point, px, rgb};
+#[cfg(target_os = "windows")]
+use gpui::rgba;
 
 pub const SIDEBAR_WIDTH: Pixels = gpui::px(188.);
 pub const FILES_WIDTH: Pixels = gpui::px(280.);
 pub const DIFF_TREE_WIDTH: Pixels = gpui::px(200.);
-pub const CHROME_HEIGHT: Pixels = gpui::px(36.);
+/// The window titlebar band, and the only chrome row left: it carries the caption
+/// buttons, so it is sized to clear them and nothing more. Every pixel it gives up
+/// is one the islands below it gain.
+pub const TITLEBAR_HEIGHT: Pixels = gpui::px(32.);
 pub const TOGGLE_SIZE: Pixels = gpui::px(26.);
 /// Prototype A fonts; OS falls back if not installed.
 pub const UI_FONT: &str = "IBM Plex Sans";
@@ -48,6 +53,12 @@ pub fn code_font() -> &'static str {
 
 /// Inset of floating capsules (Changes / Commit / MR detail) from the stage edges.
 pub const CHANGES_INSET: f32 = 12.;
+/// Inset from the titlebar only. Tighter than [`CHANGES_INSET`] because the
+/// titlebar band is frost as well, so a full gap there reads as more titlebar
+/// rather than as separation — the two add up to the height the user perceives as
+/// chrome. Still non-zero, so the island reads as floating on the desk instead of
+/// growing out of the titlebar.
+pub const CHANGES_TOP_INSET: f32 = 4.;
 /// Gap between neighboring floating capsules — same as the edge inset.
 pub const CHANGES_SHADOW_GAP: f32 = CHANGES_INSET;
 /// Corner radius of floating capsules.
@@ -102,18 +113,52 @@ pub fn line() -> Rgba {
 pub fn white() -> Rgba {
     rgb(0xffffff)
 }
+/// Paints nothing; lets whatever is behind the element show through.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const CLEAR: Rgba = Rgba {
+    r: 0.,
+    g: 0.,
+    b: 0.,
+    a: 0.,
+};
+
+/// The window's frosted material, and the *only* translucent fill in the tree.
+///
+/// Exactly one element per window may paint it — the window root. Everything
+/// between the root and the islands stays [`sidebar`]-clear, because stacked
+/// translucent layers compound (0.9 over 0.9 reads as 0.99) and the sidebar
+/// would drift lighter than the stage.
 #[cfg(target_os = "macos")]
-pub fn sidebar() -> Rgba {
-    // Clear so DIY NSVisualEffectView::Sidebar under the Metal view shows through.
-    Rgba {
-        r: 0.,
-        g: 0.,
-        b: 0.,
-        a: 0.,
-    }
+pub fn frost() -> Rgba {
+    // The DIY NSVisualEffectView sits *under* the Metal view, so the material is
+    // already behind us; painting here would only sit on top of it.
+    CLEAR
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn frost() -> Rgba {
+    // gpui asks Windows for acrylic with a fully clear tint (`AccentPolicy`
+    // gradient 0x00000000), so the entire window tone comes from this fill.
+    // 0.9 keeps `muted()` legible over a dark wallpaper; below ~0.8 it stops
+    // being.
+    rgba(0xf4f5f7e6)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn frost() -> Rgba {
+    // No compositor backdrop requested (`WindowBackgroundAppearance::Opaque`).
+    rgb(0xf4f5f7)
+}
+
+/// Columns that sit directly on the frosted desk: the workspace sidebar, the
+/// Diff file tree, the stage between islands. Clear wherever [`frost`] is
+/// translucent — see its note on compounding.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn sidebar() -> Rgba {
+    CLEAR
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn sidebar() -> Rgba {
     rgb(0xf4f5f7)
 }
