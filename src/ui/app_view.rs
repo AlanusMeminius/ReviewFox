@@ -24,6 +24,7 @@ use super::file_tree::{self, TreeRow};
 use super::gitlab_connection::{self, GitLabConnection};
 #[cfg(target_os = "macos")]
 use super::mac_column_vibrancy::ColumnVibrancy;
+use super::metadata;
 use super::scrollbar;
 use super::splitter::{self, Axis, ResizeState};
 use super::current_repo;
@@ -1251,7 +1252,9 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                         .child(toggle_button("main-sidebar-toggle-collapsed", true, cx))
                         .child(open_repo_button("open-repo-collapsed", cx))
                 })
-                .when(!view.repos_collapsed, |row| row.px_3())
+                .when(!view.repos_collapsed, |row| {
+                    row.px(px(theme::COMMITS_COLUMN_INSET))
+                })
                 .child({
                     let track = view.branch_toggle_bounds.clone();
                     let open = view.branch_picker.is_some();
@@ -1412,7 +1415,7 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                             );
                             div()
                                 .id(("commit", i))
-                                .mx_2()
+                                .mx(px(theme::COMMITS_COLUMN_INSET))
                                 .my_0p5()
                                 .px_3()
                                 .py_2()
@@ -1537,17 +1540,25 @@ fn render_mr_entry_detail(
     height: f32,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    let summary = &entry.summary;
     let (scroll, sb) = scrollbar::vertical("mr-detail-sb", cx);
+    let side = px(theme::COMMITS_COLUMN_INSET);
+    let top = px(theme::MR_DETAIL_TOP_INSET);
+    let bottom = px(theme::CHANGES_INSET);
     div()
         .id("mr-entry-detail")
         .h(px(height))
         .flex_none()
         .flex()
         .flex_col()
+        .mx(side)
+        .mt(top)
+        .mb(bottom)
         .px_3()
-        .pt_1()
-        .pb_1()
+        .py_2()
+        .bg(theme::white())
+        .rounded(px(theme::CHANGES_RADIUS))
+        .shadow(theme::changes_capsule_shadow())
+        .overflow_hidden()
         .text_xs()
         .text_color(theme::muted())
         .child(scrollbar::overlay_flex(
@@ -1558,11 +1569,7 @@ fn render_mr_entry_detail(
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
-                .gap_0p5()
-                .child(format!(
-                    "MR Entry · {} → {}",
-                    summary.source_branch, summary.target_branch
-                ))
+                .gap_1p5()
                 .children(match &entry.detail {
                     MrDetailState::Loading => {
                         vec![div().child("Loading MR detail…").into_any_element()]
@@ -1578,39 +1585,15 @@ fn render_mr_entry_detail(
 }
 
 fn mr_entry_ready_lines(detail: &MergeRequestDetail) -> Vec<gpui::AnyElement> {
-    let mut lines: Vec<gpui::AnyElement> = Vec::new();
-
-    let mut meta = vec![
-        detail.author_username.clone(),
-        detail.state.clone(),
-    ];
-    if let Some(ms) = &detail.merge_status {
-        meta.push(ms.clone());
-    }
-    if let Some(pipe) = &detail.check_state.pipeline_status {
-        meta.push(format!("pipeline: {pipe}"));
-    }
-    if let Some(label) = &detail.check_state.approvals_label {
-        meta.push(label.clone());
-    } else if detail.check_state.approved == Some(true) {
-        meta.push("approved".into());
-    }
-    lines.push(div().child(meta.join(" · ")).into_any_element());
-
-    let base = gitlab::short_git_sha(&detail.diff_refs.base_sha);
-    let head = gitlab::short_git_sha(&detail.diff_refs.head_sha);
-    let sha_line = if let Some(start) = &detail.diff_refs.start_sha {
-        let start = gitlab::short_git_sha(start);
-        format!("diff_refs · start {start} · base {base} · head {head}")
-    } else {
-        format!("diff_refs · base {base} · head {head}")
-    };
-    lines.push(
+    let mut lines: Vec<gpui::AnyElement> = vec![
         div()
-            .font_family(theme::MONO_FONT)
-            .child(sha_line)
+            .text_sm()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(theme::text())
+            .child(detail.title.clone())
             .into_any_element(),
-    );
+        metadata::row(mr_metadata_items(detail)).into_any_element(),
+    ];
 
     if let Some(desc) = detail.description.as_deref() {
         lines.push(
@@ -1622,6 +1605,51 @@ fn mr_entry_ready_lines(detail: &MergeRequestDetail) -> Vec<gpui::AnyElement> {
     }
 
     lines
+}
+
+fn mr_metadata_items(detail: &MergeRequestDetail) -> Vec<metadata::Item> {
+    let mut items = vec![
+        metadata::Item {
+            label: "ID",
+            value: format!("!{}", detail.iid),
+        },
+        metadata::Item {
+            label: "Status",
+            value: detail.state.clone(),
+        },
+        metadata::Item {
+            label: "Author",
+            value: detail.author_username.clone(),
+        },
+        metadata::Item {
+            label: "Branches",
+            value: format!("{} → {}", detail.source_branch, detail.target_branch),
+        },
+    ];
+    if let Some(ms) = &detail.merge_status {
+        items.push(metadata::Item {
+            label: "Merge",
+            value: ms.clone(),
+        });
+    }
+    if let Some(pipe) = &detail.check_state.pipeline_status {
+        items.push(metadata::Item {
+            label: "Pipeline",
+            value: pipe.clone(),
+        });
+    }
+    if let Some(label) = &detail.check_state.approvals_label {
+        items.push(metadata::Item {
+            label: "Approvals",
+            value: label.clone(),
+        });
+    } else if detail.check_state.approved == Some(true) {
+        items.push(metadata::Item {
+            label: "Approvals",
+            value: "approved".into(),
+        });
+    }
+    items
 }
 
 fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {

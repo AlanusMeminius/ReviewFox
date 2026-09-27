@@ -13,6 +13,10 @@ pub const GUTTER_WIDTH: Pixels = gpui::px(88.);
 pub const CHANGES_INSET: f32 = 8.;
 /// Gap between commits/scrollbar and the capsule — same as the right-edge inset.
 pub const CHANGES_SHADOW_GAP: f32 = CHANGES_INSET;
+/// Shared left gutter for branch chrome, MR capsule, and commit rows.
+pub const COMMITS_COLUMN_INSET: f32 = 16.;
+/// Top float of the MR detail capsule under chrome.
+pub const MR_DETAIL_TOP_INSET: f32 = 16.;
 /// Corner radius of the floating Changes capsule.
 pub const CHANGES_RADIUS: f32 = 12.;
 
