@@ -167,11 +167,16 @@ pub fn handle(
             .cursor_col_resize(),
         // Vertical sits between white panes inside the capsule; fill so a
         // Transparent window root doesn't punch through the 5px seam.
-        // VerticalNorth is the same visual between MR detail and commits.
-        Axis::Vertical | Axis::VerticalNorth => el
+        Axis::Vertical => el
             .h(px(HANDLE_WIDTH))
             .w_full()
             .bg(theme::white())
+            .cursor_row_resize(),
+        // MR detail ↔ commits: leave clear so the capsule shadow is not
+        // propped up by an opaque white strip.
+        Axis::VerticalNorth => el
+            .h(px(HANDLE_WIDTH))
+            .w_full()
             .cursor_row_resize(),
     };
     el

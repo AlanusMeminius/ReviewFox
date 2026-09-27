@@ -9,6 +9,7 @@ mod settings_window;
 mod text_field;
 #[cfg(target_os = "macos")]
 mod mac_column_vibrancy;
+mod metadata;
 mod scrollbar;
 mod splitter;
 mod theme;
