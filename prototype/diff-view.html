@@ -1,4 +1,6 @@
 <!DOCTYPE html>
+<!-- Three variants of the omission wavy line, switchable via ?variant=, on this dual-pane prototype.
+     No fill, no label. A = one sine; the fold's height change eases across the line numbers and gutter. B = one tear across both panes. C = two lips around the hidden slot. -->
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -102,18 +104,35 @@
     .row.add { background: var(--add-bg); }
     .row.mod { background: var(--mod-bg); }
     .row.mod .chg { background: var(--chg); border-radius: 2px; }
-    .row.omit {
-      cursor: pointer;
-      color: var(--muted);
-      background: #f6f6f6;
+    .row.omit { cursor: pointer; }
+    .proto-switch {
+      position: fixed;
+      left: 50%;
+      bottom: 14px;
+      transform: translateX(-50%);
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px 6px 14px;
+      background: #1c1c1c;
+      color: #fff;
+      border-radius: 999px;
+      box-shadow: 0 8px 28px rgba(0,0,0,.32);
+      font: 13px/1 system-ui, sans-serif;
     }
-    .row.code.omit {
-      background-color: #f6f6f6;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='8'%3E%3Cpath d='M0 4 Q4 1 8 4 Q12 7 16 4' fill='none' stroke='%23b5b5b5' stroke-width='1.4'/%3E%3C/svg%3E");
-      background-repeat: repeat-x;
-      background-position: left center;
-      background-size: 16px 8px;
+    .proto-switch button {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      background: #3a3a3a;
+      color: #fff;
+      font-size: 16px;
+      line-height: 28px;
     }
+    .proto-switch button:hover { border-color: transparent; color: #fff; background: #4a4a4a; }
     .row.hit { outline: 1px solid #e6c200; outline-offset: -1px; }
     mark { background: #ffe08a; color: inherit; }
     .seam {
@@ -193,9 +212,20 @@
     </div>
     <ul id="hits"></ul>
   </section>
+  <nav class="proto-switch" id="switcher" aria-label="Wave variants">
+    <button type="button" id="varPrev" aria-label="Previous variant">←</button>
+    <span id="varLabel">A (CLion sine)</span>
+    <button type="button" id="varNext" aria-label="Next variant">→</button>
+  </nav>
   <script>
     const COMPARISON = 'a1b2c3d..9f8e7d6';
     const CONTEXT = 3;
+
+    const VARIANTS = [
+      { id: 'A', name: 'CLion sine' },
+      { id: 'B', name: 'Full tear' },
+      { id: 'C', name: 'Slot' },
+    ];
 
     const state = {
       file: 'modify',
@@ -205,6 +235,7 @@
       s: 0,
       scope: 'both',
       query: '',
+      variant: 'A',
     };
 
     let model = null;
@@ -598,14 +629,14 @@
       const code = rows.map((r) => {
         const cls = r.kind === 'delete' ? 'del' : r.kind === 'insert' ? 'add' : r.kind === 'replace' ? 'mod' : r.kind === 'omit' ? 'omit' : '';
         const hit = q && r.text && r.text.toLowerCase().includes(q) ? ' hit' : '';
-        const body = r.parts ? htmlParts(r.parts) : htmlPlain(r.text || '');
+        const body = r.kind === 'omit' ? '' : (r.parts ? htmlParts(r.parts) : htmlPlain(r.text || ''));
         const omit = r.kind === 'omit' ? ' data-omit="' + r.omit + '"' : '';
         const ln = r.ln != null ? ' data-ln="' + r.ln + '"' : '';
         return '<div class="row code ' + cls + hit + '" data-side="' + r.side + '" data-kind="' + r.kind + '" data-i="' + r.i + '"' + ln + omit + ' data-s="' + r.s + '" style="top:' + r.contentY + 'px;height:' + rh + 'px">' + body + '</div>';
       }).join('');
       const lns = rows.map((r) => {
         const cls = r.kind === 'delete' ? 'del' : r.kind === 'insert' ? 'add' : r.kind === 'replace' ? 'mod' : r.kind === 'omit' ? 'omit' : '';
-        const label = r.kind === 'omit' ? '⋯' : (r.ln != null ? String(r.ln) : '');
+        const label = r.kind === 'omit' ? '' : (r.ln != null ? String(r.ln) : '');
         const omit = r.kind === 'omit' ? ' data-omit="' + r.omit + '"' : '';
         return '<div class="row lns ' + lnClass + ' ' + cls + '"' + omit + ' style="top:' + r.contentY + 'px;height:' + rh + 'px">' + label + '</div>';
       }).join('');
@@ -680,6 +711,71 @@
       return d;
     }
 
+    function waveStroke(d) {
+      if (!d) return '';
+      return '<path d="' + d + '" fill="none" stroke="#b5b5b5" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>';
+    }
+
+    // One path. Code columns stay on a horizontal centerline. Between them the
+    // centerline eases from the left fold's Y to the right fold's Y; the ease
+    // has zero slope at both ends. The sine's phase depends only on x, so it
+    // does not restart at the gutter.
+    function joinedWave(x0, x1, yL, ease0, ease1, yR) {
+      const period = 16, amp = 3.5, step = 2;
+      ease0 = Math.max(x0, Math.min(ease0, x1));
+      ease1 = Math.max(ease0 + 8, Math.min(ease1, x1));
+      const flat = Math.abs(yR - yL) < 0.5;
+      const yAt = (x) => {
+        if (flat || x <= ease0) return yL;
+        if (x >= ease1) return yR;
+        const t = (x - ease0) / (ease1 - ease0);
+        const s = t * t * t * (t * (t * 6 - 15) + 10);
+        return yL + (yR - yL) * s;
+      };
+      let d = '';
+      for (let x = x0; x <= x1 + 0.01; x += step) {
+        const xx = Math.min(x, x1);
+        const y = yAt(xx) + Math.sin((xx / period) * Math.PI * 2) * amp;
+        d += (d ? ' L ' : 'M ') + xx.toFixed(1) + ' ' + y.toFixed(1);
+        if (xx >= x1) break;
+      }
+      return d;
+    }
+
+    function paintWaves(x0, xL, xR, w) {
+      const ln = 46;
+      const left0 = x0, left1 = xL - ln, right0 = xR + ln, right1 = w;
+      let html = '';
+      model.oldRows.forEach((L) => {
+        if (L.kind !== 'omit') return;
+        const R = model.newRows.find((n) => n.kind === 'omit' && n.omit === L.omit);
+        if (!R) return;
+        const mid = rowH() / 2;
+        const yL = stageY(paneL, L.contentY + mid);
+        const yR = stageY(paneR, R.contentY + mid);
+        if (state.variant === 'A') {
+          html += waveStroke(joinedWave(x0, w, yL, left1, right0, yR));
+          return;
+        }
+        if (state.variant === 'B') {
+          if (Math.abs(yL - yR) < 1.5) html += waveStroke(sine(x0, yL, w, yL));
+          else {
+            html += waveStroke(sine(x0, yL, xL, yL));
+            html += waveStroke(sine(xL, yL, xR, yR));
+            html += waveStroke(sine(xR, yR, w, yR));
+          }
+          return;
+        }
+        const lip = 3;
+        html += waveStroke(sine(left0, stageY(paneL, L.contentY + lip), left1, stageY(paneL, L.contentY + lip)));
+        html += waveStroke(sine(left0, stageY(paneL, L.contentY + rowH() - lip), left1, stageY(paneL, L.contentY + rowH() - lip)));
+        html += waveStroke(sine(right0, stageY(paneR, R.contentY + lip), right1, stageY(paneR, R.contentY + lip)));
+        html += waveStroke(sine(right0, stageY(paneR, R.contentY + rowH() - lip), right1, stageY(paneR, R.contentY + rowH() - lip)));
+        html += waveStroke(sine(xL, yL, xR, yR));
+      });
+      return html;
+    }
+
     function paintRibbons() {
       const box = stage.getBoundingClientRect();
       const gutter = document.getElementById('gutter').getBoundingClientRect();
@@ -708,16 +804,7 @@
           html += '<path fill="' + fill.replace + '" d="' + shapeReplace(yL0, yL1, yR0, yR1, xL, xR) + '"><title>' + escapeHtml(rb.title) + '</title></path>';
         }
       });
-      const omits = [];
-      model.oldRows.forEach((r, i) => {
-        if (r.kind === 'omit') omits.push([r, model.newRows.find((n) => n.kind === 'omit' && n.omit === r.omit)]);
-      });
-      omits.forEach(([L, R]) => {
-        if (!R) return;
-        const yL = stageY(paneL, L.contentY + rowH() / 2);
-        const yR = stageY(paneR, R.contentY + rowH() / 2);
-        html += '<path d="' + sine(xL, yL, xR, yR) + '" fill="none" stroke="#b5b5b5" stroke-width="1.4"/>';
-      });
+      html += paintWaves(x0, xL, xR, w);
       if (!model.oldRows.length) {
         const y = stageY(paneL, anchorY());
         html += '<line x1="' + x0 + '" y1="' + y + '" x2="' + xL + '" y2="' + y + '" stroke="#8aa0b8" stroke-width="2"/>';
@@ -746,8 +833,11 @@
         return 'L' + row.ln;
       };
       const gap = Math.round((paneL.scrollTop - paneR.scrollTop) / rowH());
+      const folds = model.oldRows.filter((r) => r.kind === 'omit').map((r) => r.from + '–' + r.to);
+      const v = VARIANTS.find((x) => x.id === state.variant);
       document.getElementById('readout').textContent =
-        'anchor ' + label(left, !model.oldRows.length) + ' · ' + label(right, !model.newRows.length) + ' · gap ' + gap;
+        v.id + ' ' + v.name + ' · no fill · no label · folds ' + (folds.join(', ') || 'none')
+        + ' · anchor ' + label(left, !model.oldRows.length) + ' · ' + label(right, !model.newRows.length) + ' · gap ' + gap;
       document.getElementById('hunkCount').textContent = model.hunks.length + (model.hunks.length === 1 ? ' hunk' : ' hunks');
     }
 
@@ -979,9 +1069,46 @@
     paneR.addEventListener('scroll', () => { if (!lock) applyS(sFrom('new', contentFromScroll(paneR.scrollTop, model.newRows.length))); });
     window.addEventListener('resize', () => render());
 
+    function readVariant() {
+      const id = new URLSearchParams(location.search).get('variant');
+      return VARIANTS.some((v) => v.id === id) ? id : 'A';
+    }
+
+    function showVariant() {
+      const v = VARIANTS.find((x) => x.id === state.variant);
+      document.getElementById('varLabel').textContent = v.id + ' (' + v.name + ')';
+    }
+
+    function setVariant(id) {
+      state.variant = id;
+      const url = new URL(location.href);
+      url.searchParams.set('variant', id);
+      history.replaceState(null, '', url);
+      showVariant();
+      paintRibbons();
+      paintReadout();
+    }
+
+    function cycleVariant(dir) {
+      const i = VARIANTS.findIndex((v) => v.id === state.variant);
+      setVariant(VARIANTS[(i + dir + VARIANTS.length) % VARIANTS.length].id);
+    }
+
+    document.getElementById('varPrev').addEventListener('click', () => cycleVariant(-1));
+    document.getElementById('varNext').addEventListener('click', () => cycleVariant(1));
+    window.addEventListener('keydown', (e) => {
+      const t = e.target;
+      if (t && (t.closest('input, textarea') || t.isContentEditable)) return;
+      if (e.key === 'ArrowLeft') { e.preventDefault(); cycleVariant(-1); }
+      if (e.key === 'ArrowRight') { e.preventDefault(); cycleVariant(1); }
+    });
+
     function boot() {
+      state.variant = readVariant();
+      showVariant();
       rebuild();
-      applyS(initialS());
+      const first = model.oldRows.find((r) => r.kind === 'omit') || model.newRows.find((r) => r.kind === 'omit');
+      applyS(first ? first.s : initialS());
     }
     boot();
     window.addEventListener('load', boot);
