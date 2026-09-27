@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, App, Context, ElementId, Entity, FocusHandle, Focusable, Global, KeyBinding,
-    Render, ScrollHandle, Subscription, Window, WindowBackgroundAppearance, WindowHandle,
-    actions, div, point, prelude::*, px, size,
+    Render, ScrollHandle, Subscription, Window, WindowControlArea, WindowDecorations,
+    WindowHandle, actions, div, point, prelude::*, px, size,
 };
 
 use std::cell::RefCell;
@@ -15,9 +15,12 @@ use super::nav_tree::{NavEntry, NavPage, NavState};
 use super::token_row::{self, CardStatus, KeychainError, TokenRow};
 use super::{Button, ButtonSize, ButtonStyle, ConfiguredCard, SectionHeader, SettingRow};
 use crate::ui::gitlab_connection::{self, GitLabConnection};
+#[cfg(target_os = "macos")]
+use crate::ui::mac_column_vibrancy::ColumnVibrancy;
 use crate::ui::scrollbar;
 use crate::ui::text_field::{TextField, TextFieldEvent, TextFieldStyle};
 use crate::ui::theme;
+use crate::ui::window_controls::window_controls;
 
 actions!(
     settings,
@@ -119,6 +122,8 @@ pub struct SettingsView {
     nav_keyboard: bool,
     content_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
+    #[cfg(target_os = "macos")]
+    window_vibrancy: Option<ColumnVibrancy>,
 }
 
 impl SettingsView {
@@ -171,6 +176,8 @@ impl SettingsView {
             nav_keyboard: false,
             content_scroll,
             _subscriptions: subscriptions,
+            #[cfg(target_os = "macos")]
+            window_vibrancy: None,
         };
         // Re-check on open (the token may have been revoked), unless a check
         // is already in flight.
@@ -405,12 +412,19 @@ impl SettingsView {
             .collect();
 
         div()
+            .id("settings-island")
             .flex()
             .flex_col()
             .flex_1()
             .min_w(px(0.))
             .h_full()
             .bg(theme::white())
+            .rounded(px(theme::CHANGES_RADIUS))
+            .overflow_hidden()
+            // gpui clips the scrolling content to this rect, not to its radius, so
+            // hold it one radius clear of the top and bottom and let the island
+            // draw its own corners (same as the Diff window's island).
+            .py(px(theme::CHANGES_RADIUS))
             .child(scrollbar::overlay_flex(
                 div()
                     .id("settings-content")
@@ -420,7 +434,8 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .px(px(32.))
-                    .pt(px(24.))
+                    // 24px from the island's top edge, counting its radius padding.
+                    .pt(px(24. - theme::CHANGES_RADIUS))
                     .child(
                         div()
                             .flex_none()
@@ -538,6 +553,26 @@ impl SettingsView {
     }
 }
 
+/// Bare drag band across the window: no title text (the page title already
+/// heads the island), traffic lights on macOS, caption buttons on Windows.
+fn render_titlebar(window: &Window) -> impl IntoElement {
+    div()
+        .id("settings-titlebar")
+        .h(theme::TITLEBAR_HEIGHT)
+        .flex_none()
+        .flex()
+        .child(
+            div()
+                .id("settings-titlebar-drag")
+                .h_full()
+                .flex_1()
+                .min_w(px(0.))
+                .window_control_area(WindowControlArea::Drag)
+                .occlude(),
+        )
+        .children(window_controls(window))
+}
+
 /// Zed `ConfiguredApiCard` button: Subtle, Default size, small label, muted icon.
 fn card_button(id: &'static str, label: &'static str, icon: &'static str) -> Button {
     Button::new(id, label)
@@ -555,18 +590,41 @@ impl Focusable for SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(target_os = "macos")]
+        {
+            // Full window: the island is inset on every side, so the gutters need
+            // material under them too.
+            ColumnVibrancy::ensure_synced_window(&mut self.window_vibrancy, window);
+        }
+
         div()
             .id("settings")
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .flex()
-            .flex_row()
+            .flex_col()
             .size_full()
-            .bg(theme::white())
+            .overflow_hidden()
+            // The window's one translucent layer; the nav and the gutters stay
+            // clear so it is not painted twice.
+            .bg(theme::frost())
             .font_family(theme::UI_FONT)
             .text_color(theme::text())
-            .child(self.render_nav(window, cx))
-            .child(self.render_content(cx))
+            .child(render_titlebar(window))
+            .child(
+                div()
+                    .id("settings-body")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_row()
+                    .gap(px(theme::CHANGES_INSET))
+                    .pt(px(theme::CHANGES_TOP_INSET))
+                    .pr(px(theme::CHANGES_INSET))
+                    .pb(px(theme::CHANGES_INSET))
+                    .child(self.render_nav(window, cx))
+                    .child(self.render_content(cx)),
+            )
             .on_action(cx.listener(|view, _: &CloseSettings, window, cx| {
                 // Closing does not blur the field; keep an unsaved URL edit.
                 view.commit_base_url(cx);
@@ -625,12 +683,15 @@ pub fn open_or_focus_settings(target: Option<SettingsTarget>, cx: &mut App) {
             window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
             titlebar: Some(gpui::TitlebarOptions {
                 title: Some("Settings".into()),
-                appears_transparent: false,
+                appears_transparent: true,
+                traffic_light_position: crate::ui::traffic_light_position(),
                 ..Default::default()
             }),
             window_min_size: Some(size(px(640.), px(400.))),
-            // Opaque nav + white content; no vibrancy layer to show through.
-            window_background: WindowBackgroundAppearance::Opaque,
+            // Frosted desk like the main and Diff windows: nav on the material,
+            // content on a white island.
+            window_decorations: Some(WindowDecorations::Client),
+            window_background: crate::ui::window_background_appearance(),
             ..Default::default()
         },
         |window, cx| {

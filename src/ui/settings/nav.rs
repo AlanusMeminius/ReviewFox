@@ -4,7 +4,8 @@ use crate::ui::theme;
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
-/// Settings nav sidebar shell: fixed 200px, 10px padding, 1px right border.
+/// Settings nav sidebar shell: fixed 200px, 10px padding, sitting clear on the
+/// frosted desk; the content island beside it is the only boundary.
 /// Focus, key context and actions live on the caller's wrapper.
 #[derive(IntoElement)]
 pub struct SettingsNav {
@@ -28,9 +29,7 @@ impl RenderOnce for SettingsNav {
             .w(px(Self::WIDTH))
             .h_full()
             .p(px(10.))
-            .border_r_1()
-            .border_color(theme::line())
-            .bg(theme::settings_nav())
+            .bg(theme::sidebar())
             .overflow_hidden()
             .children(self.items)
     }
@@ -102,13 +101,10 @@ impl NavItem {
 
 impl RenderOnce for NavItem {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        // Selection is the white capsule alone (colour-only boundaries); the
+        // border only ever shows keyboard focus.
         let border = if self.focused {
             theme::border_focused()
-        } else if self.selected {
-            Rgba {
-                a: 0.4,
-                ..theme::line()
-            }
         } else {
             Rgba {
                 a: 0.,
@@ -139,16 +135,14 @@ impl RenderOnce for NavItem {
             .gap_2()
             .pl(px(2.))
             .pr_1()
-            .rounded(px(4.))
+            // Same capsule as the main window's sidebar rows.
+            .rounded_lg()
             .border_1()
             .border_color(border)
-            .when(self.selected, |row| {
-                row.bg(Rgba {
-                    a: 0.5,
-                    ..theme::element_active()
-                })
+            .when(self.selected, |row| row.bg(theme::capsule()))
+            .when(!self.selected, |row| {
+                row.hover(|row| row.bg(theme::settings_nav_hover()))
             })
-            .hover(|row| row.bg(theme::hover()))
             .cursor_pointer()
             .font_family(theme::UI_FONT)
             .text_size(px(14.))
