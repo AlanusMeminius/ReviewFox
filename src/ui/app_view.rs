@@ -16,7 +16,7 @@ use crate::domain::{Comparison, Oid, PathStatus, Repository};
 use crate::git::{self, BranchBrowser, BranchInfo, CommitInfo};
 use crate::gitlab::{
     self, FetchMergeRequestResult, ListMergeRequestCommitsResult, ListMergeRequestsResult,
-    MergeRequestDetail, MergeRequestSummary, ResolveProjectResult,
+    MergeRequestDetail, MergeRequestSummary, ResolveProjectResult, SettingsTarget,
 };
 use crate::settings_store;
 use crate::window_geometry_store::{self, DiffReopen};
@@ -28,8 +28,8 @@ use super::gitlab_connection::{self, GitLabConnection};
 use super::mac_column_vibrancy::ColumnVibrancy;
 use super::metadata;
 use super::scrollbar;
+use super::settings;
 use super::splitter::{self, Axis, ResizeState};
-use super::current_repo;
 use super::theme;
 use super::window_controls::window_controls;
 use super::window_geometry;
@@ -91,16 +91,6 @@ enum MainState {
 }
 
 impl AppView {
-    fn sync_current_repo_path(state: &MainState) {
-        let path = match state {
-            MainState::Ready(loaded) => {
-                Some(loaded.comparison.repository.path().to_path_buf())
-            }
-            MainState::Empty | MainState::Error(_) => None,
-        };
-        current_repo::set_current_repo_path(path);
-    }
-
     pub fn new(
         boot: Option<BranchBrowser>,
         gitlab_connection: Rc<RefCell<GitLabConnection>>,
@@ -111,7 +101,6 @@ impl AppView {
             Some(loaded) => MainState::Ready(loaded),
             None => MainState::Empty,
         };
-        Self::sync_current_repo_path(&state);
         gitlab_connection::spawn_refresh_connection(
             gitlab_connection,
             cx.entity().downgrade(),
@@ -331,7 +320,6 @@ impl AppView {
         }) {
             Ok(bb) => {
                 self.state = MainState::Ready(bb);
-                Self::sync_current_repo_path(&self.state);
                 self.refresh_store();
                 self.branch_picker = None;
                 self.mr_picker = None;
@@ -441,7 +429,7 @@ impl AppView {
                         ListMergeRequestsResult::Err(e) => MrPicker::failed(
                             ErrorNote::new(
                                 gitlab::format_list_merge_requests_error(&e),
-                                e.fixable_in_settings(),
+                                e.settings_fix(),
                             ),
                             Bounds::default(),
                         ),
@@ -539,7 +527,7 @@ impl AppView {
                 FetchMergeRequestResult::Err(e) => {
                     let msg = ErrorNote::new(
                         gitlab::format_fetch_merge_request_error(&e),
-                        e.fixable_in_settings(),
+                        e.settings_fix(),
                     );
                     let _ = this.update(cx, |view, cx| {
                         finish_mr_activate(view, iid, Err(msg));
@@ -566,7 +554,7 @@ impl AppView {
                 ListMergeRequestCommitsResult::Err(e) => {
                     let msg = ErrorNote::new(
                         gitlab::format_list_merge_request_commits_error(&e),
-                        e.fixable_in_settings(),
+                        e.settings_fix(),
                     );
                     let _ = this.update(cx, |view, cx| {
                         finish_mr_activate(view, iid, Err(msg));
@@ -719,7 +707,6 @@ impl AppView {
         self.repo_menu = None;
         if removing_current {
             self.state = MainState::Empty;
-            Self::sync_current_repo_path(&self.state);
             self.branch_picker = None;
             self.mr_picker = None;
             self.mr_entry = None;
@@ -853,14 +840,12 @@ impl AppView {
                 match BranchBrowser::open(&root) {
                     Ok(bb) => {
                         this.state = MainState::Ready(bb);
-                        Self::sync_current_repo_path(&this.state);
                         this.mr_entry = None;
                         this.mr_picker = None;
                         this.remember_current();
                     }
                     Err(e) => {
                         this.state = MainState::Error(e.0);
-                        Self::sync_current_repo_path(&this.state);
                     }
                 }
                 cx.notify();
@@ -1773,14 +1758,15 @@ enum MrDetailState {
     Failed(ErrorNote),
 }
 
-/// Failure text plus whether to offer "Open Settings" (token / Base URL fixes only).
+/// Failure text plus the Settings field that fixes it, if any; that target
+/// gets an "Open Settings" link (token / Base URL fixes only).
 struct ErrorNote {
     message: String,
-    open_settings: bool,
+    open_settings: Option<SettingsTarget>,
 }
 
 impl ErrorNote {
-    fn new(message: impl Into<String>, open_settings: bool) -> Self {
+    fn new(message: impl Into<String>, open_settings: Option<SettingsTarget>) -> Self {
         Self {
             message: message.into(),
             open_settings,
@@ -1788,11 +1774,11 @@ impl ErrorNote {
     }
 
     fn plain(message: impl Into<String>) -> Self {
-        Self::new(message, false)
+        Self::new(message, None)
     }
 
     fn resolve_project(e: &gitlab::ResolveProjectError) -> Self {
-        Self::new(gitlab::format_resolve_project_error(e), e.fixable_in_settings())
+        Self::new(gitlab::format_resolve_project_error(e), e.settings_fix())
     }
 }
 
@@ -1813,20 +1799,20 @@ fn render_error_note(
                 .text_color(rgb(0xb42318))
                 .child(note.message.clone()),
         )
-        .when(note.open_settings, |d| {
+        .when_some(note.open_settings, |d, target| {
             d.child(
                 div()
                     .id(id)
                     .cursor_pointer()
                     .text_color(theme::accent())
                     .hover(|d| d.underline())
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         if close_mr_picker {
                             this.mr_picker = None;
                             cx.notify();
                         }
-                        // Deferred: `cx.dispatch_action` can't re-enter this window mid-update.
-                        window.dispatch_action(Box::new(OpenSettings), cx);
+                        // Deferred: opening / focusing Settings runs outside this window's update.
+                        cx.defer(move |cx| settings::open_or_focus_settings(Some(target), cx));
                     }))
                     .child("Open Settings"),
             )

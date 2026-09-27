@@ -119,10 +119,21 @@ pub enum ResolveProjectResult {
     Err(ResolveProjectError),
 }
 
+/// The Settings field that fixes an error; `Open Settings` focuses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsTarget {
+    GitLabToken,
+    GitLabUrl,
+}
+
 impl ResolveProjectError {
-    /// True when the user can fix this in Settings (Base URL host, token).
-    pub fn fixable_in_settings(&self) -> bool {
-        matches!(self, Self::HostMismatch { .. } | Self::Unauthorized)
+    /// Where in Settings the user fixes this (Base URL host, token), if anywhere.
+    pub fn settings_fix(&self) -> Option<SettingsTarget> {
+        match self {
+            Self::HostMismatch { .. } => Some(SettingsTarget::GitLabUrl),
+            Self::Unauthorized => Some(SettingsTarget::GitLabToken),
+            _ => None,
+        }
     }
 }
 
@@ -318,9 +329,10 @@ pub enum ListMergeRequestsResult {
 }
 
 impl ListMergeRequestsError {
-    /// True when the user can fix this in Settings (missing or rejected token).
-    pub fn fixable_in_settings(&self) -> bool {
+    /// Where in Settings the user fixes this (missing or rejected token), if anywhere.
+    pub fn settings_fix(&self) -> Option<SettingsTarget> {
         matches!(self, Self::MissingPat | Self::Unauthorized)
+            .then_some(SettingsTarget::GitLabToken)
     }
 }
 
@@ -494,9 +506,10 @@ pub enum FetchMergeRequestResult {
 }
 
 impl FetchMergeRequestError {
-    /// True when the user can fix this in Settings (missing or rejected token).
-    pub fn fixable_in_settings(&self) -> bool {
+    /// Where in Settings the user fixes this (missing or rejected token), if anywhere.
+    pub fn settings_fix(&self) -> Option<SettingsTarget> {
         matches!(self, Self::MissingPat | Self::Unauthorized)
+            .then_some(SettingsTarget::GitLabToken)
     }
 }
 
@@ -795,9 +808,10 @@ pub enum ListMergeRequestCommitsResult {
 }
 
 impl ListMergeRequestCommitsError {
-    /// True when the user can fix this in Settings (missing or rejected token).
-    pub fn fixable_in_settings(&self) -> bool {
+    /// Where in Settings the user fixes this (missing or rejected token), if anywhere.
+    pub fn settings_fix(&self) -> Option<SettingsTarget> {
         matches!(self, Self::MissingPat | Self::Unauthorized)
+            .then_some(SettingsTarget::GitLabToken)
     }
 }
 
@@ -1474,29 +1488,39 @@ mod tests {
     }
 
     #[test]
-    fn fixable_in_settings_only_for_token_and_host_errors() {
-        assert!(ResolveProjectError::Unauthorized.fixable_in_settings());
-        assert!(ResolveProjectError::HostMismatch {
-            settings_host: "gitlab.com".into(),
-            remote_host: "github.com".into(),
-        }
-        .fixable_in_settings());
-        assert!(!ResolveProjectError::Network("timeout".into()).fixable_in_settings());
-        assert!(!ResolveProjectError::NotFound.fixable_in_settings());
+    fn settings_fix_targets_token_or_url_only() {
+        use SettingsTarget::{GitLabToken, GitLabUrl};
 
-        assert!(ListMergeRequestsError::MissingPat.fixable_in_settings());
-        assert!(ListMergeRequestsError::Unauthorized.fixable_in_settings());
-        assert!(!ListMergeRequestsError::NotFound.fixable_in_settings());
+        assert_eq!(ResolveProjectError::Unauthorized.settings_fix(), Some(GitLabToken));
+        assert_eq!(
+            ResolveProjectError::HostMismatch {
+                settings_host: "gitlab.com".into(),
+                remote_host: "github.com".into(),
+            }
+            .settings_fix(),
+            Some(GitLabUrl)
+        );
+        assert_eq!(ResolveProjectError::Network("timeout".into()).settings_fix(), None);
+        assert_eq!(ResolveProjectError::NotFound.settings_fix(), None);
 
-        assert!(FetchMergeRequestError::MissingPat.fixable_in_settings());
-        assert!(!FetchMergeRequestError::MissingDiffRefs.fixable_in_settings());
+        assert_eq!(ListMergeRequestsError::MissingPat.settings_fix(), Some(GitLabToken));
+        assert_eq!(ListMergeRequestsError::Unauthorized.settings_fix(), Some(GitLabToken));
+        assert_eq!(ListMergeRequestsError::NotFound.settings_fix(), None);
 
-        assert!(ListMergeRequestCommitsError::Unauthorized.fixable_in_settings());
-        assert!(!ListMergeRequestCommitsError::Other {
-            status: 500,
-            detail: "boom".into(),
-        }
-        .fixable_in_settings());
+        assert_eq!(FetchMergeRequestError::MissingPat.settings_fix(), Some(GitLabToken));
+        assert_eq!(FetchMergeRequestError::Unauthorized.settings_fix(), Some(GitLabToken));
+        assert_eq!(FetchMergeRequestError::MissingDiffRefs.settings_fix(), None);
+
+        assert_eq!(ListMergeRequestCommitsError::MissingPat.settings_fix(), Some(GitLabToken));
+        assert_eq!(ListMergeRequestCommitsError::Unauthorized.settings_fix(), Some(GitLabToken));
+        assert_eq!(
+            ListMergeRequestCommitsError::Other {
+                status: 500,
+                detail: "boom".into(),
+            }
+            .settings_fix(),
+            None
+        );
     }
 
     #[test]

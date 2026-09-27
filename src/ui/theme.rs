@@ -200,3 +200,42 @@ pub fn del_bg() -> Rgba {
 pub fn gap_bg() -> Rgba {
     rgb(0xe8eaef)
 }
+
+// Settings tokens: Zed One Light roles, tuned to the palette above. [`line`]
+// plays One Light's `border`.
+
+/// Row dividers and card outlines — a step lighter than [`line`].
+pub fn border_variant() -> Rgba {
+    rgb(0xe8ebf0)
+}
+/// Focused input / keyboard-focused control border; a softened [`accent`].
+pub fn border_focused() -> Rgba {
+    rgb(0x7c9be6)
+}
+/// Pressed controls and selected rows; one step past [`hover`].
+pub fn element_active() -> Rgba {
+    rgb(0xdfe3e9)
+}
+pub fn success() -> Rgba {
+    rgb(0x2f8f55)
+}
+pub fn success_background() -> Rgba {
+    add_bg()
+}
+pub fn success_border() -> Rgba {
+    rgb(0xc3e5cf)
+}
+pub fn error() -> Rgba {
+    rgb(0xcf4a3c)
+}
+pub fn error_background() -> Rgba {
+    rgb(0xfdeceb)
+}
+pub fn error_border() -> Rgba {
+    rgb(0xf5c8c2)
+}
+/// Settings nav sidebar: white like the content pane, split from it by the
+/// nav's right border.
+pub fn settings_nav() -> Rgba {
+    white()
+}

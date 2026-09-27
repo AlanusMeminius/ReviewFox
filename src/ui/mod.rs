@@ -1,17 +1,16 @@
 #[cfg(target_os = "macos")]
 mod app_icon;
 mod app_view;
-mod current_repo;
 mod gitlab_connection;
 mod diff;
 mod diff_window;
 mod file_tree;
-mod settings_window;
 mod text_field;
 #[cfg(target_os = "macos")]
 mod mac_column_vibrancy;
 mod metadata;
 mod scrollbar;
+mod settings;
 mod splitter;
 mod theme;
 mod window_controls;
@@ -19,8 +18,8 @@ mod window_geometry;
 
 use gpui::{
     App, AppContext, Application, AssetSource, KeyBinding, Menu, MenuItem, SharedString,
-    TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle,
-    WindowOptions, actions, point, px,
+    TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions,
+    actions, point, px,
 };
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -33,9 +32,8 @@ use crate::reqwest_client::ReqwestClient;
 use crate::window_geometry_store;
 use crate::workspace_store;
 use gitlab_connection::GitLabConnection;
-use settings_window::SettingsView;
 use text_field::{
-    Backspace, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, SelectLeft,
+    Backspace, Confirm, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, SelectLeft,
     SelectRight, ShowCharacterPalette,
 };
 
@@ -70,6 +68,24 @@ impl AssetSource for Assets {
             "gear.svg" => Some(Cow::Borrowed(
                 include_bytes!("../../assets/gear.svg") as &'static [u8],
             )),
+            "check.svg" => Some(Cow::Borrowed(
+                include_bytes!("../../assets/check.svg") as &'static [u8],
+            )),
+            "warning.svg" => Some(Cow::Borrowed(
+                include_bytes!("../../assets/warning.svg") as &'static [u8],
+            )),
+            "undo.svg" => Some(Cow::Borrowed(
+                include_bytes!("../../assets/undo.svg") as &'static [u8],
+            )),
+            "refresh.svg" => Some(Cow::Borrowed(
+                include_bytes!("../../assets/refresh.svg") as &'static [u8],
+            )),
+            "chevron_right.svg" => Some(Cow::Borrowed(
+                include_bytes!("../../assets/chevron_right.svg") as &'static [u8],
+            )),
+            "chevron_down.svg" => Some(Cow::Borrowed(
+                include_bytes!("../../assets/chevron_down.svg") as &'static [u8],
+            )),
             _ => None,
         })
     }
@@ -98,26 +114,17 @@ pub fn run() {
                 .expect("HTTP client");
         cx.set_http_client(Arc::new(http_client));
 
-        let settings_window: Rc<RefCell<Option<WindowHandle<SettingsView>>>> =
-            Rc::new(RefCell::new(None));
         let gitlab_connection = Rc::new(RefCell::new(GitLabConnection::default()));
+        settings::init(gitlab_connection.clone(), cx);
 
         cx.on_action(|_: &Quit, cx| {
             window_geometry_store::begin_quit();
             window_geometry_store::flush();
             cx.quit();
         });
-        cx.on_action({
-            let settings_window = settings_window.clone();
-            let gitlab_connection = gitlab_connection.clone();
-            move |_: &OpenSettings, cx| {
-                settings_window::open_or_focus_settings(
-                    &mut settings_window.borrow_mut(),
-                    gitlab_connection.clone(),
-                    cx,
-                );
-            }
-        });
+        // Keys, gear and menu open without a target; error links call
+        // `settings::open_or_focus_settings` with one.
+        cx.on_action(|_: &OpenSettings, cx| settings::open_or_focus_settings(None, cx));
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("ctrl-q", Quit, None),
@@ -125,6 +132,7 @@ pub fn run() {
             KeyBinding::new("ctrl-comma", OpenSettings, None),
             KeyBinding::new("backspace", Backspace, Some("TextField")),
             KeyBinding::new("delete", Delete, Some("TextField")),
+            KeyBinding::new("enter", Confirm, Some("TextField")),
             KeyBinding::new("left", Left, Some("TextField")),
             KeyBinding::new("right", Right, Some("TextField")),
             KeyBinding::new("shift-left", SelectLeft, Some("TextField")),
@@ -141,6 +149,7 @@ pub fn run() {
             KeyBinding::new("end", End, Some("TextField")),
             KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("TextField")),
         ]);
+        cx.bind_keys(settings::key_bindings());
         cx.set_menus(vec![Menu {
             name: "ReviewFox".into(),
             items: vec![

@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
@@ -27,11 +27,28 @@ actions!(
         Paste,
         Cut,
         Copy,
+        Confirm,
     ]
 );
 
+/// Emitted on Enter (`Confirm`); the owner decides what committing means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextFieldEvent {
+    Confirm,
+}
+
+/// Visual variant. `Default` is the original full-width field; `Settings`
+/// follows Zed's settings input (min 256px wide, focused border).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextFieldStyle {
+    #[default]
+    Default,
+    Settings,
+}
+
 pub struct TextField {
     focus_handle: FocusHandle,
+    style: TextFieldStyle,
     content: SharedString,
     placeholder: SharedString,
     masked: bool,
@@ -40,6 +57,8 @@ pub struct TextField {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    /// Horizontal scroll that keeps the cursor inside a field narrower than its text.
+    scroll_x: Pixels,
     is_selecting: bool,
 }
 
@@ -47,6 +66,7 @@ impl TextField {
     pub fn new(placeholder: impl Into<SharedString>, masked: bool, cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
+            style: TextFieldStyle::Default,
             content: "".into(),
             placeholder: placeholder.into(),
             masked,
@@ -55,8 +75,20 @@ impl TextField {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            scroll_x: px(0.),
             is_selecting: false,
         }
+    }
+
+    pub fn with_style(mut self, style: TextFieldStyle) -> Self {
+        self.style = style;
+        self
+    }
+
+    /// Makes the field a Tab stop at `index` (see `Window::focus_next`).
+    pub fn tab_index(mut self, index: isize) -> Self {
+        self.focus_handle = self.focus_handle.tab_index(index).tab_stop(true);
+        self
     }
 
     pub fn content(&self) -> &str {
@@ -289,6 +321,7 @@ impl TextField {
         self.marked_range = None;
         self.last_layout = None;
         self.last_bounds = None;
+        self.scroll_x = px(0.);
         self.is_selecting = false;
     }
 }
@@ -415,7 +448,7 @@ impl EntityInputHandler for TextField {
         let last_layout = self.last_layout.as_ref()?;
 
         assert_eq!(last_layout.text, self.display_text(true));
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        let utf8_index = last_layout.index_for_x(line_point.x)?;
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -428,6 +461,7 @@ struct PrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    scroll_x: Pixels,
 }
 
 impl IntoElement for TextElement {
@@ -525,14 +559,33 @@ impl Element for TextElement {
             .text_system()
             .shape_line(display_text, font_size, &runs, None);
 
-        let cursor_pos = line.x_for_index(cursor);
+        // Scroll just enough to keep the cursor (2px wide) in view.
+        let cursor_width = px(2.);
+        let visible = bounds.size.width - cursor_width;
+        let cursor_x = line.x_for_index(cursor);
+        let mut scroll_x = input.scroll_x;
+        if line.width <= visible {
+            scroll_x = px(0.);
+        } else {
+            if cursor_x - scroll_x > visible {
+                scroll_x = cursor_x - visible;
+            }
+            if cursor_x < scroll_x {
+                scroll_x = cursor_x;
+            }
+            if scroll_x > line.width - visible {
+                scroll_x = line.width - visible;
+            }
+        }
+        let left = bounds.left() - scroll_x;
+        let cursor_pos = cursor_x;
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
-                        size(px(2.), bounds.bottom() - bounds.top()),
+                        point(left + cursor_pos, bounds.top()),
+                        size(cursor_width, bounds.bottom() - bounds.top()),
                     ),
                     gpui::blue(),
                 )),
@@ -542,11 +595,11 @@ impl Element for TextElement {
                 Some(fill(
                     Bounds::from_corners(
                         point(
-                            bounds.left() + line.x_for_index(selected_range.start),
+                            left + line.x_for_index(selected_range.start),
                             bounds.top(),
                         ),
                         point(
-                            bounds.left() + line.x_for_index(selected_range.end),
+                            left + line.x_for_index(selected_range.end),
                             bounds.bottom(),
                         ),
                     ),
@@ -559,6 +612,7 @@ impl Element for TextElement {
             line: Some(line),
             cursor,
             selection,
+            scroll_x,
         }
     }
 
@@ -578,22 +632,32 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection)
-        }
+        let scroll_x = prepaint.scroll_x;
+        // Where the unscrolled line starts; widened so it still covers the
+        // visible area. Mouse and IME math measure from its left edge.
+        let line_bounds = Bounds::new(
+            point(bounds.left() - scroll_x, bounds.top()),
+            size(bounds.size.width + scroll_x, bounds.size.height),
+        );
         let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .unwrap();
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection)
+            }
+            line.paint(line_bounds.origin, window.line_height(), window, cx)
+                .unwrap();
 
-        if focus_handle.is_focused(window)
-            && let Some(cursor) = prepaint.cursor.take()
-        {
-            window.paint_quad(cursor);
-        }
+            if focus_handle.is_focused(window)
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
+        });
 
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(line);
-            input.last_bounds = Some(bounds);
+            input.last_bounds = Some(line_bounds);
+            input.scroll_x = scroll_x;
         });
     }
 }
@@ -602,6 +666,7 @@ impl Render for TextField {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
+            .items_center()
             .key_context("TextField")
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
@@ -618,12 +683,18 @@ impl Render for TextField {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(|_, _: &Confirm, _, cx| cx.emit(TextFieldEvent::Confirm)))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .h(px(32.))
-            .w_full()
+            .map(|field| match self.style {
+                TextFieldStyle::Default => field.w_full(),
+                TextFieldStyle::Settings => field
+                    .min_w(px(256.))
+                    .focus(|field| field.border_color(theme::border_focused())),
+            })
             .px_2()
             .bg(theme::white())
             .border_1()
@@ -634,6 +705,8 @@ impl Render for TextField {
             .child(TextElement { input: cx.entity() })
     }
 }
+
+impl gpui::EventEmitter<TextFieldEvent> for TextField {}
 
 impl Focusable for TextField {
     fn focus_handle(&self, _: &App) -> FocusHandle {
