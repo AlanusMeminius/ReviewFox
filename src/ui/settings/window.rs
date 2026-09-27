@@ -624,7 +624,7 @@ pub fn open_or_focus_settings(target: Option<SettingsTarget>, cx: &mut App) {
             focus: true,
             window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
             titlebar: Some(gpui::TitlebarOptions {
-                title: Some("ReviewFox Settings".into()),
+                title: Some("Settings".into()),
                 appears_transparent: false,
                 ..Default::default()
             }),
