@@ -1302,16 +1302,30 @@ fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
 
 fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     match view.snapshot.as_ref().map(|s| &s.file) {
-        Some(FileDiff::Text { display, .. }) => div()
-            .id("diff-panes")
-            .flex_1()
-            .min_h(px(0.))
-            .flex()
-            .overflow_hidden()
-            .child(code_pane(true, display, view, cx))
-            .child(center_gutter(display, view, cx))
-            .child(code_pane(false, display, view, cx))
-            .into_any_element(),
+        Some(FileDiff::Text { display, .. }) => {
+            let waves = view.omit_links.clone();
+            div()
+                .id("diff-panes")
+                .relative()
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .overflow_hidden()
+                .child(code_pane(true, display, view, cx))
+                .child(center_gutter(display, view, cx))
+                .child(code_pane(false, display, view, cx))
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, _| {
+                            paint_omit_waves(window, bounds, &waves);
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+                .into_any_element()
+        }
         Some(FileDiff::Binary) => placeholder("Binary file — no Alignment"),
         Some(FileDiff::Error(msg)) => placeholder(msg),
         None => placeholder("Open Diff from the main window"),
@@ -1503,8 +1517,6 @@ fn code_pane(
                             };
                             let bg = if drafting_here {
                                 rgb(0xdbe4ff)
-                            } else if is_omit {
-                                rgb(0xf0f3f7)
                             } else {
                                 kind_bg(row.kind)
                             };
@@ -1518,11 +1530,7 @@ fn code_pane(
                                 .h(px(row_h))
                                 .px_3()
                                 .bg(bg)
-                                .text_color(if is_omit {
-                                    theme::muted()
-                                } else {
-                                    theme::text()
-                                })
+                                .text_color(theme::text())
                                 .overflow_hidden()
                                 .when(marked && !is_omit, |d| {
                                     d.border_l_2().border_color(theme::accent())
@@ -1535,7 +1543,10 @@ fn code_pane(
                                         this.begin_draft(side, line, window, cx);
                                     }
                                 }))
-                                .child(render_row_text(row.text, parts))
+                                .child(render_row_text(
+                                    if is_omit { String::new() } else { row.text },
+                                    if is_omit { None } else { parts },
+                                ))
                                 .when(is_seam, |row| {
                                     row.child(seam_hairline(seam_color))
                                 })
@@ -1581,7 +1592,6 @@ fn center_gutter(
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
     let placed = view.placed.clone();
-    let omit_links = view.omit_links.clone();
     div()
         .id("gutter")
         .relative()
@@ -1632,7 +1642,6 @@ fn center_gutter(
                 move |bounds, _, window, _| {
                     window.with_content_mask(Some(ContentMask { bounds }), |window| {
                         paint_bridges(window, &placed);
-                        paint_omit_links(window, &omit_links);
                     });
                 },
             )
@@ -1699,7 +1708,7 @@ fn ln_col(
                 (if labels_only { "ln-rt" } else { "ln-r" }, i)
             };
             let label = match row.kind {
-                RowKind::Omit { .. } => "⋯".to_string(),
+                RowKind::Omit { .. } => String::new(),
                 _ => row.ln.to_string(),
             };
             let is_seam = seams.iter().any(|s| *s as usize == i);
@@ -1707,12 +1716,7 @@ fn ln_col(
                 .id(ln_id)
                 .relative()
                 .h(px(row_h))
-                .when(!labels_only, |cell| {
-                    cell.bg(match row.kind {
-                        RowKind::Omit { .. } => rgb(0xf6f6f6),
-                        kind => kind_bg(kind),
-                    })
-                })
+                .when(!labels_only, |cell| cell.bg(kind_bg(row.kind)))
                 .child(label)
                 .when(is_seam && !labels_only, |cell| cell.child(seam_hairline(seam_color)))
         }))
@@ -2340,20 +2344,104 @@ fn pinch_bezier(path: &mut PathBuilder, bridge: &PlacedBridge) {
     }
 }
 
-fn paint_omit_links(window: &mut Window, links: &[(f32, f32, f32, f32)]) {
-    for &(x0, y0, x1, y1) in links {
-        let mut stroke = PathBuilder::stroke(px(1.4));
-        let mid = (x0 + x1) / 2.;
-        stroke.move_to(point(px(x0), px(y0)));
-        stroke.cubic_bezier_to(
-            point(px(x1), px(y1)),
-            point(px(mid), px(y0)),
-            point(px(mid), px(y1)),
-        );
-        if let Ok(path) = stroke.build() {
-            window.paint_path(path, rgb(0xb5b5b5));
-        }
+fn paint_omit_waves(
+    window: &mut Window,
+    bounds: Bounds<gpui::Pixels>,
+    folds: &[(f32, f32, f32, f32)],
+) {
+    if folds.is_empty() {
+        return;
     }
+    let x0 = f32::from(bounds.left());
+    let x1 = f32::from(bounds.right());
+    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        for &(gutter_l, y_l, gutter_r, y_r) in folds {
+            // Bend only in the gap between the line-number columns. A slope
+            // across the digits cuts through them when the folds are far apart.
+            let path = joined_wave(
+                x0,
+                x1,
+                y_l,
+                gutter_l + LN_COL,
+                gutter_r - LN_COL,
+                y_r,
+            );
+            if let Ok(path) = path.build() {
+                window.paint_path(path, rgb(0xb5b5b5));
+            }
+        }
+    });
+}
+
+const WAVE_PERIOD: f32 = 16.;
+const WAVE_AMP: f32 = 3.5;
+const WAVE_STEP: f32 = 2.;
+
+fn wave_y(x: f32, base: f32, crest_at: Option<f32>) -> f32 {
+    let phase = match crest_at {
+        Some(lock) => (x - lock) / WAVE_PERIOD * std::f32::consts::TAU + std::f32::consts::FRAC_PI_2,
+        None => x / WAVE_PERIOD * std::f32::consts::TAU,
+    };
+    base + phase.sin() * WAVE_AMP
+}
+
+fn trace_wave(
+    path: &mut PathBuilder,
+    x0: f32,
+    x1: f32,
+    base: f32,
+    crest_at: Option<f32>,
+    first_move: bool,
+) {
+    if x1 < x0 {
+        return;
+    }
+    let mut x = x0;
+    let mut moved = !first_move;
+    loop {
+        let xx = x.min(x1);
+        let p = point(px(xx), px(wave_y(xx, base, crest_at)));
+        if moved {
+            path.line_to(p);
+        } else {
+            path.move_to(p);
+            moved = true;
+        }
+        if xx >= x1 - 0.01 {
+            break;
+        }
+        x += WAVE_STEP;
+    }
+}
+
+/// One stroke. Each side is a horizontal sine through its code and line numbers.
+/// A height change is a cubic Bézier in the gap between the line-number columns.
+/// Each sine meets that curve at a crest, so both tangents are horizontal, the
+/// same way the change ribbons leave a flat edge.
+fn joined_wave(x0: f32, x1: f32, y_l: f32, gap_l: f32, gap_r: f32, y_r: f32) -> PathBuilder {
+    let mut path = PathBuilder::stroke(px(1.25));
+    if x1 - x0 < 2. {
+        return path;
+    }
+    let gap_l = gap_l.clamp(x0, x1);
+    let gap_r = (gap_l + 8.).max(gap_r).min(x1);
+    if (y_r - y_l).abs() < 0.5 {
+        trace_wave(&mut path, x0, x1, y_l, None, true);
+        return path;
+    }
+    trace_wave(&mut path, x0, gap_l, y_l, Some(gap_l), true);
+    let y0 = y_l + WAVE_AMP;
+    let y1 = y_r + WAVE_AMP;
+    let dx = (gap_r - gap_l) * 0.45;
+    path.cubic_bezier_to(
+        point(px(gap_r), px(y1)),
+        point(px(gap_l + dx), px(y0)),
+        point(px(gap_r - dx), px(y1)),
+    );
+    if gap_r < x1 {
+        trace_wave(&mut path, gap_r, x1, y_r, Some(gap_r), false);
+    }
+    path
 }
 
 fn paint_gaps(

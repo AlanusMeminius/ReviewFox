@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- Settled: one omission sine. Each side stays horizontal through its code and line numbers. A height change is a cubic Bézier in the gutter, met at a crest. No fill, no label. -->
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -102,18 +103,7 @@
     .row.add { background: var(--add-bg); }
     .row.mod { background: var(--mod-bg); }
     .row.mod .chg { background: var(--chg); border-radius: 2px; }
-    .row.omit {
-      cursor: pointer;
-      color: var(--muted);
-      background: #f6f6f6;
-    }
-    .row.code.omit {
-      background-color: #f6f6f6;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='8'%3E%3Cpath d='M0 4 Q4 1 8 4 Q12 7 16 4' fill='none' stroke='%23b5b5b5' stroke-width='1.4'/%3E%3C/svg%3E");
-      background-repeat: repeat-x;
-      background-position: left center;
-      background-size: 16px 8px;
-    }
+    .row.omit { cursor: pointer; }
     .row.hit { outline: 1px solid #e6c200; outline-offset: -1px; }
     mark { background: #ffe08a; color: inherit; }
     .seam {
@@ -598,14 +588,14 @@
       const code = rows.map((r) => {
         const cls = r.kind === 'delete' ? 'del' : r.kind === 'insert' ? 'add' : r.kind === 'replace' ? 'mod' : r.kind === 'omit' ? 'omit' : '';
         const hit = q && r.text && r.text.toLowerCase().includes(q) ? ' hit' : '';
-        const body = r.parts ? htmlParts(r.parts) : htmlPlain(r.text || '');
+        const body = r.kind === 'omit' ? '' : (r.parts ? htmlParts(r.parts) : htmlPlain(r.text || ''));
         const omit = r.kind === 'omit' ? ' data-omit="' + r.omit + '"' : '';
         const ln = r.ln != null ? ' data-ln="' + r.ln + '"' : '';
         return '<div class="row code ' + cls + hit + '" data-side="' + r.side + '" data-kind="' + r.kind + '" data-i="' + r.i + '"' + ln + omit + ' data-s="' + r.s + '" style="top:' + r.contentY + 'px;height:' + rh + 'px">' + body + '</div>';
       }).join('');
       const lns = rows.map((r) => {
         const cls = r.kind === 'delete' ? 'del' : r.kind === 'insert' ? 'add' : r.kind === 'replace' ? 'mod' : r.kind === 'omit' ? 'omit' : '';
-        const label = r.kind === 'omit' ? '⋯' : (r.ln != null ? String(r.ln) : '');
+        const label = r.kind === 'omit' ? '' : (r.ln != null ? String(r.ln) : '');
         const omit = r.kind === 'omit' ? ' data-omit="' + r.omit + '"' : '';
         return '<div class="row lns ' + lnClass + ' ' + cls + '"' + omit + ' style="top:' + r.contentY + 'px;height:' + rh + 'px">' + label + '</div>';
       }).join('');
@@ -663,21 +653,57 @@
         + ' L ' + (xL - stub) + ' ' + yL1 + ' Z';
     }
 
-    function sine(x0, y0, x1, y1) {
-      const span = x1 - x0;
-      if (span < 2) return '';
-      const step = 8, amp = 3.5;
-      let d = 'M ' + x0.toFixed(1) + ' ' + y0.toFixed(1);
-      let up = false;
-      for (let x = x0; x < x1 - 0.5; x += step) {
-        const end = Math.min(x + step, x1);
-        const mid = (x + end) / 2;
-        const y = (t) => y0 + (y1 - y0) * ((t - x0) / span);
-        d += ' Q ' + mid.toFixed(1) + ' ' + (y(mid) + (up ? -amp : amp)).toFixed(1)
-          + ' ' + end.toFixed(1) + ' ' + y(end).toFixed(1);
-        up = !up;
+    function waveStroke(d) {
+      if (!d) return '';
+      return '<path d="' + d + '" fill="none" stroke="#b5b5b5" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>';
+    }
+
+    function waveY(x, base, crestAt) {
+      const phase = crestAt == null
+        ? (x / 16) * Math.PI * 2
+        : ((x - crestAt) / 16) * Math.PI * 2 + Math.PI / 2;
+      return base + Math.sin(phase) * 3.5;
+    }
+
+    function traceWave(x0, x1, base, crestAt) {
+      let d = '';
+      for (let x = x0; x <= x1 + 0.01; x += 2) {
+        const xx = Math.min(x, x1);
+        d += (d ? ' L ' : '') + xx.toFixed(1) + ' ' + waveY(xx, base, crestAt).toFixed(1);
+        if (xx >= x1) break;
       }
       return d;
+    }
+
+    // Mirrors joined_wave in src/ui/diff_window.rs. Each sine meets the gutter
+    // cubic at a crest, so the tangent is horizontal on both sides of the join.
+    function joinedWave(x0, x1, yL, gapL, gapR, yR) {
+      gapL = Math.max(x0, Math.min(gapL, x1));
+      gapR = Math.max(gapL + 8, Math.min(gapR, x1));
+      if (Math.abs(yR - yL) < 0.5) return 'M ' + traceWave(x0, x1, yL, null);
+      const y0 = yL + 3.5;
+      const y1 = yR + 3.5;
+      const dx = (gapR - gapL) * 0.45;
+      let d = 'M ' + traceWave(x0, gapL, yL, gapL);
+      d += ' C ' + (gapL + dx).toFixed(1) + ' ' + y0.toFixed(1)
+        + ', ' + (gapR - dx).toFixed(1) + ' ' + y1.toFixed(1)
+        + ', ' + gapR.toFixed(1) + ' ' + y1.toFixed(1);
+      if (gapR < x1) d += ' L ' + traceWave(gapR, x1, yR, gapR);
+      return d;
+    }
+
+    function paintWaves(x0, xL, xR, w) {
+      let html = '';
+      model.oldRows.forEach((L) => {
+        if (L.kind !== 'omit') return;
+        const R = model.newRows.find((n) => n.kind === 'omit' && n.omit === L.omit);
+        if (!R) return;
+        const mid = rowH() / 2;
+        const yL = stageY(paneL, L.contentY + mid);
+        const yR = stageY(paneR, R.contentY + mid);
+        html += waveStroke(joinedWave(x0, w, yL, xL, xR, yR));
+      });
+      return html;
     }
 
     function paintRibbons() {
@@ -708,16 +734,7 @@
           html += '<path fill="' + fill.replace + '" d="' + shapeReplace(yL0, yL1, yR0, yR1, xL, xR) + '"><title>' + escapeHtml(rb.title) + '</title></path>';
         }
       });
-      const omits = [];
-      model.oldRows.forEach((r, i) => {
-        if (r.kind === 'omit') omits.push([r, model.newRows.find((n) => n.kind === 'omit' && n.omit === r.omit)]);
-      });
-      omits.forEach(([L, R]) => {
-        if (!R) return;
-        const yL = stageY(paneL, L.contentY + rowH() / 2);
-        const yR = stageY(paneR, R.contentY + rowH() / 2);
-        html += '<path d="' + sine(xL, yL, xR, yR) + '" fill="none" stroke="#b5b5b5" stroke-width="1.4"/>';
-      });
+      html += paintWaves(x0, xL, xR, w);
       if (!model.oldRows.length) {
         const y = stageY(paneL, anchorY());
         html += '<line x1="' + x0 + '" y1="' + y + '" x2="' + xL + '" y2="' + y + '" stroke="#8aa0b8" stroke-width="2"/>';
