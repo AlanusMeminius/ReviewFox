@@ -13,6 +13,7 @@ mod metadata;
 mod scrollbar;
 mod splitter;
 mod theme;
+mod window_controls;
 mod window_geometry;
 
 use gpui::{
