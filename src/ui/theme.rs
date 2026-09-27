@@ -234,8 +234,11 @@ pub fn error_background() -> Rgba {
 pub fn error_border() -> Rgba {
     rgb(0xf5c8c2)
 }
-/// Settings nav sidebar: white like the content pane, split from it by the
-/// nav's right border.
-pub fn settings_nav() -> Rgba {
-    white()
+/// Settings nav row under the pointer: a half-step toward the white
+/// [`capsule`] that marks the selected row, so hover never reads as selection.
+pub fn settings_nav_hover() -> Rgba {
+    Rgba {
+        a: 0.55,
+        ..white()
+    }
 }
