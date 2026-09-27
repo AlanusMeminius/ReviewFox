@@ -89,6 +89,7 @@ pub fn run() {
     };
 
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
+        theme::init_code_font(&cx.text_system().all_font_names());
         #[cfg(target_os = "macos")]
         app_icon::set_app_icon();
 
