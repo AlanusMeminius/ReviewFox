@@ -212,21 +212,18 @@ impl BranchBrowser {
         Ok(())
     }
 
-    /// Replace the commit list with MR commits (newest-first) and set Comparison to
-    /// the forge `diff_refs` pair. Marks every row selected for chrome only; Diff
-    /// identity comes from `base_oid`/`head_oid`, not from range fold.
-    pub fn apply_mr_commits(
-        &mut self,
-        commits: Vec<CommitInfo>,
-        base_oid: Oid,
-        head_oid: Oid,
-    ) -> Result<()> {
+    /// Replace the commit list with MR commits (newest-first). Selects the newest
+    /// row and folds Comparison like Branch Browser (`C^..C`); Diff identity follows
+    /// commit selection, not forge `diff_refs`.
+    pub fn apply_mr_commits(&mut self, commits: Vec<CommitInfo>) -> Result<()> {
         if commits.is_empty() {
             return Err(err("merge request has no commits"));
         }
         self.commits = commits;
-        self.in_range = vec![true; self.commits.len()];
-        self.set_comparison_oids(base_oid, head_oid)
+        self.in_range = vec![false; self.commits.len()];
+        self.in_range[0] = true;
+        let repo = open_repo(&self.comparison)?;
+        apply_range_fold(&repo, self)
     }
 }
 
@@ -980,6 +977,23 @@ mod tests {
                 .iter()
                 .any(|p| p.path == "b.txt" && p.status == PathStatus::Add)
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_mr_commits_selects_newest_only() {
+        let dir = temp_repo();
+        let mut bb = BranchBrowser::open(&dir).expect("open");
+        let commits = bb.commits.clone();
+        let head = commits[0].oid;
+        let parent = commits[1].oid;
+        bb.apply_mr_commits(commits).expect("apply mr commits");
+        assert!(bb.in_range[0]);
+        assert!(!bb.in_range[1]);
+        assert!(!bb.in_range[2]);
+        assert_eq!(bb.comparison.head_oid, head);
+        assert_eq!(bb.comparison.base_oid, parent);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

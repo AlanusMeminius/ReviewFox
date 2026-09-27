@@ -141,7 +141,6 @@ pub fn run() {
 
         let boot = boot.clone();
         let gitlab_connection = gitlab_connection.clone();
-        let settings_window = settings_window.clone();
         let _main = cx
             .open_window(
                 WindowOptions {
@@ -158,7 +157,7 @@ pub fn run() {
                     ..Default::default()
                 },
                 move |_, cx| {
-                    cx.new(|cx| AppView::new(boot, gitlab_connection, settings_window, cx))
+                    cx.new(|cx| AppView::new(boot, gitlab_connection, cx))
                 },
             )
             .expect("open main window");

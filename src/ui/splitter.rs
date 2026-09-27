@@ -26,6 +26,8 @@ pub enum Axis {
     HorizontalTrailing,
     /// Horizontal rule; size = viewport.height − y (south pane height).
     Vertical,
+    /// Horizontal rule; size = pointer y (north pane height from viewport top).
+    VerticalNorth,
 }
 
 pub const MIN_SIDEBAR_WIDTH: f32 = 140.;
@@ -41,6 +43,10 @@ pub const MIN_DIFF_CONTENT_WIDTH: f32 = 400.;
 pub const DEFAULT_HEAD_META_HEIGHT: f32 = 120.;
 pub const MIN_HEAD_META_HEIGHT: f32 = 72.;
 pub const MIN_FILE_TREE_HEIGHT: f32 = 100.;
+
+pub const DEFAULT_MR_DETAIL_HEIGHT: f32 = 120.;
+pub const MIN_MR_DETAIL_HEIGHT: f32 = 72.;
+pub const MIN_COMMIT_LIST_HEIGHT: f32 = 100.;
 
 pub fn default_sidebar_width() -> f32 {
     f32::from(theme::SIDEBAR_WIDTH)
@@ -81,6 +87,14 @@ pub fn clamp_height(requested: f32, available: f32) -> f32 {
     requested.clamp(MIN_HEAD_META_HEIGHT, maximum)
 }
 
+/// MR detail (north of commit list): min floor, 40% cap, leave room for commits.
+pub fn clamp_mr_detail_height(requested: f32, available: f32) -> f32 {
+    let max_by_pct = available * 0.4;
+    let max_by_list = (available - MIN_COMMIT_LIST_HEIGHT).max(MIN_MR_DETAIL_HEIGHT);
+    let maximum = max_by_pct.min(max_by_list);
+    requested.clamp(MIN_MR_DETAIL_HEIGHT, maximum)
+}
+
 /// Map pointer → raw pane size in window space (handlers re-clamp with sibling widths).
 /// Vertical is clamped here (no sibling). Not `window.bounds()` — that is screen-global.
 pub fn size_at_pointer(axis: Axis, position: Point<Pixels>, viewport: Size<Pixels>) -> f32 {
@@ -91,6 +105,7 @@ pub fn size_at_pointer(axis: Axis, position: Point<Pixels>, viewport: Size<Pixel
             f32::from(viewport.height - position.y),
             f32::from(viewport.height),
         ),
+        Axis::VerticalNorth => f32::from(position.y),
     }
 }
 
@@ -152,7 +167,8 @@ pub fn handle(
             .cursor_col_resize(),
         // Vertical sits between white panes inside the capsule; fill so a
         // Transparent window root doesn't punch through the 5px seam.
-        Axis::Vertical => el
+        // VerticalNorth is the same visual between MR detail and commits.
+        Axis::Vertical | Axis::VerticalNorth => el
             .h(px(HANDLE_WIDTH))
             .w_full()
             .bg(theme::white())
@@ -224,5 +240,25 @@ mod tests {
         let poisoned = (screen_origin_y + 800.) - 680.;
         assert!(poisoned > 120.);
         assert_ne!(clamp_height(poisoned, 800.), 120.);
+    }
+
+    #[test]
+    fn vertical_north_size_is_distance_from_viewport_top() {
+        use gpui::{point, px, size};
+
+        let viewport = size(px(1280.), px(800.));
+        let at_handle = point(px(400.), px(156.));
+        assert_eq!(
+            size_at_pointer(Axis::VerticalNorth, at_handle, viewport),
+            156.
+        );
+    }
+
+    #[test]
+    fn mr_detail_height_clamp_keeps_commit_list() {
+        assert_eq!(clamp_mr_detail_height(40., 800.), 72.);
+        assert_eq!(clamp_mr_detail_height(120., 800.), 120.);
+        assert_eq!(clamp_mr_detail_height(400., 800.), 320.);
+        assert_eq!(clamp_mr_detail_height(150., 200.), 80.);
     }
 }

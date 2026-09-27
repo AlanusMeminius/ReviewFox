@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::domain::{Oid, PathStatus, Repository};
+use crate::domain::{PathStatus, Repository};
 use crate::git::{self, BranchBrowser, BranchInfo, CommitInfo};
 use crate::gitlab::{
     self, FetchMergeRequestResult, ListMergeRequestCommitsResult, ListMergeRequestsResult,
@@ -25,7 +25,6 @@ use super::gitlab_connection::{self, GitLabConnection};
 #[cfg(target_os = "macos")]
 use super::mac_column_vibrancy::ColumnVibrancy;
 use super::scrollbar;
-use super::settings_window::{self, SettingsView};
 use super::splitter::{self, Axis, ResizeState};
 use super::current_repo;
 use super::theme;
@@ -44,8 +43,6 @@ pub struct AppView {
     mr_toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// In-memory MR Entry (list = GitLab commits; Comparison = diff_refs).
     mr_entry: Option<MrEntry>,
-    gitlab_connection: Rc<RefCell<GitLabConnection>>,
-    settings_window: Rc<RefCell<Option<WindowHandle<SettingsView>>>>,
     repo_menu: Option<RepoContextMenu>,
     activation_sub: Option<gpui::Subscription>,
     /// Ephemeral; paths in set are collapsed. Default empty = all expanded.
@@ -58,6 +55,8 @@ pub struct AppView {
     files_resize_state: Rc<ResizeState>,
     head_meta_height: f32,
     head_meta_resize_state: Rc<ResizeState>,
+    mr_detail_height: f32,
+    mr_detail_resize_state: Rc<ResizeState>,
     #[cfg(target_os = "macos")]
     sidebar_vibrancy: Option<ColumnVibrancy>,
 }
@@ -96,7 +95,6 @@ impl AppView {
     pub fn new(
         boot: Option<BranchBrowser>,
         gitlab_connection: Rc<RefCell<GitLabConnection>>,
-        settings_window: Rc<RefCell<Option<WindowHandle<SettingsView>>>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let state = match boot {
@@ -105,7 +103,7 @@ impl AppView {
         };
         Self::sync_current_repo_path(&state);
         gitlab_connection::spawn_refresh_connection(
-            gitlab_connection.clone(),
+            gitlab_connection,
             cx.entity().downgrade(),
             cx,
         );
@@ -122,8 +120,6 @@ impl AppView {
             branch_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_entry: None,
-            gitlab_connection,
-            settings_window,
             repo_menu: None,
             activation_sub: None,
             collapsed_dirs: HashSet::new(),
@@ -134,6 +130,8 @@ impl AppView {
             files_resize_state: Rc::new(ResizeState::default()),
             head_meta_height: splitter::DEFAULT_HEAD_META_HEIGHT,
             head_meta_resize_state: Rc::new(ResizeState::default()),
+            mr_detail_height: splitter::DEFAULT_MR_DETAIL_HEIGHT,
+            mr_detail_resize_state: Rc::new(ResizeState::default()),
             #[cfg(target_os = "macos")]
             sidebar_vibrancy: None,
         };
@@ -189,6 +187,22 @@ impl AppView {
             view.update(cx, |this, cx| {
                 if this.head_meta_height != height {
                     this.head_meta_height = height;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+    }
+
+    fn mr_detail_resize_handler(&self, cx: &Context<Self>) -> splitter::ResizeHandler {
+        let view = cx.entity().downgrade();
+        Rc::new(move |size, window, cx: &mut App| {
+            view.update(cx, |this, cx| {
+                let chrome = f32::from(theme::CHROME_HEIGHT);
+                let available = f32::from(window.viewport_size().height) - chrome;
+                let height = splitter::clamp_mr_detail_height(size - chrome, available);
+                if this.mr_detail_height != height {
+                    this.mr_detail_height = height;
                     cx.notify();
                 }
             })
@@ -573,35 +587,6 @@ impl AppView {
                 }
             };
 
-            let base_oid = match detail.diff_refs.base_sha.parse::<Oid>() {
-                Ok(o) => o,
-                Err(e) => {
-                    let _ = this.update(cx, |view, cx| {
-                        finish_mr_activate(
-                            view,
-                            iid,
-                            Err(format!("invalid diff_refs.base_sha: {e}")),
-                        );
-                        cx.notify();
-                    });
-                    return;
-                }
-            };
-            let head_oid = match detail.diff_refs.head_sha.parse::<Oid>() {
-                Ok(o) => o,
-                Err(e) => {
-                    let _ = this.update(cx, |view, cx| {
-                        finish_mr_activate(
-                            view,
-                            iid,
-                            Err(format!("invalid diff_refs.head_sha: {e}")),
-                        );
-                        cx.notify();
-                    });
-                    return;
-                }
-            };
-
             let _ = this.update(cx, |view, cx| {
                 finish_mr_activate(
                     view,
@@ -610,8 +595,6 @@ impl AppView {
                         detail,
                         project: path,
                         commit_infos,
-                        base_oid,
-                        head_oid,
                     }),
                 );
                 cx.notify();
@@ -638,22 +621,6 @@ impl AppView {
         if let Err(e) = result {
             self.state = MainState::Error(e.0);
         }
-    }
-
-    fn open_settings(&mut self, cx: &mut Context<Self>) {
-        settings_window::open_or_focus_settings(
-            &mut self.settings_window.borrow_mut(),
-            self.gitlab_connection.clone(),
-            cx,
-        );
-    }
-
-    fn reverify_gitlab(&mut self, cx: &mut Context<Self>) {
-        gitlab_connection::spawn_refresh_connection(
-            self.gitlab_connection.clone(),
-            cx.entity().downgrade(),
-            cx,
-        );
     }
 
     fn open_branch(&mut self, name: &str, cx: &mut Context<Self>) {
@@ -1249,9 +1216,8 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
     let mr_label = view
         .mr_entry
         .as_ref()
-        .map(|e| format!("!{} {}", e.summary.iid, e.summary.title))
+        .map(|e| format!("!{}", e.summary.iid))
         .unwrap_or_else(|| "Merge requests".into());
-    let connection = view.gitlab_connection.borrow().clone();
     let show_gitlab = gitlab_chrome_visible(view);
     // Full-bleed white under the Changes capsule; content column inset by
     // float_gap so text/scrollbar clear the cast (prototype stage padding).
@@ -1345,7 +1311,6 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                             .flex()
                             .items_center()
                             .gap_1()
-                            .max_w(px(220.))
                             .min_w(px(0.))
                             .overflow_hidden()
                             .cursor_pointer()
@@ -1361,7 +1326,17 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                                 .size_full(),
                             )
                             .child(
+                                svg()
+                                    .size_4()
+                                    .flex_none()
+                                    .path("gitlab.svg")
+                                    .text_color(theme::muted()),
+                            )
+                            .child(
+                                // Digits/! have no descenders — same line box as branch
+                                // labels sits optically high; 1px down matches "develop".
                                 div()
+                                    .mt(px(1.))
                                     .min_w(px(0.))
                                     .overflow_hidden()
                                     .text_ellipsis()
@@ -1383,9 +1358,6 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                     )
                 })
                 .child(div().flex_1())
-                .when(show_gitlab, |row| {
-                    row.child(render_gitlab_connection_chrome(&connection, cx))
-                })
                 .child(
                     div()
                         .flex_none()
@@ -1396,7 +1368,17 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                 ),
         )
         .when(show_gitlab && view.mr_entry.is_some(), |d| {
-            d.child(render_mr_entry_detail(view.mr_entry.as_ref().unwrap()))
+            d.child(render_mr_entry_detail(
+                view.mr_entry.as_ref().unwrap(),
+                view.mr_detail_height,
+                cx,
+            ))
+            .child(splitter::handle(
+                "mr-detail-resize-handle",
+                Axis::VerticalNorth,
+                view.mr_detail_resize_handler(cx),
+                view.mr_detail_resize_state.clone(),
+            ))
         })
         .child(match &view.state {
             MainState::Empty => div().flex_1().into_any_element(),
@@ -1497,8 +1479,6 @@ struct MrActivateReady {
     detail: MergeRequestDetail,
     project: String,
     commit_infos: Vec<CommitInfo>,
-    base_oid: Oid,
-    head_oid: Oid,
 }
 
 fn finish_mr_activate(
@@ -1524,7 +1504,7 @@ fn finish_mr_activate(
             entry.detail = MrDetailState::Ready(ready.detail);
             if let MainState::Ready(bb) = &mut view.state {
                 if let Err(e) =
-                    bb.apply_mr_commits(ready.commit_infos, ready.base_oid, ready.head_oid)
+                    bb.apply_mr_commits(ready.commit_infos)
                 {
                     entry.detail = MrDetailState::Failed(e.0);
                 }
@@ -1537,7 +1517,7 @@ fn finish_mr_activate(
     }
 }
 
-/// Show MR picker + connection chrome only when a remote host matches Settings.
+/// Show MR picker only when a remote host matches Settings.
 fn gitlab_chrome_visible(view: &AppView) -> bool {
     let MainState::Ready(loaded) = &view.state else {
         return false;
@@ -1552,29 +1532,49 @@ enum MrDetailState {
     Failed(String),
 }
 
-fn render_mr_entry_detail(entry: &MrEntry) -> impl IntoElement {
+fn render_mr_entry_detail(
+    entry: &MrEntry,
+    height: f32,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     let summary = &entry.summary;
+    let (scroll, sb) = scrollbar::vertical("mr-detail-sb", cx);
     div()
+        .id("mr-entry-detail")
+        .h(px(height))
         .flex_none()
         .flex()
         .flex_col()
-        .gap_0p5()
         .px_3()
+        .pt_1()
         .pb_1()
         .text_xs()
         .text_color(theme::muted())
-        .child(format!(
-            "MR Entry · {} → {}",
-            summary.source_branch, summary.target_branch
+        .child(scrollbar::overlay_flex(
+            div()
+                .id("mr-entry-detail-body")
+                .size_full()
+                .track_scroll(&scroll)
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(format!(
+                    "MR Entry · {} → {}",
+                    summary.source_branch, summary.target_branch
+                ))
+                .children(match &entry.detail {
+                    MrDetailState::Loading => {
+                        vec![div().child("Loading MR detail…").into_any_element()]
+                    }
+                    MrDetailState::Failed(msg) => vec![div()
+                        .text_color(rgb(0xb42318))
+                        .child(msg.clone())
+                        .into_any_element()],
+                    MrDetailState::Ready(detail) => mr_entry_ready_lines(detail),
+                }),
+            sb,
         ))
-        .children(match &entry.detail {
-            MrDetailState::Loading => vec![div().child("Loading MR detail…").into_any_element()],
-            MrDetailState::Failed(msg) => vec![div()
-                .text_color(rgb(0xb42318))
-                .child(msg.clone())
-                .into_any_element()],
-            MrDetailState::Ready(detail) => mr_entry_ready_lines(detail),
-        })
 }
 
 fn mr_entry_ready_lines(detail: &MergeRequestDetail) -> Vec<gpui::AnyElement> {
@@ -1613,64 +1613,15 @@ fn mr_entry_ready_lines(detail: &MergeRequestDetail) -> Vec<gpui::AnyElement> {
     );
 
     if let Some(desc) = detail.description.as_deref() {
-        lines.push(div().child(truncate_mr_description(desc)).into_any_element());
+        lines.push(
+            div()
+                .whitespace_normal()
+                .child(desc.to_string())
+                .into_any_element(),
+        );
     }
 
     lines
-}
-
-fn truncate_mr_description(text: &str) -> String {
-    const MAX: usize = 120;
-    if text.chars().count() <= MAX {
-        text.to_string()
-    } else {
-        format!(
-            "{}…",
-            text.chars().take(MAX).collect::<String>()
-        )
-    }
-}
-
-fn render_gitlab_connection_chrome(
-    connection: &GitLabConnection,
-    cx: &mut Context<AppView>,
-) -> impl IntoElement {
-    div()
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap_1()
-        .mr_2()
-        .child(
-            div()
-                .id("gitlab-connection")
-                .text_xs()
-                .text_color(theme::muted())
-                .cursor_pointer()
-                .hover(|d| d.text_color(theme::text()))
-                .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx)))
-                .child(match connection {
-                    GitLabConnection::Connected { username } => {
-                        format!("{} · {username}", connection.chrome_label())
-                    }
-                    other => other.chrome_label().to_string(),
-                }),
-        )
-        .child(
-            div()
-                .id("gitlab-reverify")
-                .text_xs()
-                .text_color(theme::faint())
-                .cursor_pointer()
-                .hover(|d| d.text_color(theme::muted()))
-                .when(
-                    !matches!(connection, GitLabConnection::Checking),
-                    |el| {
-                        el.on_click(cx.listener(|this, _, _, cx| this.reverify_gitlab(cx)))
-                    },
-                )
-                .child("Re-verify"),
-        )
 }
 
 fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {

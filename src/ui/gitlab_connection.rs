@@ -1,4 +1,4 @@
-//! Shared GitLab auth display state (verify via `/user`, cached for shell + Settings).
+//! Shared GitLab auth display state (verify via `/user`, cached for Settings).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -22,18 +22,6 @@ impl Default for GitLabConnection {
     fn default() -> Self {
         GitLabConnection::Idle
     }
-}
-
-impl GitLabConnection {
-    pub fn chrome_label(&self) -> &'static str {
-        match self {
-            GitLabConnection::Idle | GitLabConnection::Checking => "GitLab…",
-            GitLabConnection::NoPat => "GitLab: add token",
-            GitLabConnection::Connected { .. } => "GitLab",
-            GitLabConnection::Failed(_) => "GitLab: error",
-        }
-    }
-
 }
 
 pub fn apply_verify_result(connection: &Rc<RefCell<GitLabConnection>>, result: &VerifyResult) {
