@@ -1,5 +1,5 @@
 use gpui::{
-    anchored, canvas, deferred, ease_out_quint, point, Animation, AnimationExt, App, Bounds,
+    anchored, canvas, deferred, ease_out_quint, Animation, AnimationExt, App, Bounds,
     ClickEvent, ClipboardItem, Context, Corner, Div, FocusHandle, Focusable, InteractiveElement,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render,
     Size, StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds,
@@ -49,8 +49,6 @@ pub struct AppView {
     /// Live window bounds of the chrome capsules (updated each frame via canvas).
     branch_toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
     mr_toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
-    /// Shared pills+islands column — picker left edge snaps to this content box.
-    commits_column_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// In-memory MR Entry (list = GitLab commits; Comparison = diff_refs).
     mr_entry: Option<MrEntry>,
     repo_menu: Option<RepoContextMenu>,
@@ -120,7 +118,6 @@ impl AppView {
             mr_picker: None,
             branch_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
-            commits_column_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_entry: None,
             repo_menu: None,
             activation_sub: None,
@@ -1524,8 +1521,8 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
         .children(window_controls(window))
 }
 
-/// Width the leading chrome reserves when the sidebar is collapsed. The islands indent by the
-/// same amount, which is what keeps them left-aligned with the titlebar pills.
+/// Width the leading chrome reserves when the sidebar is collapsed. The islands do not follow
+/// it: with nothing left of the stage they start at the window edge.
 fn collapsed_leading_width() -> f32 {
     let controls = 12. + f32::from(theme::TOGGLE_SIZE) * 2. + theme::CHROME_GAP;
     #[cfg(target_os = "macos")]
@@ -1566,25 +1563,13 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
         })
         .child(render_commit_capsule(view, cx));
 
-    // No horizontal padding on the positioning parent — pills, islands, and pickers
-    // all use the same CHANGES_INSET from the column's left border edge.
-    let column_track = view.commits_column_bounds.clone();
     let shared_column = div()
         .id("commits-column")
-        .relative()
         .flex_1()
         .h_full()
         .min_w(px(0.))
         .flex()
         .flex_col()
-        .child(
-            canvas(
-                move |bounds, _, _| column_track.set(bounds),
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .size_full(),
-        )
         .child(islands);
 
     div()
@@ -1599,10 +1584,6 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                 .right(float_gap)
                 .flex()
                 .items_start()
-                .when(view.repos_collapsed, |row| {
-                    // Mirrors the titlebar's leading zone so pills and islands stay aligned.
-                    row.child(div().w(px(collapsed_leading_width())).flex_none())
-                })
                 .child(shared_column),
         )
 }
@@ -2125,17 +2106,8 @@ fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoE
     );
 
     // Window-anchored outside `#stage` so stage overflow cannot clip the soft cast.
-    // Left = island edge (column + inset); top = branch pill.
-    let origin = {
-        let col = view.commits_column_bounds.get();
-        let pill = view.branch_toggle_bounds.get();
-        let x = if f32::from(col.size.width) > 1. {
-            col.origin.x + px(theme::CHANGES_INSET)
-        } else {
-            pill.origin.x
-        };
-        point(x, pill.origin.y)
-    };
+    // Top-left = branch pill; the islands only share its left edge while the sidebar is open.
+    let origin = view.branch_toggle_bounds.get().origin;
 
     anchored()
         .position(origin)
