@@ -17,6 +17,7 @@ use gpui::{
 
 use super::layout::{Layout, LineKind, Row};
 use super::pane::DualPane;
+use super::tabs::TabExpansion;
 use super::trace::{self, FrameStats};
 use super::viewport::{Viewport, route_wheel, snap};
 use crate::domain::Side;
@@ -49,7 +50,10 @@ pub(super) struct ShapeCache {
 }
 
 struct RowShape {
+    /// Code text shaped with tabs expanded (display-only).
     text: Option<ShapedLine>,
+    /// Maps byte ranges into the original line onto `text`.
+    tabs: Option<TabExpansion>,
     label: Option<ShapedLine>,
 }
 
@@ -286,8 +290,8 @@ pub(super) fn build_frame(
                 });
             let (kind, commented, drafting_here, marks) = match row {
                 Row::Line(l) => {
-                    let marks = match (layout.mark_runs(side, l), &shape.text) {
-                        (Some(runs), Some(text)) => mark_spans(&runs, text),
+                    let marks = match (layout.mark_runs(side, l), &shape.text, &shape.tabs) {
+                        (Some(runs), Some(text), Some(tabs)) => mark_spans(&runs, tabs, text),
                         _ => Vec::new(),
                     };
                     (
@@ -395,20 +399,23 @@ fn shape_row(layout: &Layout, side: Side, row: Row<'_>, font_px: f32, window: &m
     let Row::Line(line) = row else {
         return RowShape {
             text: None,
+            tabs: None,
             label: None,
         };
     };
     let text = layout.side(side).text(line);
+    let tabs = (!text.is_empty()).then(|| TabExpansion::new(text));
     RowShape {
-        text: (!text.is_empty()).then(|| {
+        text: tabs.as_ref().map(|t| {
             shape(
                 window,
-                SharedString::from(text.to_string()),
+                SharedString::from(t.text.clone()),
                 theme::MONO_FONT,
                 font_px,
                 theme::text(),
             )
         }),
+        tabs,
         label: Some(shape(
             window,
             SharedString::from(line.ln.to_string()),
@@ -433,10 +440,12 @@ fn shape(window: &mut Window, text: SharedString, family: &'static str, font_px:
         .shape_line(text, px(font_px), &[run], None)
 }
 
-/// x spans of highlight runs (byte ranges into the line text).
-fn mark_spans(runs: &[(usize, usize)], text: &ShapedLine) -> Vec<(f32, f32)> {
+/// x spans of highlight runs (byte ranges into the original line text,
+/// mapped through the tab expansion `text` was shaped from).
+fn mark_spans(runs: &[(usize, usize)], tabs: &TabExpansion, text: &ShapedLine) -> Vec<(f32, f32)> {
     runs.iter()
-        .map(|&(a, b)| (a.min(text.len()), b.min(text.len())))
+        .map(|&(a, b)| (tabs.display_offset(a), tabs.display_offset(b)))
+        .map(|(a, b)| (a.min(text.len()), b.min(text.len())))
         .filter(|(a, b)| b > a)
         .map(|(a, b)| (f32::from(text.x_for_index(a)), f32::from(text.x_for_index(b))))
         .collect()

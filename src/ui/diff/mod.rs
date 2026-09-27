@@ -4,6 +4,7 @@
 pub mod element;
 pub mod layout;
 pub mod pane;
+mod tabs;
 mod trace;
 pub mod viewport;
 

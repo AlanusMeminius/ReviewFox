@@ -7,6 +7,8 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
+use super::tabs::display_columns;
+
 use crate::domain::{
     Alignment, AlignmentOp, Anchor, EQUAL_CONTEXT, FoldState, HunkJumpTarget, LineSpan, Side,
     TokenPart, changed_runs, replace_marks,
@@ -172,7 +174,7 @@ pub struct SideLayout {
     seams: Vec<u32>,
     /// Line numbers with a DraftComment on this side.
     commented: HashSet<u32>,
-    /// Longest shown line in chars, computed on first use (bounds `x_offset`).
+    /// Longest shown line in display columns (tabs expanded), computed on first use (bounds `x_offset`).
     max_chars: OnceCell<usize>,
 }
 
@@ -210,14 +212,15 @@ impl SideLayout {
         &self.text[line.bytes.clone()]
     }
 
-    /// Char count of the longest shown line (folded-away lines excluded).
+    /// Display columns of the longest shown line (folded-away lines
+    /// excluded; tabs expanded to their stops, see `tabs`).
     /// One pass over the side's text the first time it is asked; with a mono
     /// advance it estimates the side's widest line without shaping it.
     pub fn max_chars(&self) -> usize {
         *self.max_chars.get_or_init(|| {
             self.lines
                 .iter()
-                .map(|l| self.text(l).chars().count())
+                .map(|l| display_columns(self.text(l)))
                 .max()
                 .unwrap_or(0)
         })
@@ -661,6 +664,10 @@ c
 ", vec![AlignmentOp::Insert { after_old: 0, news: span(1, 1) }], None);
         assert_eq!(empty.old.max_chars(), 0);
         assert_eq!(empty.new.max_chars(), 3);
+        let tabs = build("", "		x
+ab	c
+", vec![AlignmentOp::Insert { after_old: 0, news: span(1, 2) }], None);
+        assert_eq!(tabs.new.max_chars(), 9);
     }
 
     #[test]
