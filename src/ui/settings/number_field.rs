@@ -79,12 +79,25 @@ impl NumberField {
         }
     }
 
-    /// Blur / Enter: apply the typed value, or go back to the current one.
-    fn commit(&mut self, cx: &mut Context<Self>) {
-        if let Some(value) = parse(self.input.read(cx).content(), &self.range) {
-            self.apply(value, cx);
+    /// Takes a typed value that differs from the current one without emitting
+    /// [`NumberFieldEvent::Change`], for an owner that must apply it itself
+    /// (e.g. while closing). Unparseable text goes back to the current value.
+    pub fn take_pending(&mut self, cx: &mut Context<Self>) -> Option<u32> {
+        let pending = parse(self.input.read(cx).content(), &self.range)
+            .filter(|&value| value != self.value);
+        if let Some(value) = pending {
+            self.value = value;
+            cx.notify();
         }
         self.sync_text(cx);
+        pending
+    }
+
+    /// Blur / Enter: apply the typed value, or go back to the current one.
+    fn commit(&mut self, cx: &mut Context<Self>) {
+        if let Some(value) = self.take_pending(cx) {
+            cx.emit(NumberFieldEvent::Change(value));
+        }
     }
 
     /// `−` / `+` / Up / Down, from the typed value when it parses.

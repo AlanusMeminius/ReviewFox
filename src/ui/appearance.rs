@@ -3,6 +3,8 @@
 //! Global; [`update`] writes the file and replaces it, which re-renders every
 //! window.
 
+use std::ops::RangeInclusive;
+
 use gpui::{App, Global, Pixels, SharedString, Styled, px};
 
 use crate::domain::DiffFontSize;
@@ -39,6 +41,55 @@ const PLEX_MONO: &str = "IBM Plex Mono";
 pub const UI_FONT_SIZE_DEFAULT: u32 = 13;
 pub const UI_FONT_SIZE_MIN: u32 = 11;
 pub const UI_FONT_SIZE_MAX: u32 = 15;
+
+/// UI Font or Code Font, for code that treats both alike (the Settings page).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontRole {
+    Ui,
+    Code,
+}
+
+impl FontRole {
+    pub fn family(self, appearance: &Appearance) -> &Family {
+        match self {
+            FontRole::Ui => &appearance.ui_font,
+            FontRole::Code => &appearance.code_font,
+        }
+    }
+
+    pub fn size(self, appearance: &Appearance) -> u32 {
+        match self {
+            FontRole::Ui => appearance.ui_font_size,
+            FontRole::Code => appearance.code_font_size,
+        }
+    }
+
+    pub fn default_size(self) -> u32 {
+        match self {
+            FontRole::Ui => UI_FONT_SIZE_DEFAULT,
+            FontRole::Code => DiffFontSize::DEFAULT,
+        }
+    }
+
+    pub fn size_range(self) -> RangeInclusive<u32> {
+        match self {
+            FontRole::Ui => UI_FONT_SIZE_MIN..=UI_FONT_SIZE_MAX,
+            FontRole::Code => DiffFontSize::MIN..=DiffFontSize::MAX,
+        }
+    }
+
+    /// Store a chosen size; `None` (Reset) and the default both remove the
+    /// field, so a later default change still reaches the user.
+    pub fn set_size(self, file: &mut SettingsFile, size: Option<u32>) {
+        let stored = size
+            .filter(|&size| size != self.default_size())
+            .map(|size| size as f32);
+        match self {
+            FontRole::Ui => file.ui_font_size = stored,
+            FontRole::Code => file.code_font_size = stored,
+        }
+    }
+}
 
 /// Code Font Default: Plex Mono when installed, else the system monospace. The
 /// OS fallback for a missing Plex is proportional, which breaks column
@@ -224,6 +275,21 @@ mod tests {
         assert_eq!(ui_text_px(16., 14), 17.);
         assert_eq!(ui_text_px(13., 11), 11.);
         assert_eq!(ui_text_px(16., 15), 18.);
+    }
+
+    #[test]
+    fn setting_a_size_to_its_default_or_resetting_removes_the_field() {
+        let mut file = SettingsFile::default();
+        FontRole::Ui.set_size(&mut file, Some(14));
+        FontRole::Code.set_size(&mut file, Some(18));
+        assert_eq!((file.ui_font_size, file.code_font_size), (Some(14.), Some(18.)));
+
+        FontRole::Ui.set_size(&mut file, Some(13));
+        FontRole::Code.set_size(&mut file, None);
+        assert_eq!((file.ui_font_size, file.code_font_size), (None, None));
+
+        FontRole::Code.set_size(&mut file, Some(13));
+        assert_eq!(file.code_font_size, None);
     }
 
     #[test]

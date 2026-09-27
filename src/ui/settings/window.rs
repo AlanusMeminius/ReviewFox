@@ -18,13 +18,12 @@ use super::{
     Button, ButtonSize, ButtonStyle, ConfiguredCard, NumberField, NumberFieldEvent, SectionHeader,
     SettingRow,
 };
-use crate::domain::DiffFontSize;
 use crate::ui::gitlab_connection::{self, GitLabConnection};
 #[cfg(target_os = "macos")]
 use crate::ui::mac_column_vibrancy::ColumnVibrancy;
 use crate::ui::scrollbar;
 use crate::ui::text_field::{TextField, TextFieldEvent, TextFieldStyle};
-use crate::ui::appearance::{self, Appearance, UiTextSize};
+use crate::ui::appearance::{self, Appearance, FontRole, UiTextSize};
 use crate::ui::theme;
 use crate::ui::window_controls::window_controls;
 
@@ -58,20 +57,46 @@ const CLOSE_KEY: &str = "ctrl-w";
 const TAB_NAV: isize = 0;
 const TAB_URL: isize = 1;
 const TAB_TOKEN: isize = 2;
-const TAB_UI_FONT_SIZE: isize = 4;
-const TAB_CODE_FONT_SIZE: isize = 5;
+/// After the token card's two buttons (Retry, Reset Token).
+const TAB_UI_FONT_SIZE: isize = TAB_TOKEN + 2;
+const TAB_CODE_FONT_SIZE: isize = TAB_UI_FONT_SIZE + 1;
 
 const URL_TITLE: &str = "GitLab URL";
 const URL_DESCRIPTION: &str = "Your self-hosted GitLab address. Leave empty for gitlab.com.";
 const URL_PLACEHOLDER: &str = "https://gitlab.com";
 const RESET_TO_DEFAULT: &str = "Reset to Default";
 
-const UI_FONT_PREVIEW: &[&str] = &[
-    "The quick brown fox jumps over the lazy dog",
-    "敏捷的棕色狐狸跳过了懒狗",
-    "0123456789",
+/// One group of Appearance › Fonts.
+#[derive(Clone, Copy)]
+struct FontGroup {
+    role: FontRole,
+    title: &'static str,
+    /// Element id prefix of the group's rows.
+    id: &'static str,
+    size_tab_index: isize,
+    preview: &'static [&'static str],
+}
+
+const FONT_GROUPS: [FontGroup; 2] = [
+    FontGroup {
+        role: FontRole::Ui,
+        title: "UI Font",
+        id: "settings-ui-font",
+        size_tab_index: TAB_UI_FONT_SIZE,
+        preview: &[
+            "The quick brown fox jumps over the lazy dog",
+            "敏捷的棕色狐狸跳过了懒狗",
+            "0123456789",
+        ],
+    },
+    FontGroup {
+        role: FontRole::Code,
+        title: "Code Font",
+        id: "settings-code-font",
+        size_tab_index: TAB_CODE_FONT_SIZE,
+        preview: &["fn main() { let 名称 = \"你好，世界\"; }", "0O o 1lI |"],
+    },
 ];
-const CODE_FONT_PREVIEW: &[&str] = &["fn main() { let 名称 = \"你好，世界\"; }", "0O o 1lI |"];
 
 /// Settings-window bindings, scoped to [`CONTEXT`] / [`NAV_CONTEXT`].
 pub fn key_bindings() -> Vec<KeyBinding> {
@@ -178,30 +203,8 @@ impl SettingsView {
         });
         let has_saved_token = settings_store::load_pat().is_some_and(|p| !p.trim().is_empty());
 
-        let appearance = cx.global::<Appearance>().clone();
-        let ui_font_size = cx.new(|cx| {
-            NumberField::new(
-                "settings-ui-font-size-field",
-                appearance.ui_font_size,
-                appearance::UI_FONT_SIZE_MIN..=appearance::UI_FONT_SIZE_MAX,
-                TAB_UI_FONT_SIZE,
-                window,
-                cx,
-            )
-        });
-        let code_font_size = cx.new(|cx| {
-            NumberField::new(
-                "settings-code-font-size-field",
-                appearance.code_font_size,
-                DiffFontSize::MIN..=DiffFontSize::MAX,
-                TAB_CODE_FONT_SIZE,
-                window,
-                cx,
-            )
-        });
-
         let base_url_focus = base_url.read(cx).focus_handle(cx);
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.subscribe(&base_url, |view, _, event: &TextFieldEvent, cx| match event {
                 TextFieldEvent::Confirm => view.commit_base_url(cx),
             }),
@@ -210,19 +213,26 @@ impl SettingsView {
             cx.subscribe(&pat, |view, _, event: &TextFieldEvent, cx| match event {
                 TextFieldEvent::Confirm => view.commit_token(cx),
             }),
-            cx.subscribe(&ui_font_size, |_, _, event: &NumberFieldEvent, cx| match *event {
-                NumberFieldEvent::Change(size) => {
-                    appearance::update(cx, |file| file.ui_font_size = Some(size as f32))
-                }
-            }),
-            cx.subscribe(&code_font_size, |_, _, event: &NumberFieldEvent, cx| match *event {
-                NumberFieldEvent::Change(size) => {
-                    appearance::update(cx, |file| file.code_font_size = Some(size as f32))
-                }
-            }),
             // Resets (and any other outside change) re-sync the size fields.
             cx.observe_global::<Appearance>(|view, cx| view.sync_font_sizes(cx)),
         ];
+        let [ui_font_size, code_font_size] = FONT_GROUPS.map(|group| {
+            let field = cx.new(|cx| {
+                let role = group.role;
+                let size = role.size(cx.global::<Appearance>());
+                let id = ElementId::Name(format!("{}-size-field", group.id).into());
+                NumberField::new(id, size, role.size_range(), group.size_tab_index, window, cx)
+            });
+            subscriptions.push(cx.subscribe(
+                &field,
+                move |_, _, event: &NumberFieldEvent, cx| match *event {
+                    NumberFieldEvent::Change(size) => {
+                        appearance::update(cx, |file| group.role.set_size(file, Some(size)))
+                    }
+                },
+            ));
+            field
+        });
 
         // The scroll handle lives in a global registry and outlives the window.
         let (content_scroll, _) = scrollbar::vertical(CONTENT_SCROLL_ID, cx);
@@ -295,12 +305,32 @@ impl SettingsView {
         self.commit_base_url(cx);
     }
 
+    fn size_field(&self, role: FontRole) -> &Entity<NumberField> {
+        match role {
+            FontRole::Ui => &self.ui_font_size,
+            FontRole::Code => &self.code_font_size,
+        }
+    }
+
     fn sync_font_sizes(&mut self, cx: &mut Context<Self>) {
-        let appearance = cx.global::<Appearance>().clone();
-        self.ui_font_size
-            .update(cx, |field, cx| field.set_value(appearance.ui_font_size, cx));
-        self.code_font_size
-            .update(cx, |field, cx| field.set_value(appearance.code_font_size, cx));
+        for group in FONT_GROUPS {
+            let size = group.role.size(cx.global::<Appearance>());
+            self.size_field(group.role)
+                .update(cx, |field, cx| field.set_value(size, cx));
+        }
+    }
+
+    /// Closing does not blur the size fields; apply a typed size directly
+    /// rather than through their Change events while the window goes away.
+    fn commit_font_sizes(&mut self, cx: &mut Context<Self>) {
+        for group in FONT_GROUPS {
+            let pending = self
+                .size_field(group.role)
+                .update(cx, |field, cx| field.take_pending(cx));
+            if let Some(size) = pending {
+                appearance::update(cx, |file| group.role.set_size(file, Some(size)));
+            }
+        }
     }
 
     /// Enter in the token field: store it (whatever verify later says), then verify.
@@ -633,102 +663,63 @@ impl SettingsView {
 
 // Appearance › Fonts.
 impl SettingsView {
-    /// Two groups, each a heading, its rows and a preview. Ticket 04's Family
-    /// row goes above Size in each group.
+    /// [`FONT_GROUPS`], each a heading, its rows and a preview.
     fn render_fonts_section(&self, cx: &mut Context<Self>) -> AnyElement {
-        let appearance = cx.global::<Appearance>();
-        let (ui_size, code_size) = (appearance.ui_font_size, appearance.code_font_size);
-        let ui_font = appearance.ui_font.name.clone();
-        let code_font = appearance.code_font.name.clone();
+        div()
+            .flex()
+            .flex_col()
+            // Section end: the last preview's 16px plus this make the usual 40px.
+            .pb(px(24.))
+            .children(FONT_GROUPS.map(|group| self.render_font_group(group, cx)))
+            .into_any_element()
+    }
 
-        let ui_preview = font_preview(UI_FONT_PREVIEW)
-            .font_family(ui_font)
-            .ui_text_size(13., cx);
-        let code_preview = font_preview(CODE_FONT_PREVIEW)
-            .font_family(code_font)
-            .text_size(px(code_size as f32));
+    /// Heading, rows (each with its divider), then the preview in the group's
+    /// resolved family and size. Ticket 04's Family row goes above Size.
+    fn render_font_group(&self, group: FontGroup, cx: &mut Context<Self>) -> gpui::Div {
+        let appearance = cx.global::<Appearance>();
+        let family = group.role.family(appearance).name.clone();
+        // For the UI Font this is `ui_text(13.)`: the size is the body size.
+        let size = px(group.role.size(appearance) as f32);
 
         div()
             .flex()
             .flex_col()
-            .child(font_group(
-                "UI Font",
-                vec![self.render_size_row(
-                    "settings-ui-font-size",
-                    ui_size != appearance::UI_FONT_SIZE_DEFAULT,
-                    self.ui_font_size.clone(),
-                    |file| file.ui_font_size = None,
-                    cx,
-                )],
-                ui_preview,
-                false,
-                cx,
-            ))
-            .child(font_group(
-                "Code Font",
-                vec![self.render_size_row(
-                    "settings-code-font-size",
-                    code_size != DiffFontSize::DEFAULT,
-                    self.code_font_size.clone(),
-                    |file| file.code_font_size = None,
-                    cx,
-                )],
-                code_preview,
-                true,
-                cx,
-            ))
-            .into_any_element()
+            .child(
+                div()
+                    .pt(px(24.))
+                    .ui_text_size(14., cx)
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme::text())
+                    .child(group.title),
+            )
+            .child(self.render_size_row(group, cx))
+            .child(
+                div().pt(px(16.)).pb(px(16.)).child(
+                    font_preview(group.preview)
+                        .font_family(family)
+                        .text_size(size),
+                ),
+            )
     }
 
     /// `Size` row; Reset to Default removes the field from `settings.json`.
-    fn render_size_row(
-        &self,
-        id: &'static str,
-        non_default: bool,
-        field: Entity<NumberField>,
-        reset: fn(&mut settings_store::SettingsFile),
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        SettingRow::new(id, "Size")
+    fn render_size_row(&self, group: FontGroup, cx: &mut Context<Self>) -> SettingRow {
+        let role = group.role;
+        let id = format!("{}-size", group.id);
+        let non_default = role.size(cx.global::<Appearance>()) != role.default_size();
+        SettingRow::new(ElementId::Name(id.clone().into()), "Size")
             .when(non_default, |row| {
                 row.title_action(
                     Button::icon_only(ElementId::Name(format!("{id}-reset").into()), "undo.svg")
                         .tooltip(RESET_TO_DEFAULT)
-                        .on_click(cx.listener(move |_, _, _, cx| appearance::update(cx, reset))),
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            appearance::update(cx, |file| role.set_size(file, None))
+                        })),
                 )
             })
-            .control(field)
-            .into_any_element()
+            .control(self.size_field(role).clone())
     }
-}
-
-/// A font group: heading, rows (each with its divider), then the preview. The
-/// section's last group ends with the 40px section bottom padding.
-fn font_group(
-    title: &'static str,
-    rows: Vec<AnyElement>,
-    preview: gpui::Div,
-    last: bool,
-    cx: &App,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .pt(px(24.))
-                .ui_text_size(14., cx)
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::text())
-                .child(title),
-        )
-        .children(rows)
-        .child(
-            div()
-                .pt(px(16.))
-                .pb(px(if last { 40. } else { 16. }))
-                .child(preview),
-        )
 }
 
 /// Preview lines in a quiet box; the caller sets the family and size.
@@ -822,6 +813,7 @@ impl Render for SettingsView {
             .on_action(cx.listener(|view, _: &CloseSettings, window, cx| {
                 // Closing does not blur the field; keep an unsaved URL edit.
                 view.commit_base_url(cx);
+                view.commit_font_sizes(cx);
                 window.remove_window();
             }))
             .on_action(cx.listener(|view, _: &FocusNextControl, window, cx| {
