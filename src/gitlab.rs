@@ -119,6 +119,13 @@ pub enum ResolveProjectResult {
     Err(ResolveProjectError),
 }
 
+impl ResolveProjectError {
+    /// True when the user can fix this in Settings (Base URL host, token).
+    pub fn fixable_in_settings(&self) -> bool {
+        matches!(self, Self::HostMismatch { .. } | Self::Unauthorized)
+    }
+}
+
 pub fn host_from_base_url(base_url: &str) -> Option<String> {
     url::Url::parse(base_url.trim())
         .ok()
@@ -310,6 +317,13 @@ pub enum ListMergeRequestsResult {
     Err(ListMergeRequestsError),
 }
 
+impl ListMergeRequestsError {
+    /// True when the user can fix this in Settings (missing or rejected token).
+    pub fn fixable_in_settings(&self) -> bool {
+        matches!(self, Self::MissingPat | Self::Unauthorized)
+    }
+}
+
 pub fn open_merge_requests_api_url(base_url: &str, path_with_namespace: &str) -> String {
     format!(
         "{}/merge_requests?state=opened&per_page={OPEN_MR_PER_PAGE}",
@@ -477,6 +491,13 @@ pub enum FetchMergeRequestError {
 pub enum FetchMergeRequestResult {
     Ok(MergeRequestDetail),
     Err(FetchMergeRequestError),
+}
+
+impl FetchMergeRequestError {
+    /// True when the user can fix this in Settings (missing or rejected token).
+    pub fn fixable_in_settings(&self) -> bool {
+        matches!(self, Self::MissingPat | Self::Unauthorized)
+    }
 }
 
 pub fn merge_request_api_url(base_url: &str, path_with_namespace: &str, iid: u64) -> String {
@@ -771,6 +792,13 @@ pub enum ListMergeRequestCommitsError {
 pub enum ListMergeRequestCommitsResult {
     Ok(Vec<MergeRequestCommit>),
     Err(ListMergeRequestCommitsError),
+}
+
+impl ListMergeRequestCommitsError {
+    /// True when the user can fix this in Settings (missing or rejected token).
+    pub fn fixable_in_settings(&self) -> bool {
+        matches!(self, Self::MissingPat | Self::Unauthorized)
+    }
 }
 
 pub fn merge_request_commits_api_url(
@@ -1443,6 +1471,32 @@ mod tests {
             result,
             ResolveProjectResult::Err(ResolveProjectError::NotFound)
         );
+    }
+
+    #[test]
+    fn fixable_in_settings_only_for_token_and_host_errors() {
+        assert!(ResolveProjectError::Unauthorized.fixable_in_settings());
+        assert!(ResolveProjectError::HostMismatch {
+            settings_host: "gitlab.com".into(),
+            remote_host: "github.com".into(),
+        }
+        .fixable_in_settings());
+        assert!(!ResolveProjectError::Network("timeout".into()).fixable_in_settings());
+        assert!(!ResolveProjectError::NotFound.fixable_in_settings());
+
+        assert!(ListMergeRequestsError::MissingPat.fixable_in_settings());
+        assert!(ListMergeRequestsError::Unauthorized.fixable_in_settings());
+        assert!(!ListMergeRequestsError::NotFound.fixable_in_settings());
+
+        assert!(FetchMergeRequestError::MissingPat.fixable_in_settings());
+        assert!(!FetchMergeRequestError::MissingDiffRefs.fixable_in_settings());
+
+        assert!(ListMergeRequestCommitsError::Unauthorized.fixable_in_settings());
+        assert!(!ListMergeRequestCommitsError::Other {
+            status: 500,
+            detail: "boom".into(),
+        }
+        .fixable_in_settings());
     }
 
     #[test]

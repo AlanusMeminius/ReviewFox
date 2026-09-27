@@ -66,6 +66,9 @@ impl AssetSource for Assets {
             "export.svg" => Some(Cow::Borrowed(
                 include_bytes!("../../assets/export.svg") as &'static [u8],
             )),
+            "gear.svg" => Some(Cow::Borrowed(
+                include_bytes!("../../assets/gear.svg") as &'static [u8],
+            )),
             _ => None,
         })
     }

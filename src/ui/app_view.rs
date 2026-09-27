@@ -33,6 +33,7 @@ use super::current_repo;
 use super::theme;
 use super::window_controls::window_controls;
 use super::window_geometry;
+use super::OpenSettings;
 
 pub struct AppView {
     focus: FocusHandle,
@@ -381,7 +382,7 @@ impl AppView {
             MainState::Ready(loaded) => loaded.comparison.repository.path().to_path_buf(),
             MainState::Empty | MainState::Error(_) => {
                 self.mr_picker = Some(MrPicker::failed(
-                    "Open a repository to list merge requests.",
+                    ErrorNote::plain("Open a repository to list merge requests."),
                     bounds,
                 ));
                 cx.notify();
@@ -415,7 +416,7 @@ impl AppView {
 
             let picker = match project {
                 ResolveProjectResult::Err(e) => {
-                    MrPicker::failed(gitlab::format_resolve_project_error(&e), Bounds::default())
+                    MrPicker::failed(ErrorNote::resolve_project(&e), Bounds::default())
                 }
                 ResolveProjectResult::Ok(identity) => {
                     let list_result = cx
@@ -435,7 +436,10 @@ impl AppView {
                             MrPicker::ready(mrs, selected_iid, Bounds::default())
                         }
                         ListMergeRequestsResult::Err(e) => MrPicker::failed(
-                            gitlab::format_list_merge_requests_error(&e),
+                            ErrorNote::new(
+                                gitlab::format_list_merge_requests_error(&e),
+                                e.fixable_in_settings(),
+                            ),
                             Bounds::default(),
                         ),
                     }
@@ -495,7 +499,7 @@ impl AppView {
             let identity = match project {
                 ResolveProjectResult::Ok(id) => id,
                 ResolveProjectResult::Err(e) => {
-                    let msg = gitlab::format_resolve_project_error(&e);
+                    let msg = ErrorNote::resolve_project(&e);
                     let _ = this.update(cx, |view, cx| {
                         finish_mr_activate(view, iid, Err(msg));
                         cx.notify();
@@ -507,7 +511,7 @@ impl AppView {
             let remote_url = match gitlab::matching_remote_for_settings(&repo_path, &base) {
                 Ok((_, url)) => url,
                 Err(e) => {
-                    let msg = gitlab::format_resolve_project_error(&e);
+                    let msg = ErrorNote::resolve_project(&e);
                     let _ = this.update(cx, |view, cx| {
                         finish_mr_activate(view, iid, Err(msg));
                         cx.notify();
@@ -530,7 +534,10 @@ impl AppView {
             {
                 FetchMergeRequestResult::Ok(d) => d,
                 FetchMergeRequestResult::Err(e) => {
-                    let msg = gitlab::format_fetch_merge_request_error(&e);
+                    let msg = ErrorNote::new(
+                        gitlab::format_fetch_merge_request_error(&e),
+                        e.fixable_in_settings(),
+                    );
                     let _ = this.update(cx, |view, cx| {
                         finish_mr_activate(view, iid, Err(msg));
                         cx.notify();
@@ -554,7 +561,10 @@ impl AppView {
             {
                 ListMergeRequestCommitsResult::Ok(c) => c,
                 ListMergeRequestCommitsResult::Err(e) => {
-                    let msg = gitlab::format_list_merge_request_commits_error(&e);
+                    let msg = ErrorNote::new(
+                        gitlab::format_list_merge_request_commits_error(&e),
+                        e.fixable_in_settings(),
+                    );
                     let _ = this.update(cx, |view, cx| {
                         finish_mr_activate(view, iid, Err(msg));
                         cx.notify();
@@ -581,7 +591,7 @@ impl AppView {
                 .await
             {
                 let _ = this.update(cx, |view, cx| {
-                    finish_mr_activate(view, iid, Err(e.0));
+                    finish_mr_activate(view, iid, Err(ErrorNote::plain(e.0)));
                     cx.notify();
                 });
                 return;
@@ -610,7 +620,7 @@ impl AppView {
                 Ok(infos) => infos,
                 Err(e) => {
                     let _ = this.update(cx, |view, cx| {
-                        finish_mr_activate(view, iid, Err(e.0));
+                        finish_mr_activate(view, iid, Err(ErrorNote::plain(e.0)));
                         cx.notify();
                     });
                     return;
@@ -1158,6 +1168,15 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
                 sb,
             )
         })
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .px_3()
+                .py_2()
+                .child(settings_button(cx)),
+        )
 }
 
 fn sidebar_repo_row(
@@ -1689,7 +1708,7 @@ struct MrActivateReady {
 fn finish_mr_activate(
     view: &mut AppView,
     iid: u64,
-    result: Result<MrActivateReady, String>,
+    result: Result<MrActivateReady, ErrorNote>,
 ) {
     let Some(entry) = view.mr_entry.as_mut() else {
         return;
@@ -1711,7 +1730,7 @@ fn finish_mr_activate(
                 if let Err(e) =
                     bb.apply_mr_commits(ready.commit_infos)
                 {
-                    entry.detail = MrDetailState::Failed(e.0);
+                    entry.detail = MrDetailState::Failed(ErrorNote::plain(e.0));
                 }
             }
             view.remember_current();
@@ -1734,7 +1753,68 @@ fn gitlab_chrome_visible(view: &AppView) -> bool {
 enum MrDetailState {
     Loading,
     Ready(MergeRequestDetail),
-    Failed(String),
+    Failed(ErrorNote),
+}
+
+/// Failure text plus whether to offer "Open Settings" (token / Base URL fixes only).
+struct ErrorNote {
+    message: String,
+    open_settings: bool,
+}
+
+impl ErrorNote {
+    fn new(message: impl Into<String>, open_settings: bool) -> Self {
+        Self {
+            message: message.into(),
+            open_settings,
+        }
+    }
+
+    fn plain(message: impl Into<String>) -> Self {
+        Self::new(message, false)
+    }
+
+    fn resolve_project(e: &gitlab::ResolveProjectError) -> Self {
+        Self::new(gitlab::format_resolve_project_error(e), e.fixable_in_settings())
+    }
+}
+
+/// Red failure text, with an "Open Settings" link when the fix lives there.
+/// `close_mr_picker`: the MR picker is a transient overlay, so leave it on click.
+fn render_error_note(
+    id: &'static str,
+    note: &ErrorNote,
+    close_mr_picker: bool,
+    cx: &mut Context<AppView>,
+) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_color(rgb(0xb42318))
+                .child(note.message.clone()),
+        )
+        .when(note.open_settings, |d| {
+            d.child(
+                div()
+                    .id(id)
+                    .cursor_pointer()
+                    .text_color(theme::accent())
+                    .hover(|d| d.underline())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if close_mr_picker {
+                            this.mr_picker = None;
+                            cx.notify();
+                        }
+                        // Deferred: `cx.dispatch_action` can't re-enter this window mid-update.
+                        window.dispatch_action(Box::new(OpenSettings), cx);
+                    }))
+                    .child("Open Settings"),
+            )
+        })
+        .into_any_element()
 }
 
 fn render_mr_entry_detail(
@@ -1769,10 +1849,9 @@ fn render_mr_entry_detail(
                     MrDetailState::Loading => {
                         vec![div().child("Loading MR detail…").into_any_element()]
                     }
-                    MrDetailState::Failed(msg) => vec![div()
-                        .text_color(rgb(0xb42318))
-                        .child(msg.clone())
-                        .into_any_element()],
+                    MrDetailState::Failed(note) => {
+                        vec![render_error_note("mr-detail-open-settings", note, false, cx)]
+                    }
                     MrDetailState::Ready(detail) => mr_entry_ready_lines(detail),
                 }),
             sb,
@@ -1866,13 +1945,12 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
             .text_color(theme::muted())
             .child("Loading open merge requests…")
             .into_any_element(),
-        MrPickerBody::Failed(msg) => div()
+        MrPickerBody::Failed(note) => div()
             .size_full()
             .px_2()
             .py_3()
             .text_sm()
-            .text_color(rgb(0xb42318))
-            .child(msg.clone())
+            .child(render_error_note("mr-picker-open-settings", note, true, cx))
             .into_any_element(),
         MrPickerBody::Ready {
             query,
@@ -2455,7 +2533,7 @@ enum MrPickerAction {
 
 enum MrPickerBody {
     Loading,
-    Failed(String),
+    Failed(ErrorNote),
     Ready {
         all: Vec<MergeRequestSummary>,
         matches: Vec<MergeRequestSummary>,
@@ -2478,9 +2556,9 @@ impl MrPicker {
         }
     }
 
-    fn failed(message: impl Into<String>, bounds: Bounds<Pixels>) -> Self {
+    fn failed(note: ErrorNote, bounds: Bounds<Pixels>) -> Self {
         Self {
-            body: MrPickerBody::Failed(message.into()),
+            body: MrPickerBody::Failed(note),
             bounds,
         }
     }
@@ -2704,6 +2782,49 @@ fn open_repo_button(id: &'static str, cx: &mut Context<AppView>) -> impl IntoEle
             svg()
                 .size_4()
                 .path("folder.svg")
+                .text_color(theme::muted()),
+        )
+}
+
+struct SettingsTooltip;
+
+impl Render for SettingsTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let shortcut = if cfg!(target_os = "macos") { "⌘," } else { "Ctrl+," };
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(0x273142))
+            .text_xs()
+            .text_color(theme::white())
+            .child(format!("Settings ({shortcut})"))
+    }
+}
+
+fn settings_button(cx: &mut Context<AppView>) -> impl IntoElement {
+    div()
+        .id("open-settings")
+        .w(theme::TOGGLE_SIZE)
+        .h(theme::TOGGLE_SIZE)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .cursor_pointer()
+        .text_color(theme::muted())
+        .tooltip(|_, cx| cx.new(|_| SettingsTooltip).into())
+        .hover(|button| button.bg(theme::hover()))
+        .active(|button| button.bg(rgb(0xdfe3e9)))
+        .on_click(cx.listener(|_, _, window, cx| {
+            // Deferred: `cx.dispatch_action` can't re-enter this window mid-update.
+            window.dispatch_action(Box::new(OpenSettings), cx);
+        }))
+        .child(
+            svg()
+                .size_4()
+                .path("gear.svg")
                 .text_color(theme::muted()),
         )
 }
