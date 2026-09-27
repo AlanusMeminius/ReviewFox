@@ -63,11 +63,11 @@ pub fn clamp_sidebar_width(requested: f32, available: f32) -> f32 {
     requested.clamp(MIN_SIDEBAR_WIDTH, maximum)
 }
 
-/// Floating Changes width: leave `MIN_COMMITS_WIDTH` readable left of the capsule
-/// (+ inset + shadow clearance).
+/// Floating Changes width: leave `MIN_COMMITS_WIDTH` for the Commit capsule
+/// (+ left island inset + right float clearance).
 pub fn clamp_files_width(requested: f32, available: f32, sidebar_width: f32) -> f32 {
     let stage = (available - sidebar_width).max(0.);
-    let clear = theme::CHANGES_INSET + theme::CHANGES_SHADOW_GAP;
+    let clear = theme::CHANGES_INSET * 2. + theme::CHANGES_SHADOW_GAP;
     let maximum = MAX_FILES_WIDTH
         .min((stage - MIN_COMMITS_WIDTH - clear).max(MIN_FILES_WIDTH));
     requested.clamp(MIN_FILES_WIDTH, maximum)
@@ -172,10 +172,9 @@ pub fn handle(
             .w_full()
             .bg(theme::white())
             .cursor_row_resize(),
-        // MR detail ↔ commits: leave clear so the capsule shadow is not
-        // propped up by an opaque white strip.
+        // MR detail ↔ Commit island: clear hit strip doubles as the frost gap.
         Axis::VerticalNorth => el
-            .h(px(HANDLE_WIDTH))
+            .h(px(theme::CHANGES_INSET))
             .w_full()
             .cursor_row_resize(),
     };
@@ -202,8 +201,8 @@ mod tests {
         assert_eq!(clamp_files_width(100., 1280., 220.), 200.);
         assert_eq!(clamp_files_width(280., 1280., 220.), 280.);
         assert_eq!(clamp_files_width(600., 1280., 220.), 480.);
-        // stage 500 − 280 − 8 − 8 = 204 → clamp stays 204 (above MIN_FILES)
-        assert_eq!(clamp_files_width(400., 720., 220.), 204.);
+        // stage 500 − 280 − left − right − gap = 196 → floors at MIN_FILES (200)
+        assert_eq!(clamp_files_width(400., 720., 220.), 200.);
     }
 
     #[test]
