@@ -1,9 +1,10 @@
 use gpui::{
-    anchored, canvas, deferred, ease_out_quint, Animation, AnimationExt, App, Bounds, ClickEvent,
-    ClipboardItem, Context, Corner, Div, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, Size,
-    StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds, WindowControlArea,
-    WindowDecorations, WindowHandle, WindowOptions, div, prelude::*, px, rgb, svg,
+    anchored, canvas, deferred, ease_out_quint, point, Animation, AnimationExt, App, Bounds,
+    ClickEvent, ClipboardItem, Context, Corner, Div, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render,
+    Size, StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds,
+    WindowControlArea, WindowDecorations, WindowHandle, WindowOptions, div, prelude::*, px, rgb,
+    svg,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -44,6 +45,8 @@ pub struct AppView {
     /// Live window bounds of the chrome capsules (updated each frame via canvas).
     branch_toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
     mr_toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// Shared pills+islands column — picker left edge snaps to this content box.
+    commits_column_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// In-memory MR Entry (list = GitLab commits; Comparison = diff_refs).
     mr_entry: Option<MrEntry>,
     repo_menu: Option<RepoContextMenu>,
@@ -62,7 +65,7 @@ pub struct AppView {
     mr_detail_height: f32,
     mr_detail_resize_state: Rc<ResizeState>,
     #[cfg(target_os = "macos")]
-    sidebar_vibrancy: Option<ColumnVibrancy>,
+    window_vibrancy: Option<ColumnVibrancy>,
 }
 
 #[derive(Clone, Copy)]
@@ -124,6 +127,7 @@ impl AppView {
             mr_picker: None,
             branch_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
+            commits_column_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_entry: None,
             repo_menu: None,
             activation_sub: None,
@@ -139,7 +143,7 @@ impl AppView {
             mr_detail_height: splitter::DEFAULT_MR_DETAIL_HEIGHT,
             mr_detail_resize_state: Rc::new(ResizeState::default()),
             #[cfg(target_os = "macos")]
-            sidebar_vibrancy: None,
+            window_vibrancy: None,
         };
         if let Some(label) = pending_mr {
             view.begin_restore_mr(label, cx);
@@ -221,8 +225,11 @@ impl AppView {
         Rc::new(move |size, window, cx: &mut App| {
             view.update(cx, |this, cx| {
                 let chrome = f32::from(theme::CHROME_HEIGHT);
-                let available = f32::from(window.viewport_size().height) - chrome;
-                let height = splitter::clamp_mr_detail_height(size - chrome, available);
+                let inset = theme::CHANGES_INSET;
+                let available =
+                    f32::from(window.viewport_size().height) - chrome - inset * 2.;
+                let height =
+                    splitter::clamp_mr_detail_height(size - chrome - inset, available);
                 if this.mr_detail_height != height {
                     this.mr_detail_height = height;
                     cx.notify();
@@ -998,12 +1005,7 @@ impl Render for AppView {
 
         #[cfg(target_os = "macos")]
         {
-            let column_w = if self.repos_collapsed {
-                0.
-            } else {
-                self.sidebar_width
-            };
-            ColumnVibrancy::ensure_synced(&mut self.sidebar_vibrancy, window, column_w);
+            ColumnVibrancy::ensure_synced_window(&mut self.window_vibrancy, window);
         }
 
         div()
@@ -1012,7 +1014,7 @@ impl Render for AppView {
             .size_full()
             .flex()
             .overflow_hidden()
-            .when(cfg!(not(target_os = "macos")), |d| d.bg(theme::white()))
+            .when(cfg!(not(target_os = "macos")), |d| d.bg(theme::sidebar()))
             .font_family(theme::UI_FONT)
             .track_focus(&self.focus)
             .child(render_sidebar(self, sidebar_w, cx))
@@ -1024,9 +1026,8 @@ impl Render for AppView {
                     self.sidebar_resize_state.clone(),
                 ))
             })
-            // Stage: commits full-bleed; Changes floats on top (capsule-changes A).
-            // White underlay fills inset gaps around the capsule (macOS window is
-            // Transparent — without this the bottom 8px under Changes punches through).
+            // Frosted desk: chrome + floating capsules (Commit / MR / Changes).
+            // Stage stays clear so window vibrancy shows between islands.
             .child(
                 div()
                     .id("stage")
@@ -1035,11 +1036,12 @@ impl Render for AppView {
                     .flex_1()
                     .min_w(px(splitter::MIN_COMMITS_WIDTH))
                     .overflow_hidden()
-                    .bg(theme::white())
+                    .bg(theme::sidebar())
                     .child(render_commits(self, cx))
                     .child(render_files(self, cx)),
             )
             .when(self.repo_menu.is_some(), |d| d.child(render_repo_menu(self, cx)))
+            // Outside `#stage` so overflow_hidden there cannot clip picker shadows.
             .when(self.branch_picker.is_some(), |d| {
                 d.child(deferred(render_branch_picker(self, cx)))
             })
@@ -1303,157 +1305,147 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
         .map(|e| format!("!{}", e.summary.iid))
         .unwrap_or_else(|| "Merge requests".into());
     let show_gitlab = gitlab_chrome_visible(view);
-    // Full-bleed white under the Changes capsule; content column inset by
-    // float_gap so text/scrollbar clear the cast (prototype stage padding).
+    // Clear Changes. Pills + islands share one padded column so left edges match.
     let float_gap = px(theme::changes_float_clearance(view.files_width));
+    let inset = px(theme::CHANGES_INSET);
+    let show_mr = show_gitlab && view.mr_entry.is_some();
 
-    div()
-        .id("commits")
-        .absolute()
-        .inset_0()
-        .bg(theme::white())
+    let branch_pill = {
+        let track = view.branch_toggle_bounds.clone();
+        let open = view.branch_picker.is_some();
+        div()
+            .id("branch-picker-toggle")
+            .relative()
+            .px_2()
+            .py_1()
+            .rounded_full()
+            .bg(theme::capsule())
+            .flex()
+            .items_center()
+            .gap_1()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .cursor_pointer()
+            .when(open, |d| d.opacity(0.))
+            .when(!open, |d| d.hover(|d| d.bg(theme::hover())))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_branch_picker(cx)))
+            .child(
+                canvas(
+                    move |bounds, _, _| track.set(bounds),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(
+                svg()
+                    .size_4()
+                    .flex_none()
+                    .path("branch.svg")
+                    .text_color(theme::muted()),
+            )
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_xs()
+                    .text_color(theme::text())
+                    .child(branch),
+            )
+    };
+
+    let mr_pill = show_gitlab.then(|| {
+        let track = view.mr_toggle_bounds.clone();
+        let open = view.mr_picker.is_some();
+        div()
+            .id("mr-picker-toggle")
+            .relative()
+            .px_2()
+            .py_1()
+            .rounded_full()
+            .bg(theme::capsule())
+            .flex()
+            .items_center()
+            .gap_1()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .cursor_pointer()
+            .when(open, |d| d.opacity(0.))
+            .when(!open, |d| d.hover(|d| d.bg(theme::hover())))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_mr_picker(cx)))
+            .child(
+                canvas(
+                    move |bounds, _, _| track.set(bounds),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(
+                svg()
+                    .size_4()
+                    .flex_none()
+                    .path("gitlab.svg")
+                    .text_color(theme::muted()),
+            )
+            .child(
+                // Digits/! have no descenders — same line box as branch
+                // labels sits optically high; 1px down matches "develop".
+                div()
+                    .mt(px(1.))
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_xs()
+                    .text_color(if view.mr_entry.is_some() {
+                        theme::text()
+                    } else {
+                        theme::muted()
+                    })
+                    .child(mr_label),
+            )
+            .when(view.mr_entry.is_some(), |el| {
+                el.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, _, cx| this.clear_mr_entry(cx)),
+                )
+            })
+    });
+
+    let chrome_pills_row = div()
+        .h(theme::CHROME_HEIGHT)
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(theme::CHROME_GAP))
+        .pl(inset)
+        .pr(inset)
+        .child(branch_pill)
+        .children(mr_pill)
+        .child(div().flex_1())
         .child(
             div()
-                .id("commits-content")
-                .absolute()
-                .inset_0()
-                .right(float_gap)
-                .flex()
-                .flex_col()
-                .child(
-            div()
-                .h(theme::CHROME_HEIGHT)
                 .flex_none()
-                .flex()
-                .items_center()
-                .gap_2()
-                .when(view.repos_collapsed, |row| {
-                    // Keep toggle at original spot (after traffic lights); branch shifts right.
-                    row.pl(px(12.))
-                        .pr_3()
-                        .children(traffic_lights_space())
-                        .child(toggle_button("main-sidebar-toggle-collapsed", true, cx))
-                        .child(open_repo_button("open-repo-collapsed", cx))
-                })
-                .when(!view.repos_collapsed, |row| {
-                    row.px(px(theme::COMMITS_COLUMN_INSET))
-                })
-                .child({
-                    let track = view.branch_toggle_bounds.clone();
-                    let open = view.branch_picker.is_some();
-                    div()
-                        .id("branch-picker-toggle")
-                        .relative()
-                        .px_2()
-                        .py_1()
-                        .rounded_full()
-                        .bg(theme::capsule())
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .min_w(px(0.))
-                        .overflow_hidden()
-                        .cursor_pointer()
-                        .when(open, |d| d.opacity(0.))
-                        .when(!open, |d| d.hover(|d| d.bg(theme::hover())))
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_branch_picker(cx)))
-                        .child(
-                            canvas(
-                                move |bounds, _, _| track.set(bounds),
-                                |_, _, _, _| {},
-                            )
-                            .absolute()
-                            .size_full(),
-                        )
-                        .child(
-                            svg()
-                                .size_4()
-                                .flex_none()
-                                .path("branch.svg")
-                                .text_color(theme::muted()),
-                        )
-                        .child(
-                            div()
-                                .min_w(px(0.))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .text_xs()
-                                .text_color(theme::text())
-                                .child(branch),
-                        )
-                })
-                .when(show_gitlab, |row| {
-                    let track = view.mr_toggle_bounds.clone();
-                    let open = view.mr_picker.is_some();
-                    row.child(
-                        div()
-                            .id("mr-picker-toggle")
-                            .relative()
-                            .px_2()
-                            .py_1()
-                            .rounded_full()
-                            .bg(theme::capsule())
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .min_w(px(0.))
-                            .overflow_hidden()
-                            .cursor_pointer()
-                            .when(open, |d| d.opacity(0.))
-                            .when(!open, |d| d.hover(|d| d.bg(theme::hover())))
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_mr_picker(cx)))
-                            .child(
-                                canvas(
-                                    move |bounds, _, _| track.set(bounds),
-                                    |_, _, _, _| {},
-                                )
-                                .absolute()
-                                .size_full(),
-                            )
-                            .child(
-                                svg()
-                                    .size_4()
-                                    .flex_none()
-                                    .path("gitlab.svg")
-                                    .text_color(theme::muted()),
-                            )
-                            .child(
-                                // Digits/! have no descenders — same line box as branch
-                                // labels sits optically high; 1px down matches "develop".
-                                div()
-                                    .mt(px(1.))
-                                    .min_w(px(0.))
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .text_xs()
-                                    .text_color(if view.mr_entry.is_some() {
-                                        theme::text()
-                                    } else {
-                                        theme::muted()
-                                    })
-                                    .child(mr_label),
-                            )
-                            .when(view.mr_entry.is_some(), |el| {
-                                el.on_mouse_down(
-                                    MouseButton::Right,
-                                    cx.listener(|this, _, _, cx| this.clear_mr_entry(cx)),
-                                )
-                            }),
-                    )
-                })
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .flex_none()
-                        .font_family(theme::MONO_FONT)
-                        .text_xs()
-                        .text_color(theme::muted())
-                        .child(label),
-                ),
-        )
-        .when(show_gitlab && view.mr_entry.is_some(), |d| {
+                .font_family(theme::MONO_FONT)
+                .text_xs()
+                .text_color(theme::muted())
+                .child(label),
+        );
+
+    let islands = div()
+        .id("commit-islands")
+        .flex_1()
+        .min_h(px(0.))
+        .flex()
+        .flex_col()
+        .pl(inset)
+        .pr(inset)
+        .pt(inset)
+        .pb(inset)
+        .when(show_mr, |d| {
             d.child(render_mr_entry_detail(
                 view.mr_entry.as_ref().unwrap(),
                 view.mr_detail_height,
@@ -1466,92 +1458,160 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                 view.mr_detail_resize_state.clone(),
             ))
         })
-        .child(match &view.state {
-            MainState::Empty => div().flex_1().into_any_element(),
-            MainState::Error(msg) => div()
-                .flex_1()
-                .px_3()
-                .py_3()
-                .text_sm()
-                .text_color(rgb(0xb42318))
-                .child(msg.clone())
-                .into_any_element(),
-            MainState::Ready(loaded) => {
-                let (scroll, sb) = scrollbar::vertical("commit-list-sb", cx);
-                // Same shape as file-tree: overlay_flex must be a flex_col child so
-                // flex_1 gets a viewport height; nesting under a non-flex wrapper made
-                // the scroller grow with content → max_offset stayed 0 → no thumb.
-                scrollbar::overlay_flex(
-                    div()
-                        .id("commit-list")
-                        .size_full()
-                        .track_scroll(&scroll)
-                        .overflow_y_scroll()
-                        .children(loaded.commits.iter().enumerate().map(|(i, commit)| {
-                            let in_range = loaded.in_range.get(i).copied().unwrap_or(false);
-                            let summary = commit.summary.clone();
-                            let meta = format!(
-                                "{} · {} · {}",
-                                commit.oid.short(),
-                                commit.author,
-                                commit.time_label
-                            );
-                            div()
-                                .id(("commit", i))
-                                .mx(px(theme::COMMITS_COLUMN_INSET))
-                                .my_0p5()
-                                .px_3()
-                                .py_2()
-                                .rounded_lg()
-                                .cursor_pointer()
-                                .when(in_range, |d| d.bg(theme::range()))
-                                .hover(move |d| {
-                                    if in_range {
-                                        d.bg(theme::range())
-                                    } else {
-                                        d.bg(rgb(0xf6f8fb))
-                                    }
-                                })
-                                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                                    this.select_commit(i, event.modifiers().shift, cx);
-                                }))
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .min_w(px(0.))
-                                        .overflow_hidden()
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .min_w(px(0.))
-                                                .text_sm()
-                                                .font_weight(gpui::FontWeight::MEDIUM)
-                                                .text_color(theme::text())
-                                                .overflow_hidden()
-                                                .text_ellipsis()
-                                                .whitespace_nowrap()
-                                                .child(summary),
-                                        )
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .min_w(px(0.))
-                                                .font_family(theme::MONO_FONT)
-                                                .text_xs()
-                                                .text_color(theme::muted())
-                                                .overflow_hidden()
-                                                .text_ellipsis()
-                                                .whitespace_nowrap()
-                                                .child(meta),
-                                        ),
-                                )
-                        })),
-                    sb,
-                )
-                .into_any_element()
-            }
-        }),
+        .child(render_commit_capsule(view, cx));
+
+    // No horizontal padding on the positioning parent — pills, islands, and pickers
+    // all use the same CHANGES_INSET from the column's left border edge.
+    let column_track = view.commits_column_bounds.clone();
+    let shared_column = div()
+        .id("commits-column")
+        .relative()
+        .flex_1()
+        .h_full()
+        .min_w(px(0.))
+        .flex()
+        .flex_col()
+        .child(
+            canvas(
+                move |bounds, _, _| column_track.set(bounds),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
         )
+        .child(chrome_pills_row)
+        .child(islands);
+
+    div()
+        .id("commits")
+        .absolute()
+        .inset_0()
+        .child(
+            div()
+                .id("commits-content")
+                .absolute()
+                .inset_0()
+                .right(float_gap)
+                .flex()
+                .items_start()
+                .when(view.repos_collapsed, |row| {
+                    // Leading chrome controls beside the shared column.
+                    row.child(
+                        div()
+                            .h(theme::CHROME_HEIGHT)
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(theme::CHROME_GAP))
+                            .pl(px(12.))
+                            .children(traffic_lights_space())
+                            .child(toggle_button("main-sidebar-toggle-collapsed", true, cx))
+                            .child(open_repo_button("open-repo-collapsed", cx)),
+                    )
+                })
+                .child(shared_column),
+        )
+}
+
+fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+    let body = match &view.state {
+        MainState::Empty => div().flex_1().into_any_element(),
+        MainState::Error(msg) => div()
+            .flex_1()
+            .px_3()
+            .py_3()
+            .text_sm()
+            .text_color(rgb(0xb42318))
+            .child(msg.clone())
+            .into_any_element(),
+        MainState::Ready(loaded) => {
+            let (scroll, sb) = scrollbar::vertical("commit-list-sb", cx);
+            // Same shape as file-tree: overlay_flex must be a flex_col child so
+            // flex_1 gets a viewport height; nesting under a non-flex wrapper made
+            // the scroller grow with content → max_offset stayed 0 → no thumb.
+            scrollbar::overlay_flex(
+                div()
+                    .id("commit-list")
+                    .size_full()
+                    .pt_1()
+                    .pb_1()
+                    .track_scroll(&scroll)
+                    .overflow_y_scroll()
+                    .children(loaded.commits.iter().enumerate().map(|(i, commit)| {
+                        let in_range = loaded.in_range.get(i).copied().unwrap_or(false);
+                        let summary = commit.summary.clone();
+                        let meta = format!(
+                            "{} · {} · {}",
+                            commit.oid.short(),
+                            commit.author,
+                            commit.time_label
+                        );
+                        div()
+                            .id(("commit", i))
+                            .mx_1()
+                            .my_0p5()
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .cursor_pointer()
+                            .when(in_range, |d| d.bg(theme::range()))
+                            .hover(move |d| {
+                                if in_range {
+                                    d.bg(theme::range())
+                                } else {
+                                    d.bg(rgb(0xf6f8fb))
+                                }
+                            })
+                            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                                this.select_commit(i, event.modifiers().shift, cx);
+                            }))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w(px(0.))
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .min_w(px(0.))
+                                            .text_sm()
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(theme::text())
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(summary),
+                                    )
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .min_w(px(0.))
+                                            .font_family(theme::MONO_FONT)
+                                            .text_xs()
+                                            .text_color(theme::muted())
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(meta),
+                                    ),
+                            )
+                    })),
+                sb,
+            )
+            .into_any_element()
+        }
+    };
+
+    div()
+        .id("commit-capsule")
+        .flex_1()
+        .min_h(px(0.))
+        .flex()
+        .flex_col()
+        .bg(theme::white())
+        .rounded(px(theme::CHANGES_RADIUS))
+        .overflow_hidden()
+        .child(body)
 }
 
 struct MrEntry {
@@ -1624,23 +1684,16 @@ fn render_mr_entry_detail(
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let (scroll, sb) = scrollbar::vertical("mr-detail-sb", cx);
-    let side = px(theme::COMMITS_COLUMN_INSET);
-    let top = px(theme::MR_DETAIL_TOP_INSET);
-    let bottom = px(theme::CHANGES_INSET);
     div()
         .id("mr-entry-detail")
         .h(px(height))
         .flex_none()
         .flex()
         .flex_col()
-        .mx(side)
-        .mt(top)
-        .mb(bottom)
         .px_3()
         .py_2()
         .bg(theme::white())
         .rounded(px(theme::CHANGES_RADIUS))
-        .shadow(theme::changes_capsule_shadow())
         .overflow_hidden()
         .text_xs()
         .text_color(theme::muted())
@@ -1742,7 +1795,6 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
 
     const WIDTH: f32 = 380.;
     const HEIGHT: f32 = 420.;
-    let origin = picker.bounds.origin;
     let seed = picker.bounds.size;
 
     // Match branch picker: fixed size, one overlay_box, filter + rows in the same scroll.
@@ -1837,9 +1889,13 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
         }
     };
 
+    // Window-anchored outside `#stage` so stage overflow cannot clip the soft cast.
+    let origin = view.mr_toggle_bounds.get().origin;
+
     anchored()
         .position(origin)
         .anchor(Corner::TopLeft)
+        .snap_to_window()
         .child(picker_clip_shell(
             "mr-picker",
             "mr-picker-open",
@@ -1861,7 +1917,6 @@ fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoE
     };
     const WIDTH: f32 = 320.;
     const HEIGHT: f32 = 420.;
-    let origin = picker.bounds.origin;
     let seed = picker.bounds.size;
     let (scroll, sb) = scrollbar::vertical("branch-picker-sb", cx);
     let inner_w = WIDTH - 8.;
@@ -1915,9 +1970,23 @@ fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoE
         sb,
     );
 
+    // Window-anchored outside `#stage` so stage overflow cannot clip the soft cast.
+    // Left = island edge (column + inset); top = branch pill.
+    let origin = {
+        let col = view.commits_column_bounds.get();
+        let pill = view.branch_toggle_bounds.get();
+        let x = if f32::from(col.size.width) > 1. {
+            col.origin.x + px(theme::CHANGES_INSET)
+        } else {
+            pill.origin.x
+        };
+        point(x, pill.origin.y)
+    };
+
     anchored()
         .position(origin)
         .anchor(Corner::TopLeft)
+        .snap_to_window()
         .child(picker_clip_shell(
             "branch-picker",
             "branch-picker-open",
@@ -1933,8 +2002,8 @@ fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoE
         .into_any_element()
 }
 
-/// Outer clip grows from capsule seed (top-left → bottom-right); inner board stays at
-/// fixed px size so ellipsis keeps a definite width (a59dbf2 lesson).
+/// Outer shell carries the soft cast; inner clip grows from capsule seed.
+/// (Shadow + overflow_hidden on one node clips the cast → hard edge against frost.)
 fn picker_clip_shell(
     id: &'static str,
     anim_id: &'static str,
@@ -1948,18 +2017,23 @@ fn picker_clip_shell(
     let seed_h = f32::from(seed.height).max(1.);
     div()
         .id(id)
-        .overflow_hidden()
-        .bg(theme::white())
         .rounded(px(theme::CHANGES_RADIUS))
-        .shadow(theme::changes_capsule_shadow())
+        .shadow(theme::picker_shadow())
         .occlude()
         .on_mouse_down_out(on_down_out)
         .child(
             div()
-                .w(px(width))
-                .h(px(height))
-                .p_1()
-                .child(body),
+                .size_full()
+                .overflow_hidden()
+                .bg(theme::white())
+                .rounded(px(theme::CHANGES_RADIUS))
+                .child(
+                    div()
+                        .w(px(width))
+                        .h(px(height))
+                        .p_1()
+                        .child(body),
+                ),
         )
         .with_animation(
             anim_id,
@@ -2034,7 +2108,6 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .flex_col()
         .bg(theme::white())
         .rounded(px(theme::CHANGES_RADIUS))
-        .shadow(theme::changes_capsule_shadow())
         .overflow_hidden()
         // Left-edge resize (HorizontalTrailing measures from viewport right).
         .child(

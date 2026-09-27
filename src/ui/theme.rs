@@ -9,36 +9,35 @@ pub const CHROME_HEIGHT: Pixels = gpui::px(36.);
 pub const TOGGLE_SIZE: Pixels = gpui::px(26.);
 pub const GUTTER_WIDTH: Pixels = gpui::px(88.);
 
-/// Inset of the floating Changes capsule from the stage edges.
-pub const CHANGES_INSET: f32 = 8.;
-/// Gap between commits/scrollbar and the capsule — same as the right-edge inset.
+/// Inset of floating capsules (Changes / Commit / MR detail) from the stage edges.
+pub const CHANGES_INSET: f32 = 12.;
+/// Gap between neighboring floating capsules — same as the edge inset.
 pub const CHANGES_SHADOW_GAP: f32 = CHANGES_INSET;
-/// Shared left gutter for branch chrome, MR capsule, and commit rows.
-pub const COMMITS_COLUMN_INSET: f32 = 16.;
-/// Top float of the MR detail capsule under chrome.
-pub const MR_DETAIL_TOP_INSET: f32 = 16.;
-/// Corner radius of the floating Changes capsule.
+/// Corner radius of floating capsules.
 pub const CHANGES_RADIUS: f32 = 12.;
+/// Flex `gap_2` used in chrome rows (traffic lights / toggles / pills).
+pub const CHROME_GAP: f32 = 8.;
 
-/// Right inset for the commits column: capsule width + stage inset + matching left gap.
+/// Right inset for the commits column: Changes width + stage inset + gap to Changes.
 pub fn changes_float_clearance(files_width: f32) -> f32 {
     files_width + CHANGES_INSET + CHANGES_SHADOW_GAP
 }
 
-/// Soft all-around cast — edge via shadow only (no hard border). See prototype/capsule-changes.html.
-pub fn changes_capsule_shadow() -> Vec<BoxShadow> {
+/// Soft cast for expanded branch/MR pickers — separates the panel from islands below.
+/// Includes a zero-offset ambient layer so side edges soften against the frosted desk.
+pub fn picker_shadow() -> Vec<BoxShadow> {
     let ink = |a: f32| -> Hsla { hsla(220. / 360., 0.38, 0.14, a) };
     vec![
         BoxShadow {
-            color: ink(0.08),
-            offset: point(px(0.), px(4.)),
-            blur_radius: px(12.),
+            color: ink(0.06),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(10.),
             spread_radius: px(0.),
         },
         BoxShadow {
-            color: ink(0.12),
-            offset: point(px(0.), px(12.)),
-            blur_radius: px(32.),
+            color: ink(0.10),
+            offset: point(px(0.), px(8.)),
+            blur_radius: px(28.),
             spread_radius: px(0.),
         },
     ]
@@ -89,9 +88,9 @@ pub fn sidebar() -> Rgba {
 pub fn hover() -> Rgba {
     rgb(0xe9ebef)
 }
-/// Chrome pill fill (branch / MR toggles) — neutral gray, not selection.
+/// Chrome pill fill (branch / MR toggles) — white on the frosted desk.
 pub fn capsule() -> Rgba {
-    rgb(0xe5e7eb)
+    white()
 }
 /// Sidebar active row — same blue as the app icon; chroma survives vibrancy.
 pub fn sidebar_selected() -> Rgba {

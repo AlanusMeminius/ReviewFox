@@ -1,7 +1,8 @@
-//! macOS Finder-style left-column vibrancy under the GPUI Metal view.
+//! macOS Finder-style vibrancy under the GPUI Metal view.
 //!
 //! Window uses `Transparent` (not full-window `Blurred`); this view supplies
-//! `NSVisualEffectMaterial::Sidebar` only under the leading column.
+//! `NSVisualEffectMaterial::Sidebar` under a left column (Diff tree) or the
+//! full content view (main window frosted desk).
 
 use gpui::Window;
 use objc2::rc::Retained;
@@ -15,13 +16,13 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::splitter;
 
-/// Owns one `NSVisualEffectView` inserted below the GPUI view for a leading column.
+/// Owns one `NSVisualEffectView` inserted below the GPUI view.
 pub struct ColumnVibrancy {
     view: Retained<NSVisualEffectView>,
 }
 
 impl ColumnVibrancy {
-    /// Lazy-attach and sync a full-height left strip.
+    /// Lazy-attach and sync a full-height left strip (Diff tree column).
     ///
     /// `column_width` is the pane width (`0` when collapsed). When expanded,
     /// includes [`splitter::HANDLE_WIDTH`] so the leading resize hit stays frosted.
@@ -37,6 +38,17 @@ impl ColumnVibrancy {
         let height = f32::from(window.viewport_size().height);
         if let Some(v) = slot.as_ref() {
             v.sync(width, height);
+        }
+    }
+
+    /// Lazy-attach and sync vibrancy under the entire window content (main desk).
+    pub fn ensure_synced_window(slot: &mut Option<Self>, window: &Window) {
+        if slot.is_none() {
+            *slot = Self::attach(window);
+        }
+        let size = window.viewport_size();
+        if let Some(v) = slot.as_ref() {
+            v.sync(f32::from(size.width), f32::from(size.height));
         }
     }
 
