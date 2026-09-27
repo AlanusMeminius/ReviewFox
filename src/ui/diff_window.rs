@@ -65,6 +65,10 @@ pub struct DiffView {
     omit_links: Vec<(f32, f32, f32, f32)>,
     old_gaps: Vec<(f32, f32)>,
     new_gaps: Vec<(f32, f32)>,
+    /// Row index whose top edge is the insert pinch (old side).
+    old_seam_rows: Vec<u32>,
+    /// Row index whose top edge is the delete pinch (new side).
+    new_seam_rows: Vec<u32>,
     /// Per-file Equal fold. Reset when the selected path changes.
     fold: FoldState,
     /// 0-based index of the Hunk at / nearest the viewport; drives chrome.
@@ -101,7 +105,12 @@ enum FontOp {
 #[derive(Clone)]
 struct PlacedBridge {
     kind: RowKind,
-    points: Vec<(f32, f32)>,
+    x_l: f32,
+    x_r: f32,
+    y_l0: f32,
+    y_l1: f32,
+    y_r0: f32,
+    y_r1: f32,
 }
 
 impl DiffView {
@@ -131,6 +140,8 @@ impl DiffView {
             omit_links: Vec::new(),
             old_gaps: Vec::new(),
             new_gaps: Vec::new(),
+            old_seam_rows: Vec::new(),
+            new_seam_rows: Vec::new(),
             fold: FoldState::collapsed(),
             hunk_index: None,
             view_options: ViewOptions::default(),
@@ -187,6 +198,8 @@ impl DiffView {
         self.omit_links.clear();
         self.old_gaps.clear();
         self.new_gaps.clear();
+        self.old_seam_rows.clear();
+        self.new_seam_rows.clear();
         self.old_scroll.set_offset(point(px(0.), px(0.)));
         self.new_scroll.set_offset(point(px(0.), px(0.)));
     }
@@ -720,12 +733,23 @@ impl DiffView {
 
         let old_pane = self.old_scroll.bounds();
         let new_pane = self.new_scroll.bounds();
-        let x_l = f32::from(old_pane.right()) + LN_COL;
-        let x_r = f32::from(new_pane.left()) - LN_COL;
+        // Ribbon spans the whole gutter, from the left code edge to the right code edge,
+        // so the pinch meets the row background on one side and the hairline on the other.
+        let x_l = f32::from(old_pane.right());
+        let x_r = f32::from(new_pane.left());
         let old_top_w = f32::from(old_pane.top());
         let new_top_w = f32::from(new_pane.top());
         self.old_gaps = gap_intervals(true, &bridges, old_n, new_n, old_top, new_top, self.view_h, row_h);
         self.new_gaps = gap_intervals(false, &bridges, old_n, new_n, old_top, new_top, self.view_h, row_h);
+        self.old_seam_rows.clear();
+        self.new_seam_rows.clear();
+        for bridge in &bridges {
+            match bridge {
+                Bridge::Insert { old_seam, .. } => self.old_seam_rows.push(*old_seam),
+                Bridge::Delete { new_seam, .. } => self.new_seam_rows.push(*new_seam),
+                Bridge::Replace { .. } => {}
+            }
+        }
         self.placed.clear();
         self.omit_links.clear();
         self.hover_bands.clear();
@@ -748,15 +772,11 @@ impl DiffView {
             ) else {
                 continue;
             };
-            let mut y0 = f32::MAX;
-            let mut y1 = f32::MIN;
-            for (_, y) in &placed.points {
-                y0 = y0.min(*y);
-                y1 = y1.max(*y);
-            }
+            let y0 = placed.y_l0.min(placed.y_r0);
+            let y1 = placed.y_l1.max(placed.y_r1);
             self.hover_bands.push(HoverBand {
                 top: y0,
-                bottom: y1,
+                bottom: y1.max(y0 + 2.),
                 copy: bridge.position_copy(),
             });
             self.placed.push(placed);
@@ -1386,6 +1406,14 @@ fn code_pane(
     } else {
         view.new_gaps.clone()
     };
+    let seams = if left {
+        view.old_seam_rows.clone()
+    } else {
+        view.new_seam_rows.clone()
+    };
+    let seam_rows = seams.clone();
+    let seam_color = if left { theme::add_bg() } else { theme::del_bg() };
+    let seam_scroll = if left { view.applied_old } else { view.applied_new };
     let seam = empty_seam(other_n, view.view_h, view.row_h());
     let handle = if left {
         view.old_scroll.clone()
@@ -1441,8 +1469,10 @@ fn code_pane(
                             let row_id = if left { ("row-l", i) } else { ("row-r", i) };
                             let line = row.ln;
                             let parts = side_marks.get(i).cloned().flatten();
+                            let is_seam = seams.iter().any(|s| *s as usize == i);
                             div()
                                 .id(row_id)
+                                .relative()
                                 .h(px(row_h))
                                 .px_3()
                                 .bg(bg)
@@ -1464,6 +1494,9 @@ fn code_pane(
                                     }
                                 }))
                                 .child(render_row_text(row.text, parts))
+                                .when(is_seam, |row| {
+                                    row.child(seam_hairline(seam_color))
+                                })
                         }))
                         .when(pad > 0., |col| col.child(div().h(px(pad)).w_full())),
                 ),
@@ -1485,6 +1518,14 @@ fn code_pane(
                 },
                 move |bounds, _, window, _| {
                     paint_gaps(window, bounds, &gaps, empty, seam);
+                    for idx in &seam_rows {
+                        let y = *idx as f32 * row_h - seam_scroll;
+                        let rect = Bounds {
+                            origin: point(bounds.left(), bounds.top() + px(y)),
+                            size: size(bounds.size.width, px(2.)),
+                        };
+                        window.paint_quad(fill(rect, seam_color));
+                    }
                 },
             )
             .absolute()
@@ -1531,6 +1572,8 @@ fn center_gutter(
             view.applied_old,
             view.row_h(),
             view.font_size.px() as f32,
+            &view.old_seam_rows,
+            false,
         ))
         .child(ln_col(
             false,
@@ -1538,6 +1581,8 @@ fn center_gutter(
             view.applied_new,
             view.row_h(),
             view.font_size.px() as f32,
+            &view.new_seam_rows,
+            false,
         ))
         .child(
             canvas(
@@ -1550,11 +1595,28 @@ fn center_gutter(
                 },
             )
             .absolute()
-            .top(px(0.))
-            .left(px(LN_COL))
-            .w(px(BRIDGE_COL))
-            .h_full(),
+            .top_0()
+            .left_0()
+            .size_full(),
         )
+        .child(ln_col(
+            true,
+            &display.old_rows,
+            view.applied_old,
+            view.row_h(),
+            view.font_size.px() as f32,
+            &[],
+            true,
+        ))
+        .child(ln_col(
+            false,
+            &display.new_rows,
+            view.applied_new,
+            view.row_h(),
+            view.font_size.px() as f32,
+            &[],
+            true,
+        ))
 }
 
 fn ln_col(
@@ -1563,9 +1625,19 @@ fn ln_col(
     scroll_top: f32,
     row_h: f32,
     font_px: f32,
+    seams: &[u32],
+    labels_only: bool,
 ) -> impl IntoElement {
-    let id = if left { "ln-left" } else { "ln-right" };
+    let id = if labels_only {
+        if left { "ln-left-text" } else { "ln-right-text" }
+    } else if left {
+        "ln-left"
+    } else {
+        "ln-right"
+    };
     let rows = rows.to_vec();
+    let seams = seams.to_vec();
+    let seam_color = if left { theme::add_bg() } else { theme::del_bg() };
     div()
         .id(id)
         .absolute()
@@ -1579,16 +1651,39 @@ fn ln_col(
         .when(left, |col| col.text_right().pr_1())
         .when(!left, |col| col.pl_1())
         .children(rows.into_iter().enumerate().map(move |(i, row)| {
-            let ln_id = if left { ("ln-l", i) } else { ("ln-r", i) };
+            let ln_id = if left {
+                (if labels_only { "ln-lt" } else { "ln-l" }, i)
+            } else {
+                (if labels_only { "ln-rt" } else { "ln-r" }, i)
+            };
             let label = match row.kind {
                 RowKind::Omit { .. } => "⋯".to_string(),
                 _ => row.ln.to_string(),
             };
+            let is_seam = seams.iter().any(|s| *s as usize == i);
             div()
                 .id(ln_id)
+                .relative()
                 .h(px(row_h))
+                .when(!labels_only, |cell| {
+                    cell.bg(match row.kind {
+                        RowKind::Omit { .. } => rgb(0xf6f6f6),
+                        kind => kind_bg(kind),
+                    })
+                })
                 .child(label)
+                .when(is_seam && !labels_only, |cell| cell.child(seam_hairline(seam_color)))
         }))
+}
+
+fn seam_hairline(color: gpui::Rgba) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .h(px(2.))
+        .bg(color)
 }
 
 fn chrome_button(
@@ -2040,7 +2135,7 @@ fn place_bridge(
             content_y(rows, scroll, pane)
         }
     };
-    let (kind, points) = match *bridge {
+    let (kind, y_l0, y_l1, y_r0, y_r1) = match *bridge {
         Bridge::Insert {
             old_seam,
             new_from,
@@ -2050,16 +2145,13 @@ fn place_bridge(
             if new_to <= new_from {
                 return None;
             }
+            let seam = edge_y(old_seam as f32, old_n, new_n, old_scroll, old_pane);
             (
                 RowKind::Insert,
-                vec![
-                    (
-                        x_l,
-                        edge_y(old_seam as f32, old_n, new_n, old_scroll, old_pane),
-                    ),
-                    (x_r, content_y(new_from as f32, new_scroll, new_pane)),
-                    (x_r, content_y(new_to as f32, new_scroll, new_pane)),
-                ],
+                seam,
+                seam,
+                content_y(new_from as f32, new_scroll, new_pane),
+                content_y(new_to as f32, new_scroll, new_pane),
             )
         }
         Bridge::Delete {
@@ -2071,16 +2163,13 @@ fn place_bridge(
             if old_to <= old_from {
                 return None;
             }
+            let seam = edge_y(new_seam as f32, new_n, old_n, new_scroll, new_pane);
             (
                 RowKind::Delete,
-                vec![
-                    (x_l, content_y(old_from as f32, old_scroll, old_pane)),
-                    (
-                        x_r,
-                        edge_y(new_seam as f32, new_n, old_n, new_scroll, new_pane),
-                    ),
-                    (x_l, content_y(old_to as f32, old_scroll, old_pane)),
-                ],
+                content_y(old_from as f32, old_scroll, old_pane),
+                content_y(old_to as f32, old_scroll, old_pane),
+                seam,
+                seam,
             )
         }
         Bridge::Replace {
@@ -2095,44 +2184,116 @@ fn place_bridge(
             }
             (
                 RowKind::Replace,
-                vec![
-                    (
-                        x_l,
-                        edge_y(old_from as f32, old_n, new_n, old_scroll, old_pane),
-                    ),
-                    (
-                        x_r,
-                        edge_y(new_from as f32, new_n, old_n, new_scroll, new_pane),
-                    ),
-                    (
-                        x_r,
-                        edge_y(new_to as f32, new_n, old_n, new_scroll, new_pane),
-                    ),
-                    (
-                        x_l,
-                        edge_y(old_to as f32, old_n, new_n, old_scroll, old_pane),
-                    ),
-                ],
+                edge_y(old_from as f32, old_n, new_n, old_scroll, old_pane),
+                edge_y(old_to as f32, old_n, new_n, old_scroll, old_pane),
+                edge_y(new_from as f32, new_n, old_n, new_scroll, new_pane),
+                edge_y(new_to as f32, new_n, old_n, new_scroll, new_pane),
             )
         }
     };
-    Some(PlacedBridge { kind, points })
+    Some(PlacedBridge {
+        kind,
+        x_l,
+        x_r,
+        y_l0,
+        y_l1,
+        y_r0,
+        y_r1,
+    })
 }
 
 fn paint_bridges(window: &mut Window, placed: &[PlacedBridge]) {
     for bridge in placed {
-        if bridge.points.len() < 3 {
-            continue;
-        }
-        let pts: Vec<_> = bridge
-            .points
-            .iter()
-            .map(|(x, y)| point(px(*x), px(*y)))
-            .collect();
+        let parallel = (bridge.y_l0 - bridge.y_r0).abs() < 1. && (bridge.y_l1 - bridge.y_r1).abs() < 1.;
         let mut path = PathBuilder::fill();
-        path.add_polygon(&pts, true);
+        if parallel {
+            path.move_to(point(px(bridge.x_l), px(bridge.y_l0)));
+            path.line_to(point(px(bridge.x_r), px(bridge.y_r0)));
+            path.line_to(point(px(bridge.x_r), px(bridge.y_r1)));
+            path.line_to(point(px(bridge.x_l), px(bridge.y_l1)));
+        } else {
+            pinch_bezier(&mut path, bridge);
+        }
+        path.close();
         if let Ok(path) = path.build() {
             window.paint_path(path, kind_bg(bridge.kind));
+        }
+    }
+}
+
+/// Full row on the long side, cubic Bézier through the center gutter, then a 2px
+/// hairline across the short side's line-number column so it meets the code hairline.
+fn pinch_bezier(path: &mut PathBuilder, bridge: &PlacedBridge) {
+    let x_l = bridge.x_l;
+    let x_r = bridge.x_r;
+    let mid_l = x_l + LN_COL;
+    let mid_r = x_r - LN_COL;
+    let mw = (mid_r - mid_l).max(8.);
+    match bridge.kind {
+        RowKind::Delete => {
+            let y0 = bridge.y_l0;
+            let y1 = bridge.y_l1;
+            let top = bridge.y_r0;
+            let bot = bridge.y_r0 + 2.;
+            path.move_to(point(px(x_l), px(y0)));
+            path.line_to(point(px(mid_l), px(y0)));
+            path.cubic_bezier_to(
+                point(px(mid_r), px(top)),
+                point(px(mid_l + mw * 0.45), px(y0)),
+                point(px(mid_r - mw * 0.45), px(top)),
+            );
+            path.line_to(point(px(x_r), px(top)));
+            path.line_to(point(px(x_r), px(bot)));
+            path.line_to(point(px(mid_r), px(bot)));
+            path.cubic_bezier_to(
+                point(px(mid_l), px(y1)),
+                point(px(mid_r - mw * 0.45), px(bot)),
+                point(px(mid_l + mw * 0.45), px(y1)),
+            );
+            path.line_to(point(px(x_l), px(y1)));
+        }
+        RowKind::Insert => {
+            let top = bridge.y_l0;
+            let bot = bridge.y_l0 + 2.;
+            let y0 = bridge.y_r0;
+            let y1 = bridge.y_r1;
+            path.move_to(point(px(x_l), px(top)));
+            path.line_to(point(px(mid_l), px(top)));
+            path.cubic_bezier_to(
+                point(px(mid_r), px(y0)),
+                point(px(mid_l + mw * 0.45), px(top)),
+                point(px(mid_r - mw * 0.45), px(y0)),
+            );
+            path.line_to(point(px(x_r), px(y0)));
+            path.line_to(point(px(x_r), px(y1)));
+            path.line_to(point(px(mid_r), px(y1)));
+            path.cubic_bezier_to(
+                point(px(mid_l), px(bot)),
+                point(px(mid_r - mw * 0.45), px(y1)),
+                point(px(mid_l + mw * 0.45), px(bot)),
+            );
+            path.line_to(point(px(x_l), px(bot)));
+        }
+        _ => {
+            // Hold the full block through each line-number column. The cubic
+            // only runs between the columns, from the top of the left block
+            // to the top of the right block (and bottom to bottom).
+            path.move_to(point(px(x_l), px(bridge.y_l0)));
+            path.line_to(point(px(mid_l), px(bridge.y_l0)));
+            path.cubic_bezier_to(
+                point(px(mid_r), px(bridge.y_r0)),
+                point(px(mid_l + mw * 0.45), px(bridge.y_l0)),
+                point(px(mid_r - mw * 0.45), px(bridge.y_r0)),
+            );
+            path.line_to(point(px(x_r), px(bridge.y_r0)));
+            path.line_to(point(px(x_r), px(bridge.y_r1)));
+            path.line_to(point(px(mid_r), px(bridge.y_r1)));
+            path.cubic_bezier_to(
+                point(px(mid_l), px(bridge.y_l1)),
+                point(px(mid_r - mw * 0.45), px(bridge.y_r1)),
+                point(px(mid_l + mw * 0.45), px(bridge.y_l1)),
+            );
+            path.line_to(point(px(x_l), px(bridge.y_l1)));
         }
     }
 }
