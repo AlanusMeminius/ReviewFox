@@ -25,7 +25,8 @@ use crate::ui::scrollbar::{self, ThumbGeom};
 use crate::ui::theme;
 
 const LN_FONT_PX: f32 = 10.;
-/// Wider than Menlo/Consolas at 10px (~6px) so a digit is never clipped.
+/// Wider than Menlo/Consolas at 10px (~6px) so a digit is never clipped. Line
+/// numbers use the Code Font family; a wider face may need more.
 const LN_DIGIT_PX: f32 = 8.;
 /// Line-number inset from the code side of its column.
 const LN_PAD: f32 = 4.;
@@ -43,7 +44,8 @@ pub(super) struct Decorations {
 }
 
 /// Shaped text and line number per `(side, visual row)`. Cleared on Layout
-/// rebuild and font size change; evicted outside visible ± one screen.
+/// rebuild and Code Font family / size change; evicted outside visible ± one
+/// screen.
 #[derive(Default)]
 pub(super) struct ShapeCache {
     rows: HashMap<(Side, u32), RowShape>,
@@ -236,6 +238,8 @@ pub(super) struct FrameInput<'a> {
     pub geom: Geom,
     pub row_h: f32,
     pub font_px: f32,
+    /// Code Font family, for both the code text and the line numbers.
+    pub family: &'a SharedString,
     pub scale: f32,
     pub decorations: Decorations,
     pub bars: &'a BarState,
@@ -254,6 +258,7 @@ pub(super) fn build_frame(
         geom,
         row_h,
         font_px,
+        family,
         scale,
         decorations,
         bars,
@@ -283,7 +288,7 @@ pub(super) fn build_frame(
                 .entry((side, i as u32))
                 .or_insert_with(|| {
                     let t = trace::start();
-                    let shape = shape_row(layout, side, row, font_px, window);
+                    let shape = shape_row(layout, side, row, font_px, family, window);
                     stats.shaped += 1;
                     stats.shape += trace::since(t);
                     shape
@@ -395,7 +400,14 @@ pub(super) fn build_frame(
     }
 }
 
-fn shape_row(layout: &Layout, side: Side, row: Row<'_>, font_px: f32, window: &mut Window) -> RowShape {
+fn shape_row(
+    layout: &Layout,
+    side: Side,
+    row: Row<'_>,
+    font_px: f32,
+    family: &SharedString,
+    window: &mut Window,
+) -> RowShape {
     let Row::Line(line) = row else {
         return RowShape {
             text: None,
@@ -410,7 +422,7 @@ fn shape_row(layout: &Layout, side: Side, row: Row<'_>, font_px: f32, window: &m
             shape(
                 window,
                 SharedString::from(t.text.clone()),
-                theme::code_font(),
+                family.clone(),
                 font_px,
                 theme::text(),
             )
@@ -419,14 +431,14 @@ fn shape_row(layout: &Layout, side: Side, row: Row<'_>, font_px: f32, window: &m
         label: Some(shape(
             window,
             SharedString::from(line.ln.to_string()),
-            theme::line_number_font(),
+            family.clone(),
             LN_FONT_PX,
             theme::faint(),
         )),
     }
 }
 
-fn shape(window: &mut Window, text: SharedString, family: &'static str, font_px: f32, color: Rgba) -> ShapedLine {
+fn shape(window: &mut Window, text: SharedString, family: SharedString, font_px: f32, color: Rgba) -> ShapedLine {
     let run = TextRun {
         len: text.len(),
         font: font(family),

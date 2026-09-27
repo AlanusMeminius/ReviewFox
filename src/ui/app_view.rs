@@ -30,7 +30,7 @@ use super::metadata;
 use super::scrollbar;
 use super::settings;
 use super::splitter::{self, Axis, ResizeState};
-use super::theme;
+use super::{appearance, theme};
 use super::window_controls::window_controls;
 use super::window_geometry;
 use super::OpenSettings;
@@ -1022,7 +1022,7 @@ impl Render for AppView {
             // The window's one translucent layer; `#body`, `#repos` and `#stage`
             // all stay clear so it is not painted twice.
             .bg(theme::frost())
-            .font_family(theme::UI_FONT)
+            .font_family(appearance::ui_font(cx))
             .track_focus(&self.focus)
             // The only band that reaches both window edges, so it can own the whole drag
             // surface and seat the caption buttons in the corner.
@@ -1304,6 +1304,7 @@ fn render_repo_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
 /// The window's one full-width band. Every gap in it drags, and on Windows the caption
 /// buttons close it out flush against the right edge — no floating overlay, no dead strip.
 fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -> impl IntoElement {
+    let mono = appearance::code_font(cx);
     let (branch, label) = match &view.state {
         MainState::Ready(loaded) => (loaded.branch.clone(), loaded.comparison.label()),
         MainState::Empty | MainState::Error(_) => ("—".into(), "—".into()),
@@ -1492,7 +1493,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                 .child(
                     div()
                         .flex_none()
-                        .font_family(theme::MONO_FONT)
+                        .font_family(mono.clone())
                         .text_xs()
                         .text_color(theme::muted())
                         .child(label),
@@ -1595,6 +1596,7 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
 }
 
 fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+    let mono = appearance::code_font(cx);
     let body = match &view.state {
         MainState::Empty => div().flex_1().into_any_element(),
         MainState::Error(msg) => div()
@@ -1667,7 +1669,7 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
                                         div()
                                             .w_full()
                                             .min_w(px(0.))
-                                            .font_family(theme::MONO_FONT)
+                                            .font_family(mono.clone())
                                             .text_xs()
                                             .text_color(theme::muted())
                                             .overflow_hidden()
@@ -2226,6 +2228,7 @@ fn picker_line(
 }
 
 fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+    let mono = appearance::code_font(cx);
     let paths = match &view.state {
         MainState::Ready(loaded) => loaded.changed_paths.clone(),
         MainState::Empty | MainState::Error(_) => Vec::new(),
@@ -2372,7 +2375,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .font_family(theme::MONO_FONT)
+                                    .font_family(mono.clone())
                                     .text_xs()
                                     .text_color(match status {
                                         PathStatus::Add => rgb(0x1a7f4b),
@@ -2403,7 +2406,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                     .h(px(16.))
                                     .flex()
                                     .items_center()
-                                    .font_family(theme::MONO_FONT)
+                                    .font_family(mono.clone())
                                     .text_xs()
                                     .gap_1()
                                     .child(
@@ -2450,6 +2453,7 @@ fn head_commit_meta(loaded: &BranchBrowser) -> Option<HeadMeta> {
 }
 
 fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> impl IntoElement {
+    let mono = appearance::code_font(cx);
     let full_oid = meta.commit.oid.to_string();
     let short = meta.commit.oid.short();
     let body = meta.commit.body.clone();
@@ -2491,7 +2495,7 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
                 .child(
                     div()
                         .id("head-meta-hash")
-                        .font_family(theme::MONO_FONT)
+                        .font_family(mono.clone())
                         .cursor_pointer()
                         .hover(|d| d.text_color(theme::accent()))
                         .on_click(cx.listener(move |_, _, _, cx| {
@@ -2506,7 +2510,7 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
                 .when_some(meta.range_label.clone(), |d, label| {
                     d.child(div().child("·")).child(
                         div()
-                            .font_family(theme::MONO_FONT)
+                            .font_family(mono.clone())
                             .text_color(theme::faint())
                             .child(label),
                     )

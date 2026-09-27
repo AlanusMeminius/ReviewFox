@@ -19,7 +19,7 @@ use crate::ui::gitlab_connection::{self, GitLabConnection};
 use crate::ui::mac_column_vibrancy::ColumnVibrancy;
 use crate::ui::scrollbar;
 use crate::ui::text_field::{TextField, TextFieldEvent, TextFieldStyle};
-use crate::ui::theme;
+use crate::ui::{appearance, theme};
 use crate::ui::window_controls::window_controls;
 
 actions!(
@@ -608,7 +608,7 @@ impl Render for SettingsView {
             // The window's one translucent layer; the nav and the gutters stay
             // clear so it is not painted twice.
             .bg(theme::frost())
-            .font_family(theme::UI_FONT)
+            .font_family(appearance::ui_font(cx))
             .text_color(theme::text())
             .child(render_titlebar(window))
             .child(

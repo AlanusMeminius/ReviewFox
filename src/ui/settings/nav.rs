@@ -1,6 +1,6 @@
 use gpui::{App, ClickEvent, ElementId, Rgba, SharedString, Window, div, prelude::*, px, svg};
 
-use crate::ui::theme;
+use crate::ui::{appearance, theme};
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
@@ -100,7 +100,7 @@ impl NavItem {
 }
 
 impl RenderOnce for NavItem {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         // Selection is the white capsule alone (colour-only boundaries); the
         // border only ever shows keyboard focus.
         let border = if self.focused {
@@ -144,7 +144,7 @@ impl RenderOnce for NavItem {
                 row.hover(|row| row.bg(theme::settings_nav_hover()))
             })
             .cursor_pointer()
-            .font_family(theme::UI_FONT)
+            .font_family(appearance::ui_font(cx))
             .text_size(px(14.))
             .when_some(self.on_click, |row, handler| {
                 row.on_click(move |event, window, cx| handler(event, window, cx))

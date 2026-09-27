@@ -2,7 +2,7 @@ use gpui::{
     AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, StatefulInteractiveElement,
     StyleRefinement, Styled, Subscription, WeakEntity, Window, WindowControlArea, canvas, div,
-    prelude::*, px, rgb, svg,
+    SharedString, prelude::*, px, rgb, svg,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -21,7 +21,7 @@ use super::file_tree::{self, TreeRow};
 use super::mac_column_vibrancy::ColumnVibrancy;
 use super::scrollbar;
 use super::splitter::{self, Axis, ResizeState};
-use super::theme;
+use super::{appearance, theme};
 use super::window_geometry;
 
 /// Own snapshot for the Diff window — not a live shared model with main.
@@ -96,7 +96,7 @@ impl Render for DiffShell {
 impl DiffView {
     pub fn with_snapshot(snapshot: DiffSnapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let review = Review::new(snapshot.comparison.clone());
-        let pane = cx.new(|_| DualPane::new());
+        let pane = cx.new(DualPane::new);
         let pane_events = cx.subscribe_in(&pane, window, |this, _, event, window, cx| match event {
             PaneEvent::BeginDraft { side, ln } => this.begin_draft(*side, *ln, window, cx),
             PaneEvent::HunkIndexChanged(index) => {
@@ -528,7 +528,7 @@ impl Render for DiffView {
             // The window's one translucent layer; the tree column and the stage stay
             // clear so it is never painted twice.
             .bg(theme::frost())
-            .font_family(theme::UI_FONT)
+            .font_family(appearance::ui_font(cx))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 this.handle_key(event, cx);
@@ -553,6 +553,7 @@ fn render_titlebar(
     window: &Window,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
+    let mono = appearance::code_font(cx);
     // Leading zone spans exactly what sits left of the stage, so what follows starts
     // on the stage's left edge and lines up with the island below.
     let leading_w = if view.tree_collapsed {
@@ -646,7 +647,7 @@ fn render_titlebar(
                     div()
                         .flex_1()
                         .min_w(px(0.))
-                        .font_family(theme::MONO_FONT)
+                        .font_family(mono.clone())
                         .text_xs()
                         .text_color(theme::muted())
                         .overflow_hidden()
@@ -744,6 +745,7 @@ fn render_tree_pane(
     width: gpui::Pixels,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
+    let mono = appearance::code_font(cx);
     let paths = view
         .snapshot
         .as_ref()
@@ -864,7 +866,7 @@ fn render_tree_pane(
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .font_family(theme::MONO_FONT)
+                                    .font_family(mono.clone())
                                     .text_xs()
                                     .text_color(match status {
                                         PathStatus::Add => rgb(0x1a7f4b),
@@ -895,7 +897,7 @@ fn render_tree_pane(
                                     .h(px(16.))
                                     .flex()
                                     .items_center()
-                                    .font_family(theme::MONO_FONT)
+                                    .font_family(mono.clone())
                                     .text_xs()
                                     .gap_1()
                                     .child(
@@ -964,10 +966,11 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
         .child(render_search_bar(view, cx))
         .child(render_body(view, cx))
         .child(render_comments(view, cx))
-        .child(render_draft_bar(view))
+        .child(render_draft_bar(view, appearance::code_font(cx)))
 }
 
 fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
+    let mono = appearance::code_font(cx);
     if !view.searching && view.search_query.is_empty() {
         return div().into_any_element();
     }
@@ -1015,7 +1018,7 @@ fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
                     div()
                         .flex_1()
                         .min_w(px(0.))
-                        .font_family(theme::MONO_FONT)
+                        .font_family(mono.clone())
                         .text_xs()
                         .text_color(theme::text())
                         .child(query_display),
@@ -1093,6 +1096,7 @@ fn render_body(view: &DiffView, _: &mut Context<DiffView>) -> impl IntoElement {
 }
 
 fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
+    let mono = appearance::code_font(cx);
     let path = view
         .snapshot
         .as_ref()
@@ -1146,7 +1150,7 @@ fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElem
                         .gap_1()
                         .child(
                             div()
-                                .font_family(theme::MONO_FONT)
+                                .font_family(mono.clone())
                                 .text_color(theme::faint())
                                 .child(label),
                         )
@@ -1158,7 +1162,7 @@ fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElem
         .into_any_element()
 }
 
-fn render_draft_bar(view: &DiffView) -> impl IntoElement {
+fn render_draft_bar(view: &DiffView, mono: SharedString) -> impl IntoElement {
     let Some(draft) = &view.drafting else {
         return div().into_any_element();
     };
@@ -1185,7 +1189,7 @@ fn render_draft_bar(view: &DiffView) -> impl IntoElement {
         .child(
             div()
                 .mt_1()
-                .font_family(theme::MONO_FONT)
+                .font_family(mono)
                 .text_sm()
                 .text_color(theme::text())
                 .child(format!("{}▌", draft.body)),

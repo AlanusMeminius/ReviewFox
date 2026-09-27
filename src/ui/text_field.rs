@@ -9,7 +9,7 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::theme;
+use super::{appearance, theme};
 
 actions!(
     text_field,
@@ -701,7 +701,7 @@ impl Render for TextField {
             .border_color(theme::line())
             .rounded(px(6.))
             .text_size(px(13.))
-            .font_family(theme::UI_FONT)
+            .font_family(appearance::ui_font(cx))
             .child(TextElement { input: cx.entity() })
     }
 }

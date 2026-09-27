@@ -67,3 +67,11 @@ _Avoid_: position (vague), location, cursor
 **UnresolvedAnchor**:
 An Anchor that could not be reliably re-located after Comparison or ViewOptions change; still kept on the Review but excluded from default Export. May carry at most one SuggestedAnchor.
 _Avoid_: broken comment, orphan, deleted comment
+
+**UI Font**:
+The user-chosen family and size for UI text: labels, buttons, lists, fields. Family falls back to the default when the stored one is not installed; size is the body size other UI text sizes keep their offset from.
+_Avoid_: app font, system font, sans font
+
+**Code Font**:
+The user-chosen family and size for code: Diff text, Diff line numbers and monospace chrome/meta text (hashes, paths, section headers). Only Diff text follows its size; per-pane A−/A+ override that size for the session only.
+_Avoid_: mono font, buffer font, editor font, diff font (as a separate setting)

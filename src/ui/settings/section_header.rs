@@ -1,6 +1,6 @@
 use gpui::{App, Rgba, SharedString, Window, div, prelude::*, px};
 
-use crate::ui::theme;
+use crate::ui::{appearance, theme};
 
 /// Zed `SettingsSectionHeader`: small muted mono label over a faded divider.
 /// No horizontal padding; the content pane supplies it.
@@ -18,7 +18,7 @@ impl SectionHeader {
 }
 
 impl RenderOnce for SectionHeader {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
@@ -26,7 +26,7 @@ impl RenderOnce for SectionHeader {
             .gap(px(6.))
             .child(
                 div()
-                    .font_family(theme::MONO_FONT)
+                    .font_family(appearance::code_font(cx))
                     .text_size(px(12.))
                     .text_color(theme::muted())
                     .child(self.label),

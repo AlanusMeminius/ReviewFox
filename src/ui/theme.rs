@@ -12,44 +12,7 @@ pub const DIFF_TREE_WIDTH: Pixels = gpui::px(200.);
 /// is one the islands below it gain.
 pub const TITLEBAR_HEIGHT: Pixels = gpui::px(32.);
 pub const TOGGLE_SIZE: Pixels = gpui::px(26.);
-/// Prototype A fonts; OS falls back if not installed.
-pub const UI_FONT: &str = "IBM Plex Sans";
-pub const MONO_FONT: &str = "IBM Plex Mono";
-
-/// Diff line numbers. System monospace, so a missing Plex install cannot
-/// fall back to a proportional font and wrap the digits.
-pub fn line_number_font() -> &'static str {
-    system_mono_font()
-}
-
-fn system_mono_font() -> &'static str {
-    if cfg!(windows) {
-        "Consolas"
-    } else if cfg!(target_os = "macos") {
-        "Menlo"
-    } else {
-        MONO_FONT
-    }
-}
-
-static CODE_FONT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-
-/// Pick the Diff code font once at startup: Plex Mono when installed, else the
-/// system monospace. The OS fallback for a missing Plex is proportional, which
-/// breaks column alignment and tab stops.
-pub fn init_code_font(installed: &[String]) {
-    let pick = if installed.iter().any(|name| name == MONO_FONT) {
-        MONO_FONT
-    } else {
-        system_mono_font()
-    };
-    let _ = CODE_FONT.set(pick);
-}
-
-/// Diff code text font; see [`init_code_font`].
-pub fn code_font() -> &'static str {
-    CODE_FONT.get().copied().unwrap_or(MONO_FONT)
-}
+// Font families live in `appearance` (UI Font / Code Font settings).
 
 /// Inset of floating capsules (Changes / Commit / MR detail) from the stage edges.
 pub const CHANGES_INSET: f32 = 12.;

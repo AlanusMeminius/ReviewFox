@@ -3,7 +3,7 @@ use gpui::{
     prelude::*, px, rgb, svg, transparent_black,
 };
 
-use crate::ui::theme;
+use crate::ui::{appearance, theme};
 
 /// Zed `ButtonStyle`, cut down to what Settings uses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -187,7 +187,7 @@ impl Button {
 }
 
 impl RenderOnce for Button {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = self.style.colors();
         let height = self.size.height();
         let icon_only = self.label.is_none();
@@ -212,7 +212,7 @@ impl RenderOnce for Button {
             .border_1()
             .border_color(colors.border)
             .bg(colors.background)
-            .font_family(theme::UI_FONT)
+            .font_family(appearance::ui_font(cx))
             .text_size(px(if self.small_label { 12. } else { 14. }))
             .text_color(theme::text())
             .hover(|button| button.bg(colors.hover))
@@ -247,13 +247,13 @@ impl RenderOnce for Button {
 struct Tooltip(SharedString);
 
 impl Render for Tooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .px_2()
             .py_1()
             .rounded_md()
             .bg(rgb(0x273142))
-            .font_family(theme::UI_FONT)
+            .font_family(appearance::ui_font(cx))
             .text_xs()
             .text_color(theme::white())
             .child(self.0.clone())

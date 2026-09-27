@@ -1,6 +1,7 @@
 #[cfg(target_os = "macos")]
 mod app_icon;
 mod app_view;
+mod appearance;
 mod gitlab_connection;
 mod diff;
 mod diff_window;
@@ -105,7 +106,7 @@ pub fn run() {
     };
 
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
-        theme::init_code_font(&cx.text_system().all_font_names());
+        appearance::init(cx);
         #[cfg(target_os = "macos")]
         app_icon::set_app_icon();
 
