@@ -1,5 +1,6 @@
 //! Git-free review domain types. See CONTEXT.md.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -199,12 +200,67 @@ impl Alignment {
     }
 }
 
+/// First visual line of a Hunk for jump landing (§3.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HunkJumpTarget {
+    /// Side that has the Hunk's first visual line.
+    pub side: Side,
+    pub ln: u32,
+}
+
+/// Land point plus scroll parameter `s` (row units) at that line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HunkLand {
+    pub target: HunkJumpTarget,
+    pub s: u32,
+}
+
+/// Land point for hunk `index` from [`Alignment::hunks`]: Insert → first new
+/// line; Delete → first old line; Replace → first old line if any, else first new.
+pub fn hunk_jump_target(alignment: &Alignment, index: usize) -> Option<HunkJumpTarget> {
+    let hunk = alignment.hunks().into_iter().nth(index)?;
+    if hunk.old.count > 0 {
+        Some(HunkJumpTarget {
+            side: Side::Old,
+            ln: hunk.old.start,
+        })
+    } else if hunk.new.count > 0 {
+        Some(HunkJumpTarget {
+            side: Side::New,
+            ln: hunk.new.start,
+        })
+    } else {
+        None
+    }
+}
+
+/// Equal lines kept at each end of a contiguous run beside a Hunk (§3.3).
+pub const EQUAL_CONTEXT: u32 = 3;
+
+/// Per-file fold: which Equal op indices are expanded. Default = all collapsed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FoldState {
+    pub expanded: HashSet<usize>,
+}
+
+impl FoldState {
+    pub fn collapsed() -> Self {
+        Self::default()
+    }
+
+    pub fn expand(&mut self, omit_id: usize) {
+        self.expanded.insert(omit_id);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowKind {
     Equal,
     Insert,
     Delete,
     Replace,
+    /// Collapsed Equal span; `DisplayRow.ln` is `from`.
+    Omit { id: usize, from: u32, to: u32 },
 }
 
 /// One visual line on one side. Not a shared old+new row.
@@ -293,6 +349,9 @@ pub struct DisplayRows {
     pub new_rows: Vec<DisplayRow>,
     pub bridges: Vec<Bridge>,
     pub knots: Vec<ScrollKnot>,
+    /// One entry per Hunk, in Alignment order; `s` is the scroll parameter at
+    /// the Hunk's first visual line.
+    pub hunk_lands: Vec<HunkLand>,
 }
 
 /// Which side of a Comparison a line Anchor refers to.
@@ -459,8 +518,28 @@ fn advance(knots: &mut Vec<ScrollKnot>, old_y: &mut u32, new_y: &mut u32, d_old:
 /// Equal lines are one row on each side. Insert rows exist only on the new
 /// side, delete rows only on the old side. A Replace is one block: the old
 /// lines stacked, the new lines stacked, with no invented partner row on the
-/// shorter side.
+/// shorter side. Does not fold Equal runs (fully expanded).
 pub fn display_rows(old_text: &str, new_text: &str, alignment: &Alignment) -> DisplayRows {
+    project_rows(old_text, new_text, alignment, None)
+}
+
+/// Like [`display_rows`], but collapses Equal runs longer than
+/// `2 * EQUAL_CONTEXT` beside a Hunk unless their op index is in `fold.expanded`.
+pub fn display_rows_folded(
+    old_text: &str,
+    new_text: &str,
+    alignment: &Alignment,
+    fold: &FoldState,
+) -> DisplayRows {
+    project_rows(old_text, new_text, alignment, Some(fold))
+}
+
+fn project_rows(
+    old_text: &str,
+    new_text: &str,
+    alignment: &Alignment,
+    fold: Option<&FoldState>,
+) -> DisplayRows {
     let old_lines = split_lines(old_text);
     let new_lines = split_lines(new_text);
     let mut old_rows = Vec::new();
@@ -473,32 +552,93 @@ pub fn display_rows(old_text: &str, new_text: &str, alignment: &Alignment) -> Di
     }];
     let mut old_y = 0u32;
     let mut new_y = 0u32;
+    let mut hunk_lands = Vec::new();
+    let has_hunk = alignment.ops.iter().any(|op| !matches!(op, AlignmentOp::Equal { .. }));
 
-    for op in &alignment.ops {
+    for (op_idx, op) in alignment.ops.iter().enumerate() {
         match *op {
             AlignmentOp::Equal { old, new } => {
                 let n = old.count.min(new.count);
-                push_side(
-                    &mut old_rows,
-                    &old_lines,
-                    LineSpan {
-                        start: old.start,
-                        count: n,
-                    },
-                    RowKind::Equal,
-                );
-                push_side(
-                    &mut new_rows,
-                    &new_lines,
-                    LineSpan {
-                        start: new.start,
-                        count: n,
-                    },
-                    RowKind::Equal,
-                );
-                advance(&mut knots, &mut old_y, &mut new_y, n, n);
+                let collapse = fold.is_some_and(|f| {
+                    has_hunk && n > EQUAL_CONTEXT * 2 && !f.expanded.contains(&op_idx)
+                });
+                if collapse {
+                    let head = EQUAL_CONTEXT;
+                    let tail = EQUAL_CONTEXT;
+                    push_side(
+                        &mut old_rows,
+                        &old_lines,
+                        LineSpan {
+                            start: old.start,
+                            count: head,
+                        },
+                        RowKind::Equal,
+                    );
+                    push_side(
+                        &mut new_rows,
+                        &new_lines,
+                        LineSpan {
+                            start: new.start,
+                            count: head,
+                        },
+                        RowKind::Equal,
+                    );
+                    advance(&mut knots, &mut old_y, &mut new_y, head, head);
+
+                    let from_old = old.start + EQUAL_CONTEXT;
+                    let to_old = old.start + n - EQUAL_CONTEXT - 1;
+                    let from_new = new.start + EQUAL_CONTEXT;
+                    let to_new = new.start + n - EQUAL_CONTEXT - 1;
+                    old_rows.push(omit_row(op_idx, from_old, to_old));
+                    new_rows.push(omit_row(op_idx, from_new, to_new));
+                    advance(&mut knots, &mut old_y, &mut new_y, 1, 1);
+
+                    push_side(
+                        &mut old_rows,
+                        &old_lines,
+                        LineSpan {
+                            start: old.start + n - tail,
+                            count: tail,
+                        },
+                        RowKind::Equal,
+                    );
+                    push_side(
+                        &mut new_rows,
+                        &new_lines,
+                        LineSpan {
+                            start: new.start + n - tail,
+                            count: tail,
+                        },
+                        RowKind::Equal,
+                    );
+                    advance(&mut knots, &mut old_y, &mut new_y, tail, tail);
+                } else {
+                    push_side(
+                        &mut old_rows,
+                        &old_lines,
+                        LineSpan {
+                            start: old.start,
+                            count: n,
+                        },
+                        RowKind::Equal,
+                    );
+                    push_side(
+                        &mut new_rows,
+                        &new_lines,
+                        LineSpan {
+                            start: new.start,
+                            count: n,
+                        },
+                        RowKind::Equal,
+                    );
+                    advance(&mut knots, &mut old_y, &mut new_y, n, n);
+                }
             }
             AlignmentOp::Insert { after_old, news } => {
+                let s = knots.last().map(|k| k.s).unwrap_or(0);
+                if let Some(target) = land_from_op(op) {
+                    hunk_lands.push(HunkLand { target, s });
+                }
                 let old_seam = old_y;
                 let new_from = new_y;
                 push_side(&mut new_rows, &new_lines, news, RowKind::Insert);
@@ -512,6 +652,10 @@ pub fn display_rows(old_text: &str, new_text: &str, alignment: &Alignment) -> Di
                 });
             }
             AlignmentOp::Delete { olds, at_new } => {
+                let s = knots.last().map(|k| k.s).unwrap_or(0);
+                if let Some(target) = land_from_op(op) {
+                    hunk_lands.push(HunkLand { target, s });
+                }
                 let old_from = old_y;
                 let new_seam = new_y;
                 push_side(&mut old_rows, &old_lines, olds, RowKind::Delete);
@@ -525,6 +669,10 @@ pub fn display_rows(old_text: &str, new_text: &str, alignment: &Alignment) -> Di
                 });
             }
             AlignmentOp::Replace { olds, news } => {
+                let s = knots.last().map(|k| k.s).unwrap_or(0);
+                if let Some(target) = land_from_op(op) {
+                    hunk_lands.push(HunkLand { target, s });
+                }
                 let old_from = old_y;
                 let new_from = new_y;
                 push_side(&mut old_rows, &old_lines, olds, RowKind::Replace);
@@ -566,6 +714,45 @@ pub fn display_rows(old_text: &str, new_text: &str, alignment: &Alignment) -> Di
         new_rows,
         bridges,
         knots,
+        hunk_lands,
+    }
+}
+
+fn land_from_op(op: &AlignmentOp) -> Option<HunkJumpTarget> {
+    match *op {
+        AlignmentOp::Equal { .. } => None,
+        AlignmentOp::Insert { news, .. } if news.count > 0 => Some(HunkJumpTarget {
+            side: Side::New,
+            ln: news.start,
+        }),
+        AlignmentOp::Delete { olds, .. } if olds.count > 0 => Some(HunkJumpTarget {
+            side: Side::Old,
+            ln: olds.start,
+        }),
+        AlignmentOp::Replace { olds, news } => {
+            if olds.count > 0 {
+                Some(HunkJumpTarget {
+                    side: Side::Old,
+                    ln: olds.start,
+                })
+            } else if news.count > 0 {
+                Some(HunkJumpTarget {
+                    side: Side::New,
+                    ln: news.start,
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn omit_row(id: usize, from: u32, to: u32) -> DisplayRow {
+    DisplayRow {
+        ln: from,
+        text: format!("⋯ {from}\u{2013}{to}"),
+        kind: RowKind::Omit { id, from, to },
     }
 }
 
@@ -923,5 +1110,303 @@ mod tests {
             ]
         );
         assert!(display.bridges.is_empty());
+    }
+
+    /// Long Equal run beside a Hunk: keep 3 lines at each end, one omit separator per side.
+    #[test]
+    fn long_equal_run_beside_hunk_collapses_to_one_separator_per_side() {
+        // 10 Equal lines, then a one-line Insert. Context is 3, so middle 4–7 collapse.
+        let old: String = (1..=10).map(|i| format!("L{i}")).collect::<Vec<_>>().join("\n");
+        let new = format!("{old}\nINS");
+        let alignment = Alignment {
+            ops: vec![
+                AlignmentOp::Equal {
+                    old: LineSpan { start: 1, count: 10 },
+                    new: LineSpan { start: 1, count: 10 },
+                },
+                AlignmentOp::Insert {
+                    after_old: 10,
+                    news: LineSpan { start: 11, count: 1 },
+                },
+            ],
+        };
+        let display = display_rows_folded(&old, &new, &alignment, &FoldState::collapsed());
+
+        assert_eq!(
+            display.old_rows,
+            vec![
+                DisplayRow {
+                    ln: 1,
+                    text: "L1".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 2,
+                    text: "L2".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 3,
+                    text: "L3".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 4,
+                    text: "⋯ 4\u{2013}7".into(),
+                    kind: RowKind::Omit {
+                        id: 0,
+                        from: 4,
+                        to: 7,
+                    },
+                },
+                DisplayRow {
+                    ln: 8,
+                    text: "L8".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 9,
+                    text: "L9".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 10,
+                    text: "L10".into(),
+                    kind: RowKind::Equal,
+                },
+            ]
+        );
+        assert_eq!(
+            display.new_rows[..7],
+            [
+                DisplayRow {
+                    ln: 1,
+                    text: "L1".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 2,
+                    text: "L2".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 3,
+                    text: "L3".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 4,
+                    text: "⋯ 4\u{2013}7".into(),
+                    kind: RowKind::Omit {
+                        id: 0,
+                        from: 4,
+                        to: 7,
+                    },
+                },
+                DisplayRow {
+                    ln: 8,
+                    text: "L8".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 9,
+                    text: "L9".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 10,
+                    text: "L10".into(),
+                    kind: RowKind::Equal,
+                },
+            ]
+        );
+        assert_eq!(
+            display.new_rows[7],
+            DisplayRow {
+                ln: 11,
+                text: "INS".into(),
+                kind: RowKind::Insert,
+            }
+        );
+        // One separator each side, same omit id.
+        let old_omits: Vec<_> = display
+            .old_rows
+            .iter()
+            .filter(|r| matches!(r.kind, RowKind::Omit { .. }))
+            .collect();
+        let new_omits: Vec<_> = display
+            .new_rows
+            .iter()
+            .filter(|r| matches!(r.kind, RowKind::Omit { .. }))
+            .collect();
+        assert_eq!(old_omits.len(), 1);
+        assert_eq!(new_omits.len(), 1);
+        assert_eq!(old_omits[0].kind, new_omits[0].kind);
+    }
+
+    #[test]
+    fn equal_run_that_fits_context_stays_fully_visible() {
+        // 6 Equal lines = exactly 2×CONTEXT; must not collapse.
+        let old: String = (1..=6).map(|i| format!("E{i}")).collect::<Vec<_>>().join("\n");
+        let new = format!("{old}\nX");
+        let alignment = Alignment {
+            ops: vec![
+                AlignmentOp::Equal {
+                    old: LineSpan { start: 1, count: 6 },
+                    new: LineSpan { start: 1, count: 6 },
+                },
+                AlignmentOp::Insert {
+                    after_old: 6,
+                    news: LineSpan { start: 7, count: 1 },
+                },
+            ],
+        };
+        let display = display_rows_folded(&old, &new, &alignment, &FoldState::collapsed());
+        assert!(
+            display
+                .old_rows
+                .iter()
+                .all(|r| !matches!(r.kind, RowKind::Omit { .. }))
+        );
+        assert!(
+            display
+                .new_rows
+                .iter()
+                .all(|r| !matches!(r.kind, RowKind::Omit { .. }))
+        );
+        assert_eq!(display.old_rows.len(), 6);
+        assert_eq!(display.new_rows.len(), 7);
+        assert_eq!(display.old_rows[0].ln, 1);
+        assert_eq!(display.old_rows[5].ln, 6);
+        assert_eq!(display.old_rows[5].text, "E6");
+    }
+
+    #[test]
+    fn no_hunk_file_shows_every_line_and_no_separator() {
+        let old = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj";
+        let new = old;
+        let alignment = Alignment {
+            ops: vec![AlignmentOp::Equal {
+                old: LineSpan { start: 1, count: 10 },
+                new: LineSpan { start: 1, count: 10 },
+            }],
+        };
+        let display = display_rows_folded(old, new, &alignment, &FoldState::collapsed());
+        assert_eq!(display.old_rows.len(), 10);
+        assert_eq!(display.new_rows.len(), 10);
+        assert!(
+            display
+                .old_rows
+                .iter()
+                .chain(display.new_rows.iter())
+                .all(|r| !matches!(r.kind, RowKind::Omit { .. }))
+        );
+        assert_eq!(display.old_rows[0].text, "a");
+        assert_eq!(display.old_rows[9].text, "j");
+        assert!(display.bridges.is_empty());
+    }
+
+    #[test]
+    fn expanding_one_separator_by_id_expands_that_span_on_both_sides() {
+        let old: String = (1..=10).map(|i| format!("L{i}")).collect::<Vec<_>>().join("\n");
+        let new = format!("{old}\nINS");
+        let alignment = Alignment {
+            ops: vec![
+                AlignmentOp::Equal {
+                    old: LineSpan { start: 1, count: 10 },
+                    new: LineSpan { start: 1, count: 10 },
+                },
+                AlignmentOp::Insert {
+                    after_old: 10,
+                    news: LineSpan { start: 11, count: 1 },
+                },
+            ],
+        };
+        let mut fold = FoldState::collapsed();
+        let collapsed = display_rows_folded(&old, &new, &alignment, &fold);
+        let omit_id = match collapsed.old_rows[3].kind {
+            RowKind::Omit { id, .. } => id,
+            other => panic!("expected omit at index 3, got {other:?}"),
+        };
+        assert!(matches!(collapsed.new_rows[3].kind, RowKind::Omit { id, .. } if id == omit_id));
+
+        fold.expand(omit_id);
+        let expanded = display_rows_folded(&old, &new, &alignment, &fold);
+
+        assert!(
+            expanded
+                .old_rows
+                .iter()
+                .chain(expanded.new_rows.iter())
+                .all(|r| !matches!(r.kind, RowKind::Omit { .. }))
+        );
+        assert_eq!(expanded.old_rows.len(), 10);
+        assert_eq!(expanded.new_rows.len(), 11);
+        assert_eq!(
+            expanded.old_rows.iter().map(|r| r.ln).collect::<Vec<_>>(),
+            (1..=10).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            expanded.new_rows[..10]
+                .iter()
+                .map(|r| r.ln)
+                .collect::<Vec<_>>(),
+            (1..=10).collect::<Vec<_>>()
+        );
+        assert_eq!(expanded.new_rows[10].ln, 11);
+        assert_eq!(expanded.new_rows[10].kind, RowKind::Insert);
+        // Middle lines that were omitted are restored on both sides.
+        assert_eq!(expanded.old_rows[3].text, "L4");
+        assert_eq!(expanded.new_rows[3].text, "L4");
+        assert_eq!(expanded.old_rows[6].text, "L7");
+        assert_eq!(expanded.new_rows[6].text, "L7");
+    }
+
+    #[test]
+    fn hunk_jump_lands_on_first_visual_line_of_insert() {
+        let alignment = Alignment {
+            ops: vec![
+                AlignmentOp::Equal {
+                    old: LineSpan { start: 1, count: 2 },
+                    new: LineSpan { start: 1, count: 2 },
+                },
+                AlignmentOp::Insert {
+                    after_old: 2,
+                    news: LineSpan { start: 3, count: 2 },
+                },
+            ],
+        };
+        let land = hunk_jump_target(&alignment, 0).expect("insert hunk");
+        assert_eq!(
+            land,
+            HunkJumpTarget {
+                side: Side::New,
+                ln: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn hunk_jump_lands_on_first_visual_line_of_delete() {
+        let alignment = Alignment {
+            ops: vec![
+                AlignmentOp::Equal {
+                    old: LineSpan { start: 1, count: 1 },
+                    new: LineSpan { start: 1, count: 1 },
+                },
+                AlignmentOp::Delete {
+                    olds: LineSpan { start: 2, count: 2 },
+                    at_new: 2,
+                },
+            ],
+        };
+        let land = hunk_jump_target(&alignment, 0).expect("delete hunk");
+        assert_eq!(
+            land,
+            HunkJumpTarget {
+                side: Side::Old,
+                ln: 2,
+            }
+        );
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::domain::{
     Alignment, AlignmentOp, ChangedPath, Comparison, DisplayRows, LineSpan, Oid, PathStatus,
-    Repository, Side, ViewOptions, display_rows, split_lines,
+    Repository, Side, ViewOptions, display_rows_folded, split_lines,
 };
 use crate::workspace_store::{self, WorkspaceEntry};
 use similar::{DiffOp, TextDiff};
@@ -514,6 +514,9 @@ pub enum FileDiff {
     Text {
         display: DisplayRows,
         hunk_count: usize,
+        alignment: Alignment,
+        old_text: String,
+        new_text: String,
     },
     Binary,
     Error(String),
@@ -552,14 +555,22 @@ fn file_diff_inner(
         return Ok(FileDiff::Binary);
     }
 
-    let old_text = String::from_utf8_lossy(&old_bytes);
-    let new_text = String::from_utf8_lossy(&new_bytes);
+    let old_text = String::from_utf8_lossy(&old_bytes).into_owned();
+    let new_text = String::from_utf8_lossy(&new_bytes).into_owned();
     let alignment = compute_alignment(&old_text, &new_text, options);
     let hunk_count = alignment.hunks().len();
-    let display = display_rows(&old_text, &new_text, &alignment);
+    let display = display_rows_folded(
+        &old_text,
+        &new_text,
+        &alignment,
+        &crate::domain::FoldState::collapsed(),
+    );
     Ok(FileDiff::Text {
         display,
         hunk_count,
+        alignment,
+        old_text,
+        new_text,
     })
 }
 
@@ -710,7 +721,11 @@ mod tests {
             &ViewOptions::default(),
         );
         match diff {
-            FileDiff::Text { display, hunk_count } => {
+            FileDiff::Text {
+                display,
+                hunk_count,
+                ..
+            } => {
                 assert!(hunk_count >= 1);
                 assert!(
                     display
