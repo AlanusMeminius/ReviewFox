@@ -7,7 +7,21 @@ pub const FILES_WIDTH: Pixels = gpui::px(280.);
 pub const DIFF_TREE_WIDTH: Pixels = gpui::px(200.);
 pub const CHROME_HEIGHT: Pixels = gpui::px(36.);
 pub const TOGGLE_SIZE: Pixels = gpui::px(26.);
-pub const GUTTER_WIDTH: Pixels = gpui::px(88.);
+/// Prototype A fonts; OS falls back if not installed.
+pub const UI_FONT: &str = "IBM Plex Sans";
+pub const MONO_FONT: &str = "IBM Plex Mono";
+
+/// Diff line numbers. System monospace, so a missing Plex install cannot
+/// fall back to a proportional font and wrap the digits.
+pub fn line_number_font() -> &'static str {
+    if cfg!(windows) {
+        "Consolas"
+    } else if cfg!(target_os = "macos") {
+        "Menlo"
+    } else {
+        MONO_FONT
+    }
+}
 
 /// Inset of the floating Changes capsule from the stage edges.
 pub const CHANGES_INSET: f32 = 8.;
@@ -39,11 +53,6 @@ pub fn changes_capsule_shadow() -> Vec<BoxShadow> {
         },
     ]
 }
-
-/// Prototype A fonts; OS falls back if not installed.
-pub const UI_FONT: &str = "IBM Plex Sans";
-pub const MONO_FONT: &str = "IBM Plex Mono";
-
 
 #[cfg(target_os = "macos")]
 pub const TRAFFIC_LIGHT_TOP_INSET: f32 = 11.;
