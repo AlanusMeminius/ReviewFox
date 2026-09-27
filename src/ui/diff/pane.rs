@@ -170,6 +170,10 @@ impl DualPane {
         }
     }
 
+    pub fn font_px(&self) -> u32 {
+        self.font_size.px()
+    }
+
     pub fn hunk_count(&self) -> Option<usize> {
         self.layout.as_ref().map(|l| l.hunk_count)
     }

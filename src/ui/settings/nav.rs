@@ -175,7 +175,7 @@ impl RenderOnce for NavItem {
                             })
                             .child(
                                 svg()
-                                    .size(px(14.))
+                                    .size(theme::ICON_SIZE_SM)
                                     .path(if expanded {
                                         "chevron_down.svg"
                                     } else {

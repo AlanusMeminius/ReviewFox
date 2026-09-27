@@ -5,6 +5,7 @@ mod gitlab_connection;
 mod diff;
 mod diff_window;
 mod file_tree;
+mod icon_button;
 mod text_field;
 #[cfg(target_os = "macos")]
 mod mac_column_vibrancy;
@@ -13,6 +14,7 @@ mod scrollbar;
 mod settings;
 mod splitter;
 mod theme;
+mod tooltip;
 mod window_controls;
 mod window_geometry;
 
@@ -41,53 +43,51 @@ actions!(app, [Quit, OpenSettings]);
 
 struct Assets;
 
+/// Icons are Lucide (ISC, lucide.dev), 24 viewBox, stroke 2. GPUI draws each as a
+/// mask tinted by `text_color`, so the stroke colour in the file doesn't matter.
+macro_rules! icon_assets {
+    ($($name:literal),* $(,)?) => {
+        &[$(($name, include_bytes!(concat!("../../assets/", $name)) as &[u8])),*]
+    };
+}
+
+const ICON_ASSETS: &[(&str, &[u8])] = icon_assets![
+    "sidebar_title.svg",
+    "diff_title.svg",
+    "branch.svg",
+    "folder.svg",
+    "folder_open.svg",
+    "gitlab.svg",
+    "export.svg",
+    "gear.svg",
+    "check.svg",
+    "warning.svg",
+    "undo.svg",
+    "refresh.svg",
+    "chevron_right.svg",
+    "chevron_down.svg",
+    "arrow_up.svg",
+    "arrow_down.svg",
+    "unfold_vertical.svg",
+    "fold_vertical.svg",
+    "pilcrow.svg",
+    "minus.svg",
+    "plus.svg",
+    "search.svg",
+    "pin.svg",
+    "pin_off.svg",
+    "trash.svg",
+    "square_minus.svg",
+    "square_plus.svg",
+    "diff.svg",
+];
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
-        Ok(match path {
-            "sidebar_title.svg" => Some(Cow::Borrowed(
-                include_bytes!("../../assets/sidebar_title.svg") as &'static [u8],
-            )),
-            "diff_title.svg" => Some(Cow::Borrowed(
-                include_bytes!("../../assets/diff_title.svg") as &'static [u8],
-            )),
-            "branch.svg" => Some(Cow::Borrowed(
-                include_bytes!("../../assets/branch.svg") as &'static [u8],
-            )),
-            "folder.svg" => Some(Cow::Borrowed(
-                include_bytes!("../../assets/folder.svg") as &'static [u8],
-            )),
-            "folder_open.svg" => Some(Cow::Borrowed(
-                include_bytes!("../../assets/folder_open.svg") as &'static [u8],
-            )),
-            "gitlab.svg" => Some(Cow::Borrowed(
-                include_bytes!("../../assets/gitlab.svg") as &'static [u8],
-            )),
-            "export.svg" => Some(Cow::Borrowed(
-                include_bytes!("../../assets/export.svg") as &'static [u8],
-            )),
-            "gear.svg" => Some(Cow::Borrowed(
-                include_bytes!("../../assets/gear.svg") as &'static [u8],
-            )),
-            "check.svg" => Some(Cow::Borrowed(
-                include_bytes!("../../assets/check.svg") as &'static [u8],
-            )),
-            "warning.svg" => Some(Cow::Borrowed(
-                include_bytes!("../../assets/warning.svg") as &'static [u8],
-            )),
-            "undo.svg" => Some(Cow::Borrowed(
-                include_bytes!("../../assets/undo.svg") as &'static [u8],
-            )),
-            "refresh.svg" => Some(Cow::Borrowed(
-                include_bytes!("../../assets/refresh.svg") as &'static [u8],
-            )),
-            "chevron_right.svg" => Some(Cow::Borrowed(
-                include_bytes!("../../assets/chevron_right.svg") as &'static [u8],
-            )),
-            "chevron_down.svg" => Some(Cow::Borrowed(
-                include_bytes!("../../assets/chevron_down.svg") as &'static [u8],
-            )),
-            _ => None,
-        })
+        Ok(ICON_ASSETS
+            .iter()
+            .find(|(name, _)| *name == path)
+            .map(|(_, bytes)| Cow::Borrowed(*bytes)))
     }
 
     fn list(&self, _path: &str) -> gpui::Result<Vec<SharedString>> {

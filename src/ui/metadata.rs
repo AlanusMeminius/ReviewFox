@@ -1,11 +1,12 @@
 //! Label + colored pill metadata rows, ported from BeadsViewer's issue detail.
 
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, Div, FontWeight, IntoElement, Render, SharedString,
-    Stateful, Window, div, prelude::*, px, rgb,
+    AnyElement, App, ClipboardItem, Div, FontWeight, IntoElement, SharedString,
+    Stateful, div, prelude::*, px, rgb,
 };
 
 use super::theme;
+use super::tooltip::Tooltip;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
@@ -51,25 +52,10 @@ fn copyable_capsule(value: impl Into<String>) -> Stateful<Div> {
         .cursor_pointer()
         .hover(|capsule| capsule.bg(theme::line()))
         .active(|capsule| capsule.bg(rgb(0xd0d6e0)))
-        .tooltip(|_, cx| cx.new(|_| CopyTooltip).into())
+        .tooltip(Tooltip::text("Click to copy", None))
         .on_click(move |_, _, cx: &mut App| {
             cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
         })
-}
-
-struct CopyTooltip;
-
-impl Render for CopyTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(rgb(0x273142))
-            .text_xs()
-            .text_color(theme::white())
-            .child("Click to copy")
-    }
 }
 
 fn is_copyable(label: &str) -> bool {

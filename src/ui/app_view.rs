@@ -30,7 +30,9 @@ use super::metadata;
 use super::scrollbar;
 use super::settings;
 use super::splitter::{self, Axis, ResizeState};
+use super::icon_button::IconButton;
 use super::theme;
+use super::tooltip;
 use super::window_controls::window_controls;
 use super::window_geometry;
 use super::OpenSettings;
@@ -1216,7 +1218,7 @@ fn sidebar_repo_row(
         })
         .child(
             svg()
-                .size(px(16.))
+                .size(theme::ICON_SIZE)
                 .flex_none()
                 .path(icon)
                 .text_color(icon_color),
@@ -1244,14 +1246,15 @@ fn render_repo_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
         return div().into_any_element();
     };
     let path = menu.path.clone();
-    let items: Vec<(&str, fn(&mut AppView, PathBuf, &mut Context<AppView>))> = match menu.kind {
+    type MenuAction = fn(&mut AppView, PathBuf, &mut Context<AppView>);
+    let items: Vec<(&str, &str, MenuAction)> = match menu.kind {
         RepoMenuKind::Pin => vec![
-            ("Unpin", AppView::unpin_repo),
-            ("Remove", AppView::remove_repo),
+            ("pin_off.svg", "Unpin", AppView::unpin_repo),
+            ("trash.svg", "Remove", AppView::remove_repo),
         ],
         RepoMenuKind::Repositories => vec![
-            ("Pin", AppView::pin_repo),
-            ("Remove", AppView::remove_repo),
+            ("pin.svg", "Pin", AppView::pin_repo),
+            ("trash.svg", "Remove", AppView::remove_repo),
         ],
     };
     let position = menu.position;
@@ -1276,7 +1279,7 @@ fn render_repo_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                         this.repo_menu = None;
                         cx.notify();
                     }))
-                    .children(items.into_iter().enumerate().map(|(i, (label, action))| {
+                    .children(items.into_iter().enumerate().map(|(i, (icon, label, action))| {
                         let path = path.clone();
                         div()
                             .id(("repo-menu-item", i))
@@ -1284,10 +1287,20 @@ fn render_repo_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                             .py_1()
                             .rounded_md()
                             .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap_2()
                             .hover(|d| d.bg(theme::hover()))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 action(this, path.clone(), cx);
                             }))
+                            .child(
+                                svg()
+                                    .size(theme::ICON_SIZE)
+                                    .flex_none()
+                                    .path(icon)
+                                    .text_color(theme::muted()),
+                            )
                             .child(
                                 div()
                                     .text_sm()
@@ -1344,7 +1357,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
             )
             .child(
                 svg()
-                    .size_4()
+                    .size(theme::ICON_SIZE)
                     .flex_none()
                     .path("branch.svg")
                     .text_color(theme::muted()),
@@ -1390,7 +1403,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
             )
             .child(
                 svg()
-                    .size_4()
+                    .size(theme::ICON_SIZE)
                     .flex_none()
                     .path("gitlab.svg")
                     .text_color(theme::muted()),
@@ -2329,7 +2342,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                     .justify_center()
                                     .child(
                                         svg()
-                                            .size(px(16.))
+                                            .size(theme::ICON_SIZE)
                                             .path(if collapsed {
                                                 "folder.svg"
                                             } else {
@@ -2693,144 +2706,26 @@ impl BranchPicker {
 }
 
 fn open_diff_button(enabled: bool, cx: &mut Context<AppView>) -> impl IntoElement {
-    // BeadsViewer toolbar control UX (hit target + hover/active); glyph is dual-pane Diff.
-    div()
-        .id("open-diff")
-        .w(theme::TOGGLE_SIZE)
-        .h(theme::TOGGLE_SIZE)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_md()
-        .text_color(if enabled {
-            theme::muted()
-        } else {
-            theme::faint()
-        })
-        .tooltip(|_, cx| cx.new(|_| OpenDiffTooltip).into())
-        .when(enabled, |button| {
-            button
-                .cursor_pointer()
-                .hover(|button| button.bg(theme::hover()))
-                .active(|button| button.bg(rgb(0xdfe3e9)))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.open_diff(cx);
-                }))
-                .child(
-                    svg()
-                        .size_4()
-                        .path("diff_title.svg")
-                        .text_color(theme::muted()),
-                )
-        })
-        .when(!enabled, |button| {
-            button.child(
-                svg()
-                    .size_4()
-                    .path("diff_title.svg")
-                    .text_color(theme::faint()),
-            )
-        })
-}
-
-struct OpenDiffTooltip;
-
-impl Render for OpenDiffTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(rgb(0x273142))
-            .text_xs()
-            .text_color(theme::white())
-            .child("Open Diff")
-    }
-}
-
-struct OpenRepoTooltip;
-
-impl Render for OpenRepoTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(rgb(0x273142))
-            .text_xs()
-            .text_color(theme::white())
-            .child("Open Repo")
-    }
+    IconButton::new("open-diff", "diff_title.svg", "Open Diff")
+        .disabled(!enabled)
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.open_diff(cx);
+        }))
 }
 
 fn open_repo_button(id: &'static str, cx: &mut Context<AppView>) -> impl IntoElement {
-    div()
-        .id(id)
-        .w(theme::TOGGLE_SIZE)
-        .h(theme::TOGGLE_SIZE)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_md()
-        .cursor_pointer()
-        .text_color(theme::muted())
-        .tooltip(|_, cx| cx.new(|_| OpenRepoTooltip).into())
-        .hover(|button| button.bg(theme::hover()))
-        .active(|button| button.bg(rgb(0xdfe3e9)))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.open_repo(cx);
-        }))
-        .child(
-            svg()
-                .size_4()
-                .path("folder.svg")
-                .text_color(theme::muted()),
-        )
-}
-
-struct SettingsTooltip;
-
-impl Render for SettingsTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let shortcut = if cfg!(target_os = "macos") { "⌘," } else { "Ctrl+," };
-        div()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(rgb(0x273142))
-            .text_xs()
-            .text_color(theme::white())
-            .child(format!("Settings ({shortcut})"))
-    }
+    IconButton::new(id, "folder.svg", "Open Repo").on_click(cx.listener(|this, _, _, cx| {
+        this.open_repo(cx);
+    }))
 }
 
 fn settings_button(cx: &mut Context<AppView>) -> impl IntoElement {
-    div()
-        .id("open-settings")
-        .w(theme::TOGGLE_SIZE)
-        .h(theme::TOGGLE_SIZE)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_md()
-        .cursor_pointer()
-        .text_color(theme::muted())
-        .tooltip(|_, cx| cx.new(|_| SettingsTooltip).into())
-        .hover(|button| button.bg(theme::hover()))
-        .active(|button| button.bg(rgb(0xdfe3e9)))
+    IconButton::new("open-settings", "gear.svg", "Settings")
+        .shortcut(tooltip::cmd(","))
         .on_click(cx.listener(|_, _, window, cx| {
             // Deferred: `cx.dispatch_action` can't re-enter this window mid-update.
             window.dispatch_action(Box::new(OpenSettings), cx);
         }))
-        .child(
-            svg()
-                .size_4()
-                .path("gear.svg")
-                .text_color(theme::muted()),
-        )
 }
 
 fn toggle_button(
@@ -2838,29 +2733,13 @@ fn toggle_button(
     collapsed: bool,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    div()
-        .id(id)
-        .w(theme::TOGGLE_SIZE)
-        .h(theme::TOGGLE_SIZE)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_md()
-        .when(collapsed, |button| button.bg(theme::range()))
-        .cursor_pointer()
-        .hover(|button| button.bg(theme::hover()))
-        .active(|button| button.bg(rgb(0xdfe3e9)))
+    let label = if collapsed { "Show Repositories" } else { "Hide Repositories" };
+    IconButton::new(id, "sidebar_title.svg", label)
+        .pressed(collapsed)
         .on_click(cx.listener(|this, _, _, cx| {
             this.repos_collapsed = !this.repos_collapsed;
             cx.notify();
         }))
-        .child(
-            svg()
-                .size_4()
-                .path("sidebar_title.svg")
-                .text_color(theme::muted()),
-        )
 }
 
 #[cfg(target_os = "macos")]
