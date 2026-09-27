@@ -3,6 +3,9 @@
 mod domain;
 mod export;
 mod git;
+mod gitlab;
+mod reqwest_client;
+mod settings_store;
 mod ui;
 mod workspace_store;
 

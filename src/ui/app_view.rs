@@ -5,19 +5,28 @@ use gpui::{
     Window, WindowBounds, WindowControlArea, WindowDecorations, WindowHandle, WindowOptions, div,
     prelude::*, px, rgb, size, svg, Bounds,
 };
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use crate::domain::{PathStatus, Repository};
+use crate::domain::{Oid, PathStatus, Repository};
 use crate::git::{self, BranchBrowser, BranchInfo, CommitInfo};
-use crate::workspace_store::{self, WorkspaceEntry, WorkspaceStore};
+use crate::gitlab::{
+    self, FetchMergeRequestResult, ListMergeRequestCommitsResult, ListMergeRequestsResult,
+    MergeRequestDetail, MergeRequestSummary, ResolveProjectResult,
+};
+use crate::settings_store;
+use crate::workspace_store::{self, MrEntryLabel, WorkspaceEntry, WorkspaceStore};
 use super::diff_window::{DiffSnapshot, DiffView};
 use super::file_tree::{self, TreeRow};
+use super::gitlab_connection::{self, GitLabConnection};
 #[cfg(target_os = "macos")]
 use super::mac_column_vibrancy::ColumnVibrancy;
 use super::scrollbar;
+use super::settings_window::{self, SettingsView};
 use super::splitter::{self, Axis, ResizeState};
+use super::current_repo;
 use super::theme;
 
 pub struct AppView {
@@ -28,6 +37,11 @@ pub struct AppView {
     store: WorkspaceStore,
     diff_window: Option<WindowHandle<DiffView>>,
     branch_picker: Option<BranchPicker>,
+    mr_picker: Option<MrPicker>,
+    /// In-memory MR Entry (list = GitLab commits; Comparison = diff_refs).
+    mr_entry: Option<MrEntry>,
+    gitlab_connection: Rc<RefCell<GitLabConnection>>,
+    settings_window: Rc<RefCell<Option<WindowHandle<SettingsView>>>>,
     repo_menu: Option<RepoContextMenu>,
     activation_sub: Option<gpui::Subscription>,
     /// Ephemeral; paths in set are collapsed. Default empty = all expanded.
@@ -65,17 +79,45 @@ enum MainState {
 }
 
 impl AppView {
-    pub fn new(boot: Option<BranchBrowser>, cx: &mut Context<Self>) -> Self {
-        Self {
+    fn sync_current_repo_path(state: &MainState) {
+        let path = match state {
+            MainState::Ready(loaded) => {
+                Some(loaded.comparison.repository.path().to_path_buf())
+            }
+            MainState::Empty | MainState::Error(_) => None,
+        };
+        current_repo::set_current_repo_path(path);
+    }
+
+    pub fn new(
+        boot: Option<BranchBrowser>,
+        gitlab_connection: Rc<RefCell<GitLabConnection>>,
+        settings_window: Rc<RefCell<Option<WindowHandle<SettingsView>>>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let state = match boot {
+            Some(loaded) => MainState::Ready(loaded),
+            None => MainState::Empty,
+        };
+        Self::sync_current_repo_path(&state);
+        gitlab_connection::spawn_refresh_connection(
+            gitlab_connection.clone(),
+            cx.entity().downgrade(),
+            cx,
+        );
+        let pending_mr = workspace_store::last_entry(&workspace_store::load())
+            .and_then(|e| e.mr.clone());
+        let mut view = Self {
             focus: cx.focus_handle(),
             repos_collapsed: false,
-            state: match boot {
-                Some(loaded) => MainState::Ready(loaded),
-                None => MainState::Empty,
-            },
+            state,
             store: workspace_store::load(),
             diff_window: None,
             branch_picker: None,
+            mr_picker: None,
+            mr_entry: None,
+            gitlab_connection,
+            settings_window,
             repo_menu: None,
             activation_sub: None,
             collapsed_dirs: HashSet::new(),
@@ -88,7 +130,11 @@ impl AppView {
             head_meta_resize_state: Rc::new(ResizeState::default()),
             #[cfg(target_os = "macos")]
             sidebar_vibrancy: None,
+        };
+        if let Some(label) = pending_mr {
+            view.begin_restore_mr(label, cx);
         }
+        view
     }
 
     fn sidebar_resize_handler(&self, cx: &Context<Self>) -> splitter::ResizeHandler {
@@ -163,12 +209,52 @@ impl AppView {
 
     fn remember_current(&mut self) {
         if let MainState::Ready(loaded) = &self.state {
-            workspace_store::remember(
+            let mr = self.current_mr_label();
+            workspace_store::remember_with_mr(
                 loaded.comparison.repository.path(),
                 &loaded.branch,
+                mr,
             );
             self.refresh_store();
         }
+    }
+
+    fn current_mr_label(&self) -> Option<MrEntryLabel> {
+        let entry = self.mr_entry.as_ref()?;
+        let project = entry.project.clone()?;
+        Some(MrEntryLabel {
+            project,
+            iid: entry.summary.iid,
+        })
+    }
+
+    fn clear_persisted_mr_label(&mut self) {
+        if let MainState::Ready(loaded) = &self.state {
+            workspace_store::remember_with_mr(
+                loaded.comparison.repository.path(),
+                &loaded.branch,
+                None,
+            );
+            self.refresh_store();
+        }
+    }
+
+    fn begin_restore_mr(&mut self, label: MrEntryLabel, cx: &mut Context<Self>) {
+        if !gitlab_chrome_visible(self) {
+            return;
+        }
+        let iid = label.iid;
+        self.mr_entry = Some(MrEntry {
+            summary: MergeRequestSummary {
+                iid,
+                title: format!("!{iid}"),
+                source_branch: String::new(),
+                target_branch: String::new(),
+            },
+            detail: MrDetailState::Loading,
+            project: Some(label.project),
+        });
+        self.spawn_mr_activate(iid, cx);
     }
 
     fn select_repo(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -177,18 +263,28 @@ impl AppView {
                 return;
             }
         }
-        let branch = self
+        let (branch, pending_mr) = self
             .store
             .workspaces
             .iter()
             .find(|e| e.path == path)
-            .map(|e| e.branch.clone())
-            .unwrap_or_else(|| "HEAD".into());
-        match BranchBrowser::open_workspace(&WorkspaceEntry { path: path.clone(), branch }) {
+            .map(|e| (e.branch.clone(), e.mr.clone()))
+            .unwrap_or_else(|| ("HEAD".into(), None));
+        match BranchBrowser::open_workspace(&WorkspaceEntry {
+            path: path.clone(),
+            branch,
+            mr: pending_mr.clone(),
+        }) {
             Ok(bb) => {
                 self.state = MainState::Ready(bb);
+                Self::sync_current_repo_path(&self.state);
                 self.refresh_store();
                 self.branch_picker = None;
+                self.mr_picker = None;
+                self.mr_entry = None;
+                if let Some(label) = pending_mr {
+                    self.begin_restore_mr(label, cx);
+                }
             }
             Err(_) => {
                 // Stale entry already dropped by open_workspace; keep current Ready if any.
@@ -199,6 +295,7 @@ impl AppView {
     }
 
     fn toggle_branch_picker(&mut self, cx: &mut Context<Self>) {
+        self.mr_picker = None;
         let (branches, current) = match &self.state {
             MainState::Ready(loaded) => (
                 git::list_branches(loaded.comparison.repository.path()).unwrap_or_default(),
@@ -210,7 +307,334 @@ impl AppView {
         cx.notify();
     }
 
+    fn toggle_mr_picker(&mut self, cx: &mut Context<Self>) {
+        if !gitlab_chrome_visible(self) {
+            self.mr_picker = None;
+            cx.notify();
+            return;
+        }
+        if self.mr_picker.is_some() {
+            self.mr_picker = None;
+            cx.notify();
+            return;
+        }
+        self.branch_picker = None;
+
+        let repo_path = match &self.state {
+            MainState::Ready(loaded) => loaded.comparison.repository.path().to_path_buf(),
+            MainState::Empty | MainState::Error(_) => {
+                self.mr_picker = Some(MrPicker::failed("Open a repository to list merge requests."));
+                cx.notify();
+                return;
+            }
+        };
+
+        self.mr_picker = Some(MrPicker::loading());
+        cx.notify();
+
+        let base = settings_store::effective_base_url(&settings_store::load_file());
+        let pat = settings_store::load_pat().unwrap_or_default();
+        let selected_iid = self.mr_entry.as_ref().map(|e| e.summary.iid);
+
+        cx.spawn(async move |this, cx| {
+            let http = match cx.update(|app| app.http_client()) {
+                Ok(client) => client,
+                Err(_) => return,
+            };
+
+            let project = cx
+                .background_executor()
+                .spawn({
+                    let http = http.clone();
+                    let base = base.clone();
+                    let pat = pat.clone();
+                    let repo_path = repo_path.clone();
+                    async move { gitlab::resolve_project(http, &base, &pat, &repo_path).await }
+                })
+                .await;
+
+            let picker = match project {
+                ResolveProjectResult::Err(e) => {
+                    MrPicker::failed(gitlab::format_resolve_project_error(&e))
+                }
+                ResolveProjectResult::Ok(identity) => {
+                    let list_result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            gitlab::list_open_merge_requests(
+                                http,
+                                &base,
+                                &pat,
+                                &identity.path_with_namespace,
+                            )
+                            .await
+                        })
+                        .await;
+                    match list_result {
+                        ListMergeRequestsResult::Ok(mrs) => MrPicker::ready(mrs, selected_iid),
+                        ListMergeRequestsResult::Err(e) => {
+                            MrPicker::failed(gitlab::format_list_merge_requests_error(&e))
+                        }
+                    }
+                }
+            };
+
+            let _ = this.update(cx, |view, cx| {
+                view.mr_picker = Some(picker);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn select_mr(&mut self, mr: MergeRequestSummary, cx: &mut Context<Self>) {
+        let iid = mr.iid;
+        self.mr_entry = Some(MrEntry {
+            summary: mr,
+            detail: MrDetailState::Loading,
+            project: None,
+        });
+        self.mr_picker = None;
+        cx.notify();
+        self.spawn_mr_activate(iid, cx);
+    }
+
+    fn spawn_mr_activate(&mut self, iid: u64, cx: &mut Context<Self>) {
+        let repo_path = match &self.state {
+            MainState::Ready(loaded) => loaded.comparison.repository.path().to_path_buf(),
+            MainState::Empty | MainState::Error(_) => return,
+        };
+
+        let base = settings_store::effective_base_url(&settings_store::load_file());
+        let pat = settings_store::load_pat().unwrap_or_default();
+
+        cx.spawn(async move |this, cx| {
+            let http = match cx.update(|app| app.http_client()) {
+                Ok(client) => client,
+                Err(_) => return,
+            };
+
+            let project = cx
+                .background_executor()
+                .spawn({
+                    let http = http.clone();
+                    let base = base.clone();
+                    let pat = pat.clone();
+                    let repo_path = repo_path.clone();
+                    async move { gitlab::resolve_project(http, &base, &pat, &repo_path).await }
+                })
+                .await;
+
+            let identity = match project {
+                ResolveProjectResult::Ok(id) => id,
+                ResolveProjectResult::Err(e) => {
+                    let msg = gitlab::format_resolve_project_error(&e);
+                    let _ = this.update(cx, |view, cx| {
+                        finish_mr_activate(view, iid, Err(msg));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            let remote_url = match gitlab::matching_remote_for_settings(&repo_path, &base) {
+                Ok((_, url)) => url,
+                Err(e) => {
+                    let msg = gitlab::format_resolve_project_error(&e);
+                    let _ = this.update(cx, |view, cx| {
+                        finish_mr_activate(view, iid, Err(msg));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            let path = identity.path_with_namespace.clone();
+            let detail = match cx
+                .background_executor()
+                .spawn({
+                    let http = http.clone();
+                    let base = base.clone();
+                    let pat = pat.clone();
+                    let path = path.clone();
+                    async move { gitlab::fetch_merge_request(http, &base, &pat, &path, iid).await }
+                })
+                .await
+            {
+                FetchMergeRequestResult::Ok(d) => d,
+                FetchMergeRequestResult::Err(e) => {
+                    let msg = gitlab::format_fetch_merge_request_error(&e);
+                    let _ = this.update(cx, |view, cx| {
+                        finish_mr_activate(view, iid, Err(msg));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            let commits = match cx
+                .background_executor()
+                .spawn({
+                    let http = http.clone();
+                    let base = base.clone();
+                    let pat = pat.clone();
+                    let path = path.clone();
+                    async move {
+                        gitlab::list_merge_request_commits(http, &base, &pat, &path, iid).await
+                    }
+                })
+                .await
+            {
+                ListMergeRequestCommitsResult::Ok(c) => c,
+                ListMergeRequestCommitsResult::Err(e) => {
+                    let msg = gitlab::format_list_merge_request_commits_error(&e);
+                    let _ = this.update(cx, |view, cx| {
+                        finish_mr_activate(view, iid, Err(msg));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            let mut shas: Vec<String> = commits.iter().map(|c| c.id.clone()).collect();
+            shas.push(detail.diff_refs.base_sha.clone());
+            shas.push(detail.diff_refs.head_sha.clone());
+            if let Some(start) = &detail.diff_refs.start_sha {
+                shas.push(start.clone());
+            }
+            shas.sort();
+            shas.dedup();
+
+            if let Err(e) = cx
+                .background_executor()
+                .spawn({
+                    let repo_path = repo_path.clone();
+                    async move { git::fetch_oids(&repo_path, &remote_url, &shas) }
+                })
+                .await
+            {
+                let _ = this.update(cx, |view, cx| {
+                    finish_mr_activate(view, iid, Err(e.0));
+                    cx.notify();
+                });
+                return;
+            }
+
+            let specs: Vec<(String, String, String, String)> = commits
+                .iter()
+                .map(|c| {
+                    (
+                        c.id.clone(),
+                        c.title.clone(),
+                        c.author_name.clone(),
+                        c.authored_date.clone(),
+                    )
+                })
+                .collect();
+
+            let commit_infos = match cx
+                .background_executor()
+                .spawn({
+                    let repo_path = repo_path.clone();
+                    async move { git::commit_infos_from_mr_specs(&repo_path, &specs) }
+                })
+                .await
+            {
+                Ok(infos) => infos,
+                Err(e) => {
+                    let _ = this.update(cx, |view, cx| {
+                        finish_mr_activate(view, iid, Err(e.0));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            let base_oid = match detail.diff_refs.base_sha.parse::<Oid>() {
+                Ok(o) => o,
+                Err(e) => {
+                    let _ = this.update(cx, |view, cx| {
+                        finish_mr_activate(
+                            view,
+                            iid,
+                            Err(format!("invalid diff_refs.base_sha: {e}")),
+                        );
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let head_oid = match detail.diff_refs.head_sha.parse::<Oid>() {
+                Ok(o) => o,
+                Err(e) => {
+                    let _ = this.update(cx, |view, cx| {
+                        finish_mr_activate(
+                            view,
+                            iid,
+                            Err(format!("invalid diff_refs.head_sha: {e}")),
+                        );
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            let _ = this.update(cx, |view, cx| {
+                finish_mr_activate(
+                    view,
+                    iid,
+                    Ok(MrActivateReady {
+                        detail,
+                        project: path,
+                        commit_infos,
+                        base_oid,
+                        head_oid,
+                    }),
+                );
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn clear_mr_entry(&mut self, cx: &mut Context<Self>) {
+        self.mr_entry = None;
+        self.clear_persisted_mr_label();
+        self.restore_branch_commits();
+        cx.notify();
+    }
+
+    fn restore_branch_commits(&mut self) {
+        let result = match &mut self.state {
+            MainState::Ready(bb) => {
+                let branch = bb.branch.clone();
+                bb.switch_branch(&branch)
+            }
+            MainState::Empty | MainState::Error(_) => return,
+        };
+        if let Err(e) = result {
+            self.state = MainState::Error(e.0);
+        }
+    }
+
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        settings_window::open_or_focus_settings(
+            &mut self.settings_window.borrow_mut(),
+            self.gitlab_connection.clone(),
+            cx,
+        );
+    }
+
+    fn reverify_gitlab(&mut self, cx: &mut Context<Self>) {
+        gitlab_connection::spawn_refresh_connection(
+            self.gitlab_connection.clone(),
+            cx.entity().downgrade(),
+            cx,
+        );
+    }
+
     fn open_branch(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.mr_entry = None;
         let result = match &mut self.state {
             MainState::Ready(bb) => bb.switch_branch(name),
             MainState::Empty | MainState::Error(_) => return,
@@ -262,7 +686,10 @@ impl AppView {
         self.repo_menu = None;
         if removing_current {
             self.state = MainState::Empty;
+            Self::sync_current_repo_path(&self.state);
             self.branch_picker = None;
+            self.mr_picker = None;
+            self.mr_entry = None;
         }
         cx.notify();
     }
@@ -271,6 +698,18 @@ impl AppView {
         if event.keystroke.key.as_str() == "escape" && self.repo_menu.is_some() {
             self.repo_menu = None;
             cx.notify();
+            return;
+        }
+        if let Some(picker) = &mut self.mr_picker {
+            match picker.handle_key(event) {
+                MrPickerAction::None => {}
+                MrPickerAction::Changed => cx.notify(),
+                MrPickerAction::Close => {
+                    self.mr_picker = None;
+                    cx.notify();
+                }
+                MrPickerAction::Select(mr) => self.select_mr(mr, cx),
+            }
             return;
         }
         let Some(picker) = &mut self.branch_picker else { return };
@@ -381,9 +820,15 @@ impl AppView {
                 match BranchBrowser::open(&root) {
                     Ok(bb) => {
                         this.state = MainState::Ready(bb);
+                        Self::sync_current_repo_path(&this.state);
+                        this.mr_entry = None;
+                        this.mr_picker = None;
                         this.remember_current();
                     }
-                    Err(e) => this.state = MainState::Error(e.0),
+                    Err(e) => {
+                        this.state = MainState::Error(e.0);
+                        Self::sync_current_repo_path(&this.state);
+                    }
                 }
                 cx.notify();
             })
@@ -458,9 +903,12 @@ impl Render for AppView {
         if self.activation_sub.is_none() {
             self.activation_sub = Some(cx.observe_window_activation(window, |view, window, cx| {
                 if !window.is_window_active()
-                    && (view.branch_picker.is_some() || view.repo_menu.is_some())
+                    && (view.branch_picker.is_some()
+                        || view.mr_picker.is_some()
+                        || view.repo_menu.is_some())
                 {
                     view.branch_picker = None;
+                    view.mr_picker = None;
                     view.repo_menu = None;
                     cx.notify();
                 }
@@ -784,6 +1232,13 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
         MainState::Ready(loaded) => (loaded.branch.clone(), loaded.comparison.label()),
         MainState::Empty | MainState::Error(_) => ("—".into(), "—".into()),
     };
+    let mr_label = view
+        .mr_entry
+        .as_ref()
+        .map(|e| format!("!{} {}", e.summary.iid, e.summary.title))
+        .unwrap_or_else(|| "Merge requests".into());
+    let connection = view.gitlab_connection.borrow().clone();
+    let show_gitlab = gitlab_chrome_visible(view);
     // Definite right edge so text_ellipsis sees the pane width (same idea as
     // overlay_flex absolute inset). Leave shadow clearance so the thumb does
     // not sit under the Changes cast.
@@ -844,7 +1299,47 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                                 .child(branch),
                         ),
                 )
+                .when(show_gitlab, |row| {
+                    row.child(
+                        div()
+                            .id("mr-picker-toggle")
+                            .px_1()
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .max_w(px(220.))
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .cursor_pointer()
+                            .hover(|d| d.bg(theme::hover()))
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_mr_picker(cx)))
+                            .child(
+                                div()
+                                    .min_w(px(0.))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .text_xs()
+                                    .text_color(if view.mr_entry.is_some() {
+                                        theme::text()
+                                    } else {
+                                        theme::muted()
+                                    })
+                                    .child(mr_label),
+                            )
+                            .when(view.mr_entry.is_some(), |el| {
+                                el.on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(|this, _, _, cx| this.clear_mr_entry(cx)),
+                                )
+                            }),
+                    )
+                })
                 .child(div().flex_1())
+                .when(show_gitlab, |row| {
+                    row.child(render_gitlab_connection_chrome(&connection, cx))
+                })
                 .child(
                     div()
                         .flex_none()
@@ -854,6 +1349,9 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                         .child(label),
                 ),
         )
+        .when(show_gitlab && view.mr_entry.is_some(), |d| {
+            d.child(render_mr_entry_detail(view.mr_entry.as_ref().unwrap()))
+        })
         .child(match &view.state {
             MainState::Empty => div().flex_1().into_any_element(),
             MainState::Error(msg) => div()
@@ -940,9 +1438,365 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
             }
         })
         .when(view.branch_picker.is_some(), |d| {
-            // Ponytail: last child paints last → popover above the commit list
-            d.child(render_branch_picker(view, cx))
+            // Deferred so the popover paints above the commit list's absolute
+            // scroll layer (sibling order alone is not enough).
+            d.child(deferred(render_branch_picker(view, cx)))
         })
+        .when(view.mr_picker.is_some() && gitlab_chrome_visible(view), |d| {
+            d.child(deferred(render_mr_picker(view, cx)))
+        })
+}
+
+struct MrEntry {
+    summary: MergeRequestSummary,
+    detail: MrDetailState,
+    /// GitLab `path_with_namespace` once known (for Workspace label).
+    project: Option<String>,
+}
+
+struct MrActivateReady {
+    detail: MergeRequestDetail,
+    project: String,
+    commit_infos: Vec<CommitInfo>,
+    base_oid: Oid,
+    head_oid: Oid,
+}
+
+fn finish_mr_activate(
+    view: &mut AppView,
+    iid: u64,
+    result: Result<MrActivateReady, String>,
+) {
+    let Some(entry) = view.mr_entry.as_mut() else {
+        return;
+    };
+    if entry.summary.iid != iid {
+        return;
+    }
+    match result {
+        Ok(ready) => {
+            entry.summary = MergeRequestSummary {
+                iid: ready.detail.iid,
+                title: ready.detail.title.clone(),
+                source_branch: ready.detail.source_branch.clone(),
+                target_branch: ready.detail.target_branch.clone(),
+            };
+            entry.project = Some(ready.project);
+            entry.detail = MrDetailState::Ready(ready.detail);
+            if let MainState::Ready(bb) = &mut view.state {
+                if let Err(e) =
+                    bb.apply_mr_commits(ready.commit_infos, ready.base_oid, ready.head_oid)
+                {
+                    entry.detail = MrDetailState::Failed(e.0);
+                }
+            }
+            view.remember_current();
+        }
+        Err(msg) => {
+            entry.detail = MrDetailState::Failed(msg);
+        }
+    }
+}
+
+/// Show MR picker + connection chrome only when a remote host matches Settings.
+fn gitlab_chrome_visible(view: &AppView) -> bool {
+    let MainState::Ready(loaded) = &view.state else {
+        return false;
+    };
+    let base = settings_store::effective_base_url(&settings_store::load_file());
+    gitlab::repo_matches_settings_host(loaded.comparison.repository.path(), &base)
+}
+
+enum MrDetailState {
+    Loading,
+    Ready(MergeRequestDetail),
+    Failed(String),
+}
+
+fn render_mr_entry_detail(entry: &MrEntry) -> impl IntoElement {
+    let summary = &entry.summary;
+    div()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .px_3()
+        .pb_1()
+        .text_xs()
+        .text_color(theme::muted())
+        .child(format!(
+            "MR Entry · {} → {}",
+            summary.source_branch, summary.target_branch
+        ))
+        .children(match &entry.detail {
+            MrDetailState::Loading => vec![div().child("Loading MR detail…").into_any_element()],
+            MrDetailState::Failed(msg) => vec![div()
+                .text_color(rgb(0xb42318))
+                .child(msg.clone())
+                .into_any_element()],
+            MrDetailState::Ready(detail) => mr_entry_ready_lines(detail),
+        })
+}
+
+fn mr_entry_ready_lines(detail: &MergeRequestDetail) -> Vec<gpui::AnyElement> {
+    let mut lines: Vec<gpui::AnyElement> = Vec::new();
+
+    let mut meta = vec![
+        detail.author_username.clone(),
+        detail.state.clone(),
+    ];
+    if let Some(ms) = &detail.merge_status {
+        meta.push(ms.clone());
+    }
+    if let Some(pipe) = &detail.check_state.pipeline_status {
+        meta.push(format!("pipeline: {pipe}"));
+    }
+    if let Some(label) = &detail.check_state.approvals_label {
+        meta.push(label.clone());
+    } else if detail.check_state.approved == Some(true) {
+        meta.push("approved".into());
+    }
+    lines.push(div().child(meta.join(" · ")).into_any_element());
+
+    let base = gitlab::short_git_sha(&detail.diff_refs.base_sha);
+    let head = gitlab::short_git_sha(&detail.diff_refs.head_sha);
+    let sha_line = if let Some(start) = &detail.diff_refs.start_sha {
+        let start = gitlab::short_git_sha(start);
+        format!("diff_refs · start {start} · base {base} · head {head}")
+    } else {
+        format!("diff_refs · base {base} · head {head}")
+    };
+    lines.push(
+        div()
+            .font_family(theme::MONO_FONT)
+            .child(sha_line)
+            .into_any_element(),
+    );
+
+    if let Some(desc) = detail.description.as_deref() {
+        lines.push(div().child(truncate_mr_description(desc)).into_any_element());
+    }
+
+    lines
+}
+
+fn truncate_mr_description(text: &str) -> String {
+    const MAX: usize = 120;
+    if text.chars().count() <= MAX {
+        text.to_string()
+    } else {
+        format!(
+            "{}…",
+            text.chars().take(MAX).collect::<String>()
+        )
+    }
+}
+
+fn render_gitlab_connection_chrome(
+    connection: &GitLabConnection,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .mr_2()
+        .child(
+            div()
+                .id("gitlab-connection")
+                .text_xs()
+                .text_color(theme::muted())
+                .cursor_pointer()
+                .hover(|d| d.text_color(theme::text()))
+                .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx)))
+                .child(match connection {
+                    GitLabConnection::Connected { username } => {
+                        format!("{} · {username}", connection.chrome_label())
+                    }
+                    other => other.chrome_label().to_string(),
+                }),
+        )
+        .child(
+            div()
+                .id("gitlab-reverify")
+                .text_xs()
+                .text_color(theme::faint())
+                .cursor_pointer()
+                .hover(|d| d.text_color(theme::muted()))
+                .when(
+                    !matches!(connection, GitLabConnection::Checking),
+                    |el| {
+                        el.on_click(cx.listener(|this, _, _, cx| this.reverify_gitlab(cx)))
+                    },
+                )
+                .child("Re-verify"),
+        )
+}
+
+fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+    let Some(picker) = &view.mr_picker else {
+        return div().into_any_element();
+    };
+
+    // Match branch picker: fixed size, one overlay_box, filter + rows in the same scroll.
+    match &picker.body {
+        MrPickerBody::Loading => div()
+            .id("mr-picker")
+            .absolute()
+            .top(theme::CHROME_HEIGHT)
+            .left(px(140.))
+            .w(px(380.))
+            .h(px(420.))
+            .p_1()
+            .bg(theme::white())
+            .border_1()
+            .border_color(theme::line())
+            .rounded_lg()
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.mr_picker = None;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .size_full()
+                    .bg(theme::white())
+                    .px_2()
+                    .py_3()
+                    .text_sm()
+                    .text_color(theme::muted())
+                    .child("Loading open merge requests…"),
+            )
+            .into_any_element(),
+        MrPickerBody::Failed(msg) => div()
+            .id("mr-picker")
+            .absolute()
+            .top(theme::CHROME_HEIGHT)
+            .left(px(140.))
+            .w(px(380.))
+            .h(px(420.))
+            .p_1()
+            .bg(theme::white())
+            .border_1()
+            .border_color(theme::line())
+            .rounded_lg()
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.mr_picker = None;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .size_full()
+                    .bg(theme::white())
+                    .px_2()
+                    .py_3()
+                    .text_sm()
+                    .text_color(rgb(0xb42318))
+                    .child(msg.clone()),
+            )
+            .into_any_element(),
+        MrPickerBody::Ready {
+            query,
+            matches,
+            selected,
+            ..
+        } => {
+            let (scroll, sb) = scrollbar::vertical("mr-picker-sb", cx);
+            let filter = if query.is_empty() {
+                "Open merge requests (type to filter)".to_string()
+            } else {
+                format!("Filter: {query}")
+            };
+            div()
+                .id("mr-picker")
+                .absolute()
+                .top(theme::CHROME_HEIGHT)
+                .left(px(140.))
+                .w(px(380.))
+                .h(px(420.))
+                .p_1()
+                .bg(theme::white())
+                .border_1()
+                .border_color(theme::line())
+                .rounded_lg()
+                .shadow_lg()
+                .occlude()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.mr_picker = None;
+                    cx.notify();
+                }))
+                .child(scrollbar::overlay_box(
+                    div()
+                        .id("mr-picker-scroll")
+                        .size_full()
+                        .bg(theme::white())
+                        .track_scroll(&scroll)
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(theme::muted())
+                                .child(filter),
+                        )
+                        .when(matches.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .px_3()
+                                    .py_2()
+                                    .text_sm()
+                                    .text_color(theme::muted())
+                                    .child("No matching merge requests."),
+                            )
+                        })
+                        .children(matches.iter().enumerate().map(|(i, mr)| {
+                            let select_mr = mr.clone();
+                            let title = format!("!{} · {}", mr.iid, mr.title);
+                            let branches =
+                                format!("{} → {}", mr.source_branch, mr.target_branch);
+                            div()
+                                .id(("mr", i))
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .when(i == *selected, |d| d.bg(theme::range()))
+                                .hover(|d| d.bg(theme::hover()))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.select_mr(select_mr.clone(), cx);
+                                }))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme::text())
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::muted())
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(branches),
+                                )
+                        })),
+                    sb,
+                ))
+                .into_any_element()
+        }
+    }
 }
 
 fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -959,6 +1813,8 @@ fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoE
         .h(px(420.))
         .p_1()
         .bg(theme::white())
+        .border_1()
+        .border_color(theme::line())
         .rounded_lg()
         .shadow_lg()
         // block clicks from reaching the commit list beneath; close on outside click
@@ -971,6 +1827,7 @@ fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoE
             div()
                 .id("branch-picker-scroll")
                 .size_full()
+                .bg(theme::white())
                 .track_scroll(&scroll)
                 .overflow_y_scroll()
                 .flex()
@@ -1324,6 +2181,127 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
                 sb,
             ))
         })
+}
+
+enum MrPickerAction {
+    None,
+    Changed,
+    Close,
+    Select(MergeRequestSummary),
+}
+
+enum MrPickerBody {
+    Loading,
+    Failed(String),
+    Ready {
+        all: Vec<MergeRequestSummary>,
+        matches: Vec<MergeRequestSummary>,
+        query: String,
+        selected: usize,
+    },
+}
+
+struct MrPicker {
+    body: MrPickerBody,
+}
+
+impl MrPicker {
+    fn loading() -> Self {
+        Self {
+            body: MrPickerBody::Loading,
+        }
+    }
+
+    fn failed(message: impl Into<String>) -> Self {
+        Self {
+            body: MrPickerBody::Failed(message.into()),
+        }
+    }
+
+    fn ready(all: Vec<MergeRequestSummary>, selected_iid: Option<u64>) -> Self {
+        let selected = selected_iid
+            .and_then(|iid| all.iter().position(|mr| mr.iid == iid))
+            .unwrap_or(0);
+        Self {
+            body: MrPickerBody::Ready {
+                matches: all.clone(),
+                all,
+                query: String::new(),
+                selected,
+            },
+        }
+    }
+
+    fn refresh(&mut self) {
+        let MrPickerBody::Ready {
+            all,
+            matches,
+            query,
+            selected,
+        } = &mut self.body
+        else {
+            return;
+        };
+        let q = query.to_lowercase();
+        *matches = all
+            .iter()
+            .filter(|mr| {
+                q.is_empty()
+                    || mr.title.to_lowercase().contains(&q)
+                    || mr.source_branch.to_lowercase().contains(&q)
+                    || mr.target_branch.to_lowercase().contains(&q)
+                    || mr.iid.to_string().contains(&q)
+            })
+            .cloned()
+            .collect();
+        *selected = (*selected).min(matches.len().saturating_sub(1));
+    }
+
+    fn handle_key(&mut self, event: &KeyDownEvent) -> MrPickerAction {
+        let MrPickerBody::Ready {
+            matches,
+            query,
+            selected,
+            ..
+        } = &mut self.body
+        else {
+            return match event.keystroke.key.as_str() {
+                "escape" => MrPickerAction::Close,
+                _ => MrPickerAction::None,
+            };
+        };
+
+        match event.keystroke.key.as_str() {
+            "escape" => MrPickerAction::Close,
+            "backspace" => {
+                query.pop();
+                self.refresh();
+                MrPickerAction::Changed
+            }
+            "up" => {
+                *selected = selected.saturating_sub(1);
+                MrPickerAction::Changed
+            }
+            "down" => {
+                *selected = (*selected + 1).min(matches.len().saturating_sub(1));
+                MrPickerAction::Changed
+            }
+            "enter" => matches
+                .get(*selected)
+                .cloned()
+                .map(MrPickerAction::Select)
+                .unwrap_or(MrPickerAction::None),
+            _ => {
+                if event.keystroke.key.len() == 1 && !event.keystroke.modifiers.platform {
+                    query.push_str(&event.keystroke.key);
+                    self.refresh();
+                    MrPickerAction::Changed
+                } else {
+                    MrPickerAction::None
+                }
+            }
+        }
+    }
 }
 
 struct BranchPicker {

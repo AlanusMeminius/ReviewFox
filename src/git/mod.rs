@@ -203,15 +203,155 @@ impl BranchBrowser {
         apply_range_fold(&repo, self)
     }
 
-    /// Reload ChangedPaths for an explicit OID pair (future MR/PR entry).
+    /// Reload ChangedPaths for an explicit OID pair (MR Entry / forced Comparison).
     pub fn set_comparison_oids(&mut self, base_oid: Oid, head_oid: Oid) -> Result<()> {
         self.comparison.base_oid = base_oid;
         self.comparison.head_oid = head_oid;
         let repo = open_repo(&self.comparison)?;
         self.changed_paths = list_changed_paths(&repo, &self.comparison)?;
-        // ponytail: in_range may disagree with OID pair; MR entry owns selection UI later
         Ok(())
     }
+
+    /// Replace the commit list with MR commits (newest-first) and set Comparison to
+    /// the forge `diff_refs` pair. Marks every row selected for chrome only; Diff
+    /// identity comes from `base_oid`/`head_oid`, not from range fold.
+    pub fn apply_mr_commits(
+        &mut self,
+        commits: Vec<CommitInfo>,
+        base_oid: Oid,
+        head_oid: Oid,
+    ) -> Result<()> {
+        if commits.is_empty() {
+            return Err(err("merge request has no commits"));
+        }
+        self.commits = commits;
+        self.in_range = vec![true; self.commits.len()];
+        self.set_comparison_oids(base_oid, head_oid)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemoteUrlError {
+    Open(String),
+    NoRemotes,
+    UrlMissing { remote_name: String },
+}
+
+/// All remotes with a URL as `(name, url)` in git's order.
+pub fn list_remote_urls(
+    repo_path: &Path,
+) -> std::result::Result<Vec<(String, String)>, RemoteUrlError> {
+    let repo = git2::Repository::open(repo_path).map_err(|e| RemoteUrlError::Open(e.to_string()))?;
+    let names: Vec<String> = repo
+        .remotes()
+        .map_err(|e| RemoteUrlError::Open(e.to_string()))?
+        .iter()
+        .filter_map(|n| n.map(str::to_string))
+        .collect();
+    if names.is_empty() {
+        return Err(RemoteUrlError::NoRemotes);
+    }
+    let mut out = Vec::with_capacity(names.len());
+    for remote_name in names {
+        let remote = repo
+            .find_remote(&remote_name)
+            .map_err(|e| RemoteUrlError::Open(e.to_string()))?;
+        let Some(url) = remote.url().map(str::to_string) else {
+            continue;
+        };
+        out.push((remote_name, url));
+    }
+    if out.is_empty() {
+        return Err(RemoteUrlError::NoRemotes);
+    }
+    Ok(out)
+}
+
+/// Prefer `origin` if present, else the first remote with a URL.
+pub fn preferred_remote_url(
+    repo_path: &Path,
+) -> std::result::Result<(String, String), RemoteUrlError> {
+    let remotes = list_remote_urls(repo_path)?;
+    if let Some(pair) = remotes.iter().find(|(name, _)| name == "origin") {
+        return Ok(pair.clone());
+    }
+    Ok(remotes[0].clone())
+}
+
+/// Fetch any missing commit objects by full SHA from `remote_url`.
+pub fn fetch_oids(repo_path: &Path, remote_url: &str, oids: &[String]) -> Result<()> {
+    let repo = git2::Repository::open(repo_path).map_err(map_git)?;
+    let mut needed: Vec<String> = Vec::new();
+    for sha in oids {
+        let sha = sha.trim();
+        if sha.is_empty() {
+            continue;
+        }
+        let git_oid = git2::Oid::from_str(sha).map_err(|e| err(e.to_string()))?;
+        if repo.find_commit(git_oid).is_err() {
+            needed.push(sha.to_string());
+        }
+    }
+    if needed.is_empty() {
+        return Ok(());
+    }
+
+    let mut remote = repo
+        .remote_anonymous(remote_url)
+        .map_err(map_git)?;
+    let refspecs: Vec<String> = needed
+        .iter()
+        .map(|sha| format!("+{sha}:refs/reviewfox/fetch/{sha}"))
+        .collect();
+    let mut opts = git2::FetchOptions::new();
+    remote
+        .fetch(&refspecs, Some(&mut opts), None)
+        .map_err(|e| err(format!("git fetch failed: {e}")))?;
+
+    for sha in &needed {
+        let git_oid = git2::Oid::from_str(sha).map_err(|e| err(e.to_string()))?;
+        if repo.find_commit(git_oid).is_err() {
+            return Err(err(format!(
+                "commit {sha} still missing after fetch from {remote_url}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Build CommitInfo rows from forge commit metadata after objects exist locally.
+/// Prefers API title/author for list parity with GitLab; uses local author time when present.
+pub fn commit_infos_from_mr_specs(
+    repo_path: &Path,
+    specs: &[(String, String, String, String)],
+) -> Result<Vec<CommitInfo>> {
+    let repo = git2::Repository::open(repo_path).map_err(map_git)?;
+    let mut out = Vec::with_capacity(specs.len());
+    for (id, title, author_name, authored_date) in specs {
+        let git_oid = git2::Oid::from_str(id.trim()).map_err(|e| err(e.to_string()))?;
+        let commit = repo.find_commit(git_oid).map_err(|e| {
+            err(format!(
+                "commit {} not in local repository after fetch: {e}",
+                short_sha_str(id)
+            ))
+        })?;
+        let mut info = commit_info_from(&commit);
+        if !title.trim().is_empty() {
+            info.summary = title.clone();
+        }
+        if !author_name.trim().is_empty() {
+            info.author = author_name.clone();
+        }
+        if info.time_label.is_empty() && !authored_date.is_empty() {
+            info.time_label = authored_date.chars().take(10).collect();
+        }
+        out.push(info);
+    }
+    Ok(out)
+}
+
+fn short_sha_str(sha: &str) -> String {
+    sha.chars().take(7).collect()
 }
 
 pub fn list_branches(path: &Path) -> Result<Vec<BranchInfo>> {
@@ -765,6 +905,7 @@ mod tests {
         let entry = WorkspaceEntry {
             path: PathBuf::from("/tmp/reviewfox-no-such-repo-xyz"),
             branch: "main".into(),
+            mr: None,
         };
         // drop_path on failure is covered by workspace_store tests; here we only
         // assert the open path errors (and does not panic).

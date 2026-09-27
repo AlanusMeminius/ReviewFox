@@ -1,0 +1,7 @@
+# GitLab MR is a read-only Entry
+
+GitLab Merge Requests are an Entry into a Comparison, not a second reviewable identity: DraftComments still attach only to `(repository, base_oid, head_oid)` (ADR-0002). The forge is read-only—title, description, author, status, source/target branch labels, and check state (pipeline / approval); no publishing comments back, and no discussion-thread UI in this milestone. The Comparison OID pair is GitLab’s `diff_refs` (not branch-tip guesswork), resolved via API then `git fetch` into the local Repository. Discovery is the current project’s open MR list (URL/IID secondary). Workspace persists only the Entry label (project + IID), not a truth snapshot of forge metadata.
+
+**Auth (v1):** one global Personal Access Token (`read_api`) plus Base URL (default `https://gitlab.com`, overridable for self-hosted). Base URL lives in Application Support `settings.json`; PAT in the OS keychain via `keyring`. Phase A proves the pair with an explicit Verify that calls `GET {base}/api/v4/user` through GPUI’s `HttpClient` (must not block the UI thread). OAuth is deferred—PAT unblocks the MR Entry path without browser-callback / app-registration cost during development; not a permanent product rejection.
+
+**Considered options:** full-loop publish to GitLab notes; MR iid as comment identity; remote-only diff without a local Repository; paste-URL-only without a list. Rejected to keep one comment space, stay clipboard/Export-first for egress, and match how Branch Browser already folds commits into a Comparison.

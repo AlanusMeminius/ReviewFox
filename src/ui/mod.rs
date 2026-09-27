@@ -1,8 +1,12 @@
 #[cfg(target_os = "macos")]
 mod app_icon;
 mod app_view;
+mod current_repo;
+mod gitlab_connection;
 mod diff_window;
 mod file_tree;
+mod settings_window;
+mod text_field;
 #[cfg(target_os = "macos")]
 mod mac_column_vibrancy;
 mod scrollbar;
@@ -11,16 +15,26 @@ mod theme;
 
 use gpui::{
     App, AppContext, Application, AssetSource, Bounds, KeyBinding, Menu, MenuItem, SharedString,
-    TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions,
-    actions, point, px, size,
+    TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle,
+    WindowOptions, actions, point, px, size,
 };
 use std::borrow::Cow;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use app_view::AppView;
 use crate::git::BranchBrowser;
+use crate::reqwest_client::ReqwestClient;
 use crate::workspace_store;
+use gitlab_connection::GitLabConnection;
+use settings_window::SettingsView;
+use text_field::{
+    Backspace, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, SelectLeft,
+    SelectRight, ShowCharacterPalette,
+};
 
-actions!(app, [Quit]);
+actions!(app, [Quit, OpenSettings]);
 
 struct Assets;
 
@@ -61,14 +75,57 @@ pub fn run() {
         #[cfg(target_os = "macos")]
         app_icon::set_app_icon();
 
+        let http_client =
+            ReqwestClient::user_agent(concat!("ReviewFox/", env!("CARGO_PKG_VERSION")))
+                .expect("HTTP client");
+        cx.set_http_client(Arc::new(http_client));
+
+        let settings_window: Rc<RefCell<Option<WindowHandle<SettingsView>>>> =
+            Rc::new(RefCell::new(None));
+        let gitlab_connection = Rc::new(RefCell::new(GitLabConnection::default()));
+
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action({
+            let settings_window = settings_window.clone();
+            let gitlab_connection = gitlab_connection.clone();
+            move |_: &OpenSettings, cx| {
+                settings_window::open_or_focus_settings(
+                    &mut settings_window.borrow_mut(),
+                    gitlab_connection.clone(),
+                    cx,
+                );
+            }
+        });
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("ctrl-q", Quit, None),
+            KeyBinding::new("cmd-comma", OpenSettings, None),
+            KeyBinding::new("ctrl-comma", OpenSettings, None),
+            KeyBinding::new("backspace", Backspace, Some("TextField")),
+            KeyBinding::new("delete", Delete, Some("TextField")),
+            KeyBinding::new("left", Left, Some("TextField")),
+            KeyBinding::new("right", Right, Some("TextField")),
+            KeyBinding::new("shift-left", SelectLeft, Some("TextField")),
+            KeyBinding::new("shift-right", SelectRight, Some("TextField")),
+            KeyBinding::new("cmd-a", SelectAll, Some("TextField")),
+            KeyBinding::new("ctrl-a", SelectAll, Some("TextField")),
+            KeyBinding::new("cmd-v", Paste, Some("TextField")),
+            KeyBinding::new("ctrl-v", Paste, Some("TextField")),
+            KeyBinding::new("cmd-c", Copy, Some("TextField")),
+            KeyBinding::new("ctrl-c", Copy, Some("TextField")),
+            KeyBinding::new("cmd-x", Cut, Some("TextField")),
+            KeyBinding::new("ctrl-x", Cut, Some("TextField")),
+            KeyBinding::new("home", Home, Some("TextField")),
+            KeyBinding::new("end", End, Some("TextField")),
+            KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("TextField")),
         ]);
         cx.set_menus(vec![Menu {
             name: "ReviewFox".into(),
-            items: vec![MenuItem::action("Quit", Quit)],
+            items: vec![
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
+                MenuItem::action("Quit", Quit),
+            ],
         }]);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
@@ -80,6 +137,8 @@ pub fn run() {
         let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
 
         let boot = boot.clone();
+        let gitlab_connection = gitlab_connection.clone();
+        let settings_window = settings_window.clone();
         let _main = cx
             .open_window(
                 WindowOptions {
@@ -95,7 +154,9 @@ pub fn run() {
                     window_background: window_background_appearance(),
                     ..Default::default()
                 },
-                move |_, cx| cx.new(|cx| AppView::new(boot, cx)),
+                move |_, cx| {
+                    cx.new(|cx| AppView::new(boot, gitlab_connection, settings_window, cx))
+                },
             )
             .expect("open main window");
 

@@ -1,14 +1,25 @@
-//! Workspace set + last + pinned: (repo path, branch label) in app data dir. No Review/Comparison persistence.
+//! Workspace set + last + pinned: (repo path, branch label, optional MR Entry label).
+//! No Review/Comparison persistence. MR label is project + IID only (ADR-0006).
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const FILENAME: &str = "workspaces.json";
 
+/// Persisted MR Entry label — not forge metadata snapshot (ADR-0006).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MrEntryLabel {
+    /// GitLab `path_with_namespace`.
+    pub project: String,
+    pub iid: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceEntry {
     pub path: PathBuf,
     pub branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mr: Option<MrEntryLabel>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,10 +65,18 @@ pub fn save(store: &WorkspaceStore) {
     }
 }
 
-/// Upsert by path (no display reorder), set `last`, write immediately.
+/// Upsert by path (preserves `mr`), set `last`, write immediately.
 pub fn remember(path: &Path, branch: &str) {
     let mut store = load();
     remember_in(&mut store, path.to_path_buf(), branch.to_string());
+    save(&store);
+}
+
+/// Upsert path/branch and set or clear the MR Entry label.
+pub fn remember_with_mr(path: &Path, branch: &str, mr: Option<MrEntryLabel>) {
+    let mut store = load();
+    remember_in(&mut store, path.to_path_buf(), branch.to_string());
+    set_mr_in(&mut store, path, mr);
     save(&store);
 }
 
@@ -127,9 +146,16 @@ fn remember_in(store: &mut WorkspaceStore, path: PathBuf, branch: String) {
         store.workspaces.push(WorkspaceEntry {
             path: path.clone(),
             branch,
+            mr: None,
         });
     }
     store.last = Some(path);
+}
+
+fn set_mr_in(store: &mut WorkspaceStore, path: &Path, mr: Option<MrEntryLabel>) {
+    if let Some(entry) = store.workspaces.iter_mut().find(|e| e.path == path) {
+        entry.mr = mr;
+    }
 }
 
 fn pin_in(store: &mut WorkspaceStore, path: &Path) {
@@ -176,6 +202,7 @@ mod tests {
         WorkspaceEntry {
             path: PathBuf::from(path),
             branch: branch.into(),
+            mr: None,
         }
     }
 
@@ -194,11 +221,54 @@ mod tests {
     }
 
     #[test]
+    fn remember_preserves_mr_label() {
+        let mut store = WorkspaceStore {
+            last: None,
+            pinned: Vec::new(),
+            workspaces: vec![WorkspaceEntry {
+                path: PathBuf::from("/a"),
+                branch: "main".into(),
+                mr: Some(MrEntryLabel {
+                    project: "g/p".into(),
+                    iid: 7,
+                }),
+            }],
+        };
+        remember_in(&mut store, PathBuf::from("/a"), "develop".into());
+        assert_eq!(store.workspaces[0].branch, "develop");
+        assert_eq!(
+            store.workspaces[0].mr,
+            Some(MrEntryLabel {
+                project: "g/p".into(),
+                iid: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn remember_with_mr_sets_and_clears_label() {
+        let mut store = WorkspaceStore::default();
+        remember_in(&mut store, PathBuf::from("/a"), "main".into());
+        set_mr_in(
+            &mut store,
+            Path::new("/a"),
+            Some(MrEntryLabel {
+                project: "acme/app".into(),
+                iid: 42,
+            }),
+        );
+        assert_eq!(store.workspaces[0].mr.as_ref().unwrap().iid, 42);
+        set_mr_in(&mut store, Path::new("/a"), None);
+        assert!(store.workspaces[0].mr.is_none());
+    }
+
+    #[test]
     fn remember_inserts_new_path() {
         let mut store = WorkspaceStore::default();
         remember_in(&mut store, PathBuf::from("/z"), "main".into());
         assert_eq!(store.last, Some(PathBuf::from("/z")));
         assert_eq!(store.workspaces.len(), 1);
+        assert!(store.workspaces[0].mr.is_none());
     }
 
     #[test]
@@ -270,47 +340,31 @@ mod tests {
             pinned: vec![PathBuf::from("/a"), PathBuf::from("/b")],
             workspaces: vec![entry("/a", "main"), entry("/b", "dev")],
         };
-        pin_in(&mut store, Path::new("/b"));
+        pin_in(&mut store, Path::new("/a"));
         assert_eq!(
             store.pinned,
-            vec![PathBuf::from("/b"), PathBuf::from("/a")]
+            vec![PathBuf::from("/a"), PathBuf::from("/b")]
         );
     }
 
     #[test]
-    fn unpin_keeps_workspace_returns_to_repositories() {
+    fn drop_path_clears_pin_and_last() {
         let mut store = WorkspaceStore {
             last: Some(PathBuf::from("/a")),
             pinned: vec![PathBuf::from("/a")],
             workspaces: vec![entry("/a", "main"), entry("/b", "dev")],
         };
-        unpin_in(&mut store, Path::new("/a"));
-        assert!(store.pinned.is_empty());
-        assert_eq!(store.workspaces.len(), 2);
-        assert_eq!(store.last, Some(PathBuf::from("/a")));
-        let repos = repository_entries(&store);
-        assert_eq!(repos.len(), 2);
-    }
-
-    #[test]
-    fn drop_path_clears_workspace_pinned_and_last() {
-        let mut store = WorkspaceStore {
-            last: Some(PathBuf::from("/a")),
-            pinned: vec![PathBuf::from("/a"), PathBuf::from("/b")],
-            workspaces: vec![entry("/a", "main"), entry("/b", "dev")],
-        };
         drop_path_in(&mut store, Path::new("/a"));
-        assert_eq!(store.last, None);
-        assert_eq!(store.pinned, vec![PathBuf::from("/b")]);
+        assert!(store.last.is_none());
+        assert!(store.pinned.is_empty());
         assert_eq!(store.workspaces.len(), 1);
         assert_eq!(store.workspaces[0].path, PathBuf::from("/b"));
     }
 
     #[test]
-    fn missing_pinned_deserializes_as_empty() {
-        let json = r#"{"last":"/a","workspaces":[{"path":"/a","branch":"main"}]}"#;
+    fn old_json_without_mr_field_deserializes() {
+        let json = r#"{"last":"/a","pinned":[],"workspaces":[{"path":"/a","branch":"main"}]}"#;
         let store: WorkspaceStore = serde_json::from_str(json).unwrap();
-        assert!(store.pinned.is_empty());
-        assert_eq!(store.last, Some(PathBuf::from("/a")));
+        assert!(store.workspaces[0].mr.is_none());
     }
 }

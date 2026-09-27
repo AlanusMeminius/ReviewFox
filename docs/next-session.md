@@ -12,6 +12,12 @@
 - **Diff chrome sync** (2026-09-26): tree toggle/traffic-lights match main, resizable tree|dual splitter (`clamp_diff_tree_width`), Export icon button, dual-heads row removed
 - **Workspace sidebar** (2026-09-26): persist `{last, pinned, workspaces}` to Application Support; restore `last` on launch; sidebar is **Recent** (0–1, no context menu) + **Pin** (hidden when empty, newest on top) + **Repositories** (non-pinned only, alpha by display name); right-click Pin → Unpin|Remove, Repositories → Pin|Remove; Open Repo / branch select / click row write immediately; CLI argv / `REVIEWFOX_REPO` removed.
 - **Overlay scrollbars** (2026-09-26): BeadsViewer-shaped overlay thumbs on sidebar / commits / file tree / head-meta / branch picker / Diff tree / comments; Diff dual-pane per-pane scroll (old left / new right) + gutter lockstep (ADR 0003).
+- **GitLab Phase A** (2026-09-26): Settings window (ReviewFox → Settings…, `Cmd+,` / `Ctrl+,`); Base URL → `settings.json`, PAT → keychain; explicit Verify via GPUI `HttpClient` → `GET /api/v4/user` (ADR-0006).
+- **GitLab Phase B** (2026-09-26): Map open repo remotes → GitLab `path_with_namespace` (prefer host matching Settings Base URL; among matches prefer `origin`); reject when no remote matches; optional `GET /api/v4/projects/{path}` confirm; Settings shows project line (ADR-0006).
+- **GitLab Phase C** (2026-09-26): List open MRs for resolved project; MR Entry picker in main chrome (in-memory); shared GitLab connection line (user + Re-verify + Settings) in shell and Settings (ADR-0006).
+- **GitLab Phase D** (2026-09-26): On MR select, fetch detail + `diff_refs` (base/head/start SHA); pipeline / approval check state; MR Entry chrome shows loaded detail and short SHAs (ADR-0006).
+- **GitLab MR activate** (2026-09-27): Hide MR + connection chrome unless a remote host matches Settings; on MR select load GitLab MR commits (web-parity set, newest-first), `git fetch` SHAs from matching remote, replace commit list, set Comparison to `diff_refs`; clear MR / switch branch restores Branch Browser (E+F slice).
+- **GitLab Phase G** (2026-09-27): Persist MR Entry label (`project` + `iid`) on Workspace; restore + refetch on launch / repo select; clear label when clearing MR or switching branch (ADR-0006).
 
 ## Still deferred
 
@@ -23,13 +29,30 @@
 - True diagonal gap hatch (flat `gap_bg` + `╱` stand-in)
 - Bundle IBM Plex fonts if OS lacks them
 - Syntax highlighting
-- Rename detection, GitLab, remote publish
+- Rename detection, remote publish (comments stay local; Export is egress)
+- GitLab discussion-thread UI, OAuth (deferred—not rejected; see ADR-0006), remote-only (no local Repository) Diff
+
+## GitLab MR Entry (ADR-0006) — phased plan
+
+Shared understanding confirmed 2026-09-26; **Phase A aligned 2026-09-26**. Not one session; resume by phase.
+
+| Phase | Work | Depends on |
+|---|---|---|
+| **A** | Settings: GitLab Base URL + PAT; API smoke | — |
+| **B** | Map current repo `remote` → GitLab project; reject mismatch | A |
+| **C** | List open MRs for that project; select → MR Entry; **persistent auth/connection chrome** (Settings or shell: current user / re-verify) | A, B |
+| **D** | Fetch MR detail + check state; take `diff_refs` | C or H |
+| **E** | `git fetch` SHAs into local Repository; clear errors | D — **done in MR activate slice** |
+| **F** | `set_comparison_oids` → existing Diff/Review/Export; MR commits list = GitLab commits API; hide GitLab chrome without matching remote | E — **done in MR activate slice** |
+| **G** | Persist/restore MR Entry label on Workspace; refetch on open | F — **done** |
+| **H** | Paste URL/IID as secondary entry | **won't do** — MR list entry is enough |
 
 ## Next candidates (when ready)
 
-- Draft text input polish
+- Draft text input polish (Diff draft bar is still keystroke-only)
 - UnresolvedAnchor when Comparison changes with open comments
-- Review reopen persistence (parked)
+- Review / DraftComment disk persistence (parked)
+- ViewOptions UI toggle / syntax highlighting / rename detection (later polish)
 
 ## Run
 
@@ -46,7 +69,8 @@ Smoke: `cargo test --bin reviewfox`
 
 - crates.io GPUI only; custom diff, not Zed editor
 - Comparison is the only reviewable surface
-- v1: no rename detection, no GitLab, no remote publish
+- v1: no rename detection, no remote publish
+- GitLab MR = read-only Entry (`diff_refs` → Comparison); see ADR-0006
 - Diff stays a separate window with its own snapshot
 - Default Export is narrative snippets, not the full patch
 - Main Changes tree is browse-only; enter Diff via **Open Diff**
