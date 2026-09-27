@@ -577,7 +577,7 @@ impl AppView {
                 .background_executor()
                 .spawn({
                     let repo_path = repo_path.clone();
-                    async move { git::fetch_oids(&repo_path, &remote_url, &shas) }
+                    async move { git::fetch_oids(&repo_path, &remote_url, iid, &shas) }
                 })
                 .await
             {
