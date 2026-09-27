@@ -8,9 +8,10 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::domain::{
-    Bridge, ChangedPath, Comparison, DisplayRow, DisplayRows, FoldState, HunkJumpTarget,
-    PathStatus, Review, RowKind, ScrollKnot, Side, TokenPart, ViewOptions, display_rows_folded,
-    hunk_jump_target, replace_marks,
+    Bridge, ChangedPath, Comparison, DiffFontSize, DisplayRow, DisplayRows, FoldState,
+    HunkJumpTarget, PathStatus, Review, RowKind, ScrollKnot, SearchMatch, SearchScope, Side,
+    TokenPart, ViewOptions, display_rows_folded, hunk_jump_target, match_jump_plan, replace_marks,
+    search_file,
 };
 
 const LN_COL: f32 = 32.;
@@ -70,6 +71,13 @@ pub struct DiffView {
     hunk_index: Option<usize>,
     /// Diff-computation knobs; does not change Comparison identity.
     view_options: ViewOptions,
+    /// Session-level mono size for both panes and ribbons (§3.5).
+    font_size: DiffFontSize,
+    /// In-file search query; empty = no hits.
+    search_query: String,
+    search_scope: SearchScope,
+    /// When true, keystrokes edit `search_query` (like the draft bar).
+    searching: bool,
 }
 
 struct HoverBand {
@@ -82,6 +90,12 @@ struct AnchorCap {
     side: Side,
     ln: u32,
     view_y: f32,
+}
+
+enum FontOp {
+    Inc,
+    Dec,
+    Reset,
 }
 
 #[derive(Clone)]
@@ -120,7 +134,15 @@ impl DiffView {
             fold: FoldState::collapsed(),
             hunk_index: None,
             view_options: ViewOptions::default(),
+            font_size: DiffFontSize::default(),
+            search_query: String::new(),
+            search_scope: SearchScope::Both,
+            searching: false,
         }
+    }
+
+    fn row_h(&self) -> f32 {
+        self.font_size.row_height()
     }
 
     fn recompute_alignment(&mut self) {
@@ -203,7 +225,7 @@ impl DiffView {
         let FileDiff::Text { display, .. } = &snap.file else {
             return None;
         };
-        let row_h = f32::from(theme::ROW_HEIGHT);
+        let row_h = self.row_h();
         let anchor = if self.view_h < 1. {
             0.
         } else {
@@ -259,7 +281,7 @@ impl DiffView {
         let Some(FileDiff::Text { display, .. }) = self.snapshot.as_ref().map(|s| &s.file) else {
             return;
         };
-        let row_h = f32::from(theme::ROW_HEIGHT);
+        let row_h = self.row_h();
         let rows = if cap.side == Side::Old {
             &display.old_rows
         } else {
@@ -345,7 +367,7 @@ impl DiffView {
         let knots = display.knots.clone();
         let old_rows = display.old_rows.clone();
         let new_rows = display.new_rows.clone();
-        let row_h = f32::from(theme::ROW_HEIGHT);
+        let row_h = self.row_h();
         let s_rows = self.scroll_s / row_h;
         let next = if dir > 0 {
             (0..hunk_count).find(|&i| {
@@ -375,6 +397,69 @@ impl DiffView {
             .clamp(0., end);
         self.hunk_index = Some(i);
         cx.notify();
+    }
+
+    fn jump_match(&mut self, side: Side, ln: u32, cx: &mut Context<Self>) {
+        let Some(FileDiff::Text { alignment, .. }) = self.snapshot.as_ref().map(|s| &s.file) else {
+            return;
+        };
+        let plan = match_jump_plan(alignment, &self.fold, side, ln);
+        if let Some(id) = plan.expand {
+            self.fold.expand(id);
+            self.reproject_fold();
+        }
+        let Some(FileDiff::Text { display, .. }) = self.snapshot.as_ref().map(|s| &s.file) else {
+            return;
+        };
+        let row_h = self.row_h();
+        let end = display
+            .knots
+            .last()
+            .map(|k| k.s as f32 * row_h)
+            .unwrap_or(0.);
+        self.scroll_s = scroll_s_for_target(
+            plan.target,
+            &display.old_rows,
+            &display.new_rows,
+            &display.knots,
+            row_h,
+            self.scroll_s,
+        )
+        .clamp(0., end);
+        cx.notify();
+    }
+
+    fn set_font_size(&mut self, op: FontOp, cx: &mut Context<Self>) {
+        let prev = self.row_h();
+        match op {
+            FontOp::Inc => self.font_size.increase(),
+            FontOp::Dec => self.font_size.decrease(),
+            FontOp::Reset => self.font_size.reset(),
+        }
+        let next = self.row_h();
+        if prev > 0. {
+            self.scroll_s *= next / prev;
+        }
+        cx.notify();
+    }
+
+    fn cycle_search_scope(&mut self, cx: &mut Context<Self>) {
+        self.search_scope = match self.search_scope {
+            SearchScope::Both => SearchScope::Old,
+            SearchScope::Old => SearchScope::New,
+            SearchScope::New => SearchScope::Both,
+        };
+        cx.notify();
+    }
+
+    fn current_matches(&self) -> Vec<SearchMatch> {
+        let Some(FileDiff::Text {
+            old_text, new_text, ..
+        }) = self.snapshot.as_ref().map(|s| &s.file)
+        else {
+            return Vec::new();
+        };
+        search_file(old_text, new_text, &self.search_query, self.search_scope)
     }
 
     fn tree_resize_handler(&self, cx: &Context<Self>) -> splitter::ResizeHandler {
@@ -480,10 +565,45 @@ impl DiffView {
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.searching {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.searching = false;
+                    cx.notify();
+                }
+                "enter" => {
+                    if let Some(m) = self.current_matches().into_iter().next() {
+                        self.jump_match(m.side, m.ln, cx);
+                    }
+                }
+                "backspace" => {
+                    self.search_query.pop();
+                    cx.notify();
+                }
+                "tab" => self.cycle_search_scope(cx),
+                _ => {
+                    let mods = &event.keystroke.modifiers;
+                    if mods.control || mods.alt || mods.platform || mods.function {
+                        return;
+                    }
+                    if let Some(ch) = &event.keystroke.key_char {
+                        self.search_query.push_str(ch);
+                        cx.notify();
+                    }
+                }
+            }
+            return;
+        }
         if self.drafting.is_none() {
             match event.keystroke.key.as_str() {
                 "]" => self.jump_hunk(1, cx),
                 "[" => self.jump_hunk(-1, cx),
+                "/" => {
+                    // Focus is already on DiffView; open search mode.
+                    self.searching = true;
+                    self.drafting = None;
+                    cx.notify();
+                }
                 _ => {}
             }
             return;
@@ -563,7 +683,7 @@ impl DiffView {
         let hunk_lands = display.hunk_lands.clone();
         let old_n = old_rows.len();
         let new_n = new_rows.len();
-        let row_h = f32::from(theme::ROW_HEIGHT);
+        let row_h = self.row_h();
         if self.view_h < 1. {
             return;
         }
@@ -982,6 +1102,31 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                     cx,
                     |this, cx| this.toggle_ignore_whitespace(cx),
                 ))
+                .child(chrome_button("font-dec", "A−", cx, |this, cx| {
+                    this.set_font_size(FontOp::Dec, cx);
+                }))
+                .child(chrome_button("font-reset", "A", cx, |this, cx| {
+                    this.set_font_size(FontOp::Reset, cx);
+                }))
+                .child(chrome_button("font-inc", "A+", cx, |this, cx| {
+                    this.set_font_size(FontOp::Inc, cx);
+                }))
+                .child(chrome_toggle(
+                    "find",
+                    "Find",
+                    view.searching,
+                    cx,
+                    |this, cx| {
+                        if this.searching {
+                            this.searching = false;
+                            cx.notify();
+                        } else {
+                            this.searching = true;
+                            this.drafting = None;
+                            cx.notify();
+                        }
+                    },
+                ))
                 .child(export_button(cx))
                 .children(view.export_status.as_ref().map(|status| {
                     div()
@@ -997,9 +1142,109 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                         .window_control_area(WindowControlArea::Drag),
                 ),
         )
+        .child(render_search_bar(view, cx))
         .child(render_body(view, cx))
         .child(render_comments(view))
         .child(render_draft_bar(view))
+}
+
+fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
+    if !view.searching && view.search_query.is_empty() {
+        return div().into_any_element();
+    }
+    let matches = view.current_matches();
+    let scope_label = match view.search_scope {
+        SearchScope::Old => "Old",
+        SearchScope::New => "New",
+        SearchScope::Both => "Both",
+    };
+    let query_display = if view.searching {
+        format!("{}▌", view.search_query)
+    } else {
+        view.search_query.clone()
+    };
+    let hint = if view.searching {
+        "Find — type, Tab scope, Enter first hit, Esc close"
+    } else {
+        "Find"
+    };
+
+    div()
+        .flex_none()
+        .border_b_1()
+        .border_color(theme::line())
+        .bg(rgb(0xfafbfd))
+        .px_3()
+        .py_1()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .child(hint.to_string()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .font_family(theme::MONO_FONT)
+                        .text_xs()
+                        .text_color(theme::text())
+                        .child(query_display),
+                )
+                .child(chrome_toggle(
+                    "search-scope",
+                    scope_label,
+                    true,
+                    cx,
+                    |this, cx| this.cycle_search_scope(cx),
+                ))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .child(format!("{} hit{}", matches.len(), if matches.len() == 1 { "" } else { "s" })),
+                ),
+        )
+        .when(!matches.is_empty(), |bar| {
+            bar.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .children(matches.into_iter().enumerate().map(|(i, m)| {
+                        let side = m.side;
+                        let ln = m.ln;
+                        let label = format!("{} {ln}", m.side.label());
+                        div()
+                            .id(("hit", i))
+                            .h(theme::TOGGLE_SIZE)
+                            .px_2()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .hover(|button| button.bg(theme::hover()))
+                            .active(|button| button.bg(rgb(0xdfe3e9)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.jump_match(side, ln, cx);
+                            }))
+                            .child(label)
+                    })),
+            )
+        })
+        .into_any_element()
 }
 
 fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
@@ -1141,7 +1386,7 @@ fn code_pane(
     } else {
         view.new_gaps.clone()
     };
-    let seam = empty_seam(other_n, view.view_h, f32::from(theme::ROW_HEIGHT));
+    let seam = empty_seam(other_n, view.view_h, view.row_h());
     let handle = if left {
         view.old_scroll.clone()
     } else {
@@ -1151,7 +1396,8 @@ fn code_pane(
         .drafting
         .as_ref()
         .and_then(|d| (d.side == side).then_some(d.line));
-    let row_h = f32::from(theme::ROW_HEIGHT);
+    let row_h = view.row_h();
+    let font_px = view.font_size.px() as f32;
     let pad = content_pad(rows.len(), view.view_h, row_h);
     let measure = left.then(|| cx.entity().downgrade());
     let side_marks = replace_side_marks(left, display);
@@ -1171,7 +1417,7 @@ fn code_pane(
                 .track_scroll(&handle)
                 .on_scroll_wheel(cx.listener(DiffView::on_wheel))
                 .font_family(theme::MONO_FONT)
-                .text_xs()
+                .text_size(px(font_px))
                 .child(
                     div()
                         .flex()
@@ -1197,7 +1443,7 @@ fn code_pane(
                             let parts = side_marks.get(i).cloned().flatten();
                             div()
                                 .id(row_id)
-                                .h(theme::ROW_HEIGHT)
+                                .h(px(row_h))
                                 .px_3()
                                 .bg(bg)
                                 .text_color(if is_omit {
@@ -1279,8 +1525,20 @@ fn center_gutter(
                 cx.notify();
             }
         }))
-        .child(ln_col(true, &display.old_rows, view.applied_old))
-        .child(ln_col(false, &display.new_rows, view.applied_new))
+        .child(ln_col(
+            true,
+            &display.old_rows,
+            view.applied_old,
+            view.row_h(),
+            view.font_size.px() as f32,
+        ))
+        .child(ln_col(
+            false,
+            &display.new_rows,
+            view.applied_new,
+            view.row_h(),
+            view.font_size.px() as f32,
+        ))
         .child(
             canvas(
                 |_, _, _| (),
@@ -1299,7 +1557,13 @@ fn center_gutter(
         )
 }
 
-fn ln_col(left: bool, rows: &[DisplayRow], scroll_top: f32) -> impl IntoElement {
+fn ln_col(
+    left: bool,
+    rows: &[DisplayRow],
+    scroll_top: f32,
+    row_h: f32,
+    font_px: f32,
+) -> impl IntoElement {
     let id = if left { "ln-left" } else { "ln-right" };
     let rows = rows.to_vec();
     div()
@@ -1310,7 +1574,7 @@ fn ln_col(left: bool, rows: &[DisplayRow], scroll_top: f32) -> impl IntoElement 
         .when(left, |col| col.left(px(0.)))
         .when(!left, |col| col.right(px(0.)))
         .font_family(theme::MONO_FONT)
-        .text_size(px(10.))
+        .text_size(px(font_px))
         .text_color(theme::faint())
         .when(left, |col| col.text_right().pr_1())
         .when(!left, |col| col.pl_1())
@@ -1322,7 +1586,7 @@ fn ln_col(left: bool, rows: &[DisplayRow], scroll_top: f32) -> impl IntoElement 
             };
             div()
                 .id(ln_id)
-                .h(theme::ROW_HEIGHT)
+                .h(px(row_h))
                 .child(label)
         }))
 }

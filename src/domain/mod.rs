@@ -253,6 +253,155 @@ impl FoldState {
     }
 }
 
+/// Which side(s) in-file search inspects (§3.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchScope {
+    Old,
+    New,
+    Both,
+}
+
+/// One hit from [`search_file`]: side + 1-based line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub side: Side,
+    pub ln: u32,
+}
+
+/// Case-insensitive substring search over old and/or new text.
+/// Empty / whitespace-only query yields no matches.
+pub fn search_file(
+    old_text: &str,
+    new_text: &str,
+    query: &str,
+    scope: SearchScope,
+) -> Vec<SearchMatch> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let take = |side: Side, text: &str, out: &mut Vec<SearchMatch>| {
+        for (i, line) in split_lines(text).into_iter().enumerate() {
+            if line.to_lowercase().contains(&q) {
+                out.push(SearchMatch {
+                    side,
+                    ln: (i + 1) as u32,
+                });
+            }
+        }
+    };
+    match scope {
+        SearchScope::Old => take(Side::Old, old_text, &mut out),
+        SearchScope::New => take(Side::New, new_text, &mut out),
+        SearchScope::Both => {
+            take(Side::Old, old_text, &mut out);
+            take(Side::New, new_text, &mut out);
+        }
+    }
+    out
+}
+
+/// Expand-then-land plan for jumping to a search match (§3.5).
+/// If the line lies in a collapsed Equal span, `expand` is that op index;
+/// after expanding both sides, land on `target` using post-expansion rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MatchJumpPlan {
+    pub expand: Option<usize>,
+    pub target: HunkJumpTarget,
+}
+
+/// Plan a search-match jump: expand the collapsed Equal that hides `ln` (if any),
+/// then land on that line — same landing rule as a Hunk jump.
+pub fn match_jump_plan(
+    alignment: &Alignment,
+    fold: &FoldState,
+    side: Side,
+    ln: u32,
+) -> MatchJumpPlan {
+    MatchJumpPlan {
+        expand: collapsed_equal_containing(alignment, fold, side, ln),
+        target: HunkJumpTarget { side, ln },
+    }
+}
+
+/// Op index of a collapsed Equal whose omitted middle contains `ln` on `side`.
+fn collapsed_equal_containing(
+    alignment: &Alignment,
+    fold: &FoldState,
+    side: Side,
+    ln: u32,
+) -> Option<usize> {
+    let has_hunk = alignment
+        .ops
+        .iter()
+        .any(|op| !matches!(op, AlignmentOp::Equal { .. }));
+    if !has_hunk {
+        return None;
+    }
+    for (op_idx, op) in alignment.ops.iter().enumerate() {
+        let AlignmentOp::Equal { old, new } = *op else {
+            continue;
+        };
+        let n = old.count.min(new.count);
+        if n <= EQUAL_CONTEXT * 2 || fold.expanded.contains(&op_idx) {
+            continue;
+        }
+        let start = match side {
+            Side::Old => old.start,
+            Side::New => new.start,
+        };
+        let from = start + EQUAL_CONTEXT;
+        let to = start + n - EQUAL_CONTEXT - 1;
+        if ln >= from && ln <= to {
+            return Some(op_idx);
+        }
+    }
+    None
+}
+
+/// Session-level mono font size for dual-pane Diff (§3.5). One value drives
+/// both panes and the ribbons/gutter metrics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiffFontSize {
+    px: u32,
+}
+
+impl DiffFontSize {
+    pub const DEFAULT: u32 = 13;
+    pub const MIN: u32 = 10;
+    pub const MAX: u32 = 22;
+
+    pub fn px(self) -> u32 {
+        self.px
+    }
+
+    pub fn increase(&mut self) {
+        self.px = (self.px + 1).min(Self::MAX);
+    }
+
+    pub fn decrease(&mut self) {
+        self.px = self.px.saturating_sub(1).max(Self::MIN);
+    }
+
+    pub fn reset(&mut self) {
+        self.px = Self::DEFAULT;
+    }
+
+    /// Row height matching the prototype: `round(fontSize * 22 / 13)`.
+    pub fn row_height(self) -> f32 {
+        (self.px as f32 * 22.0 / 13.0).round()
+    }
+}
+
+impl Default for DiffFontSize {
+    fn default() -> Self {
+        Self {
+            px: Self::DEFAULT,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowKind {
     Equal,
@@ -1595,5 +1744,119 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["new"]
         );
+    }
+
+    #[test]
+    fn search_file_lists_matches_with_side_and_line_by_scope() {
+        let old = "alpha\nneedle here\nomega\n";
+        let new = "alpha\nbeta\nother NEEDLE\n";
+
+        assert_eq!(
+            search_file(old, new, "needle", SearchScope::Old),
+            vec![SearchMatch {
+                side: Side::Old,
+                ln: 2,
+            }]
+        );
+        assert_eq!(
+            search_file(old, new, "needle", SearchScope::New),
+            vec![SearchMatch {
+                side: Side::New,
+                ln: 3,
+            }]
+        );
+        assert_eq!(
+            search_file(old, new, "needle", SearchScope::Both),
+            vec![
+                SearchMatch {
+                    side: Side::Old,
+                    ln: 2,
+                },
+                SearchMatch {
+                    side: Side::New,
+                    ln: 3,
+                },
+            ]
+        );
+        assert!(search_file(old, new, "  ", SearchScope::Both).is_empty());
+    }
+
+    #[test]
+    fn match_jump_in_collapsed_equal_expands_then_lands_on_line() {
+        // 10 Equal lines + Insert. Lines 4–7 are omitted when collapsed.
+        let old: String = (1..=10).map(|i| format!("L{i}")).collect::<Vec<_>>().join("\n");
+        let new = format!("{old}\nINS");
+        let alignment = Alignment {
+            ops: vec![
+                AlignmentOp::Equal {
+                    old: LineSpan { start: 1, count: 10 },
+                    new: LineSpan { start: 1, count: 10 },
+                },
+                AlignmentOp::Insert {
+                    after_old: 10,
+                    news: LineSpan { start: 11, count: 1 },
+                },
+            ],
+        };
+        let mut fold = FoldState::collapsed();
+        let collapsed = display_rows_folded(&old, &new, &alignment, &fold);
+        assert!(
+            collapsed
+                .old_rows
+                .iter()
+                .any(|r| matches!(r.kind, RowKind::Omit { .. })),
+            "precondition: Equal run is collapsed"
+        );
+        assert!(
+            !collapsed
+                .old_rows
+                .iter()
+                .any(|r| r.ln == 5 && !matches!(r.kind, RowKind::Omit { .. })),
+            "line 5 is not visible while collapsed"
+        );
+
+        let plan = match_jump_plan(&alignment, &fold, Side::Old, 5);
+        assert_eq!(
+            plan.target,
+            HunkJumpTarget {
+                side: Side::Old,
+                ln: 5
+            }
+        );
+        assert_eq!(plan.expand, Some(0), "must expand the Equal op at index 0");
+
+        if let Some(id) = plan.expand {
+            fold.expand(id);
+        }
+        let expanded = display_rows_folded(&old, &new, &alignment, &fold);
+        let land_row = expanded
+            .old_rows
+            .iter()
+            .position(|r| r.ln == 5 && !matches!(r.kind, RowKind::Omit { .. }))
+            .expect("line 5 visible after expand");
+        // Post-expansion: line 5 is the 5th Equal row (index 4), scroll gap at that row.
+        assert_eq!(land_row, 4);
+    }
+
+    #[test]
+    fn diff_font_size_steps_and_resets_within_shared_bounds() {
+        let mut size = DiffFontSize::default();
+        assert_eq!(size.px(), DiffFontSize::DEFAULT);
+
+        size.increase();
+        assert_eq!(size.px(), DiffFontSize::DEFAULT + 1);
+
+        for _ in 0..40 {
+            size.increase();
+        }
+        assert_eq!(size.px(), DiffFontSize::MAX);
+
+        for _ in 0..40 {
+            size.decrease();
+        }
+        assert_eq!(size.px(), DiffFontSize::MIN);
+
+        size.reset();
+        assert_eq!(size.px(), DiffFontSize::DEFAULT);
     }
 }

@@ -8,7 +8,6 @@ pub const DIFF_TREE_WIDTH: Pixels = gpui::px(200.);
 pub const CHROME_HEIGHT: Pixels = gpui::px(36.);
 pub const TOGGLE_SIZE: Pixels = gpui::px(26.);
 pub const GUTTER_WIDTH: Pixels = gpui::px(88.);
-pub const ROW_HEIGHT: Pixels = gpui::px(20.);
 
 /// Prototype A fonts; OS falls back if not installed.
 pub const UI_FONT: &str = "IBM Plex Sans";
