@@ -6,6 +6,7 @@ mod git;
 mod gitlab;
 mod reqwest_client;
 mod settings_store;
+mod syntax;
 mod ui;
 mod window_geometry_store;
 mod workspace_store;
