@@ -187,13 +187,13 @@ mod tests {
 
     #[test]
     fn sidebar_clamp_keeps_commits_strip() {
-        assert_eq!(clamp_sidebar_width(100., 1280.), 160.);
+        assert_eq!(clamp_sidebar_width(100., 1280.), 140.);
         assert_eq!(clamp_sidebar_width(220., 1280.), 220.);
         assert_eq!(clamp_sidebar_width(500., 1280.), 360.);
         // 720 − 280 commits = 440, but MAX_SIDEBAR caps at 360
         assert_eq!(clamp_sidebar_width(400., 720.), 360.);
         // tight window: 400 − 280 = 120 → floor at MIN_SIDEBAR
-        assert_eq!(clamp_sidebar_width(220., 400.), 160.);
+        assert_eq!(clamp_sidebar_width(220., 400.), 140.);
     }
 
     #[test]
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn diff_tree_clamp_keeps_dual_pane() {
-        assert_eq!(clamp_diff_tree_width(100., 1280.), 160.);
+        assert_eq!(clamp_diff_tree_width(100., 1280.), 140.);
         assert_eq!(clamp_diff_tree_width(200., 1280.), 200.);
         assert_eq!(clamp_diff_tree_width(500., 1280.), 360.);
         // 560 − 400 content = 160 max
