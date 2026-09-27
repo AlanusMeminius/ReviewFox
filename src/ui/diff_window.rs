@@ -1,17 +1,16 @@
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, Div, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, MouseMoveEvent, ParentElement, PathBuilder,
-    Render, ScrollHandle, ScrollWheelEvent, StatefulInteractiveElement, Styled, Window,
-    WindowControlArea, canvas, div, fill, point, prelude::*, px, rgb, size, svg,
+    Render, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, StatefulInteractiveElement,
+    Styled, Window, WindowControlArea, canvas, div, fill, point, prelude::*, px, rgb, size, svg,
 };
 use std::collections::HashSet;
+use std::ops::Range;
 use std::rc::Rc;
 
 use crate::domain::{
-    Bridge, ChangedPath, Comparison, DiffFontSize, DisplayRow, DisplayRows, FoldState,
-    HunkJumpTarget, PathStatus, Review, RowKind, ScrollKnot, SearchMatch, SearchScope, Side,
-    TokenPart, ViewOptions, display_rows_folded, hunk_jump_target, match_jump_plan, replace_marks,
-    search_file,
+    ChangedPath, Comparison, DiffFontSize, FoldState, PathStatus, Review, SearchMatch,
+    SearchScope, Side, TokenPart, ViewOptions, hunk_jump_target, match_jump_plan, search_file,
 };
 
 const LN_FONT_PX: f32 = 10.;
@@ -21,19 +20,9 @@ const LN_DIGIT_PX: f32 = 8.;
 const LN_PAD: f32 = 4.;
 const BRIDGE_COL: f32 = 24.;
 
-fn line_number_digits(display: &DisplayRows) -> u32 {
-    let max_ln = display
-        .old_rows
-        .iter()
-        .chain(&display.new_rows)
-        .map(|row| match row.kind {
-            RowKind::Omit { to, .. } => to.max(row.ln),
-            _ => row.ln,
-        })
-        .max()
-        .unwrap_or(1);
+fn line_number_digits(layout: &Layout) -> u32 {
     let mut digits = 0u32;
-    let mut n = max_ln.max(1);
+    let mut n = layout.max_line_number().max(1);
     while n > 0 {
         digits += 1;
         n /= 10;
@@ -47,6 +36,8 @@ fn ln_col_width(digits: u32) -> f32 {
 use crate::export;
 use crate::git::{self, FileDiff};
 use crate::window_geometry_store;
+use super::diff::layout::{HunkLand, Layout, LineKind, Row, SideLayout};
+use super::diff::viewport::{self, Viewport};
 use super::file_tree::{self, TreeRow};
 #[cfg(target_os = "macos")]
 use super::mac_column_vibrancy::ColumnVibrancy;
@@ -83,31 +74,40 @@ pub struct DiffView {
     collapsed_dirs: HashSet<String>,
     /// Reset collapsed_dirs when this no longer matches current ChangedPath list.
     tree_path_fingerprint: Vec<String>,
+    /// View projection of the selected text file under `fold`. Rebuilt on
+    /// file / fold / ViewOptions change, never per frame.
+    layout: Option<Layout>,
+    /// Per-side row text for the div panes, indexed by visual row.
+    row_text: [Vec<SharedString>; 2],
     old_scroll: ScrollHandle,
     new_scroll: ScrollHandle,
     /// Shared scroll parameter, in pixels. See docs/dual-pane-diff.md §3.1.
+    /// Kept inside `viewport::s_range` from the first measured frame on.
     scroll_s: f32,
     scroll_nudge: f32,
     applied_old: f32,
     applied_new: f32,
     /// Pane viewport height from the previous frame. 0 until the first layout.
     view_h: f32,
+    /// Window y of the code panes' top edge (hover hit tests).
+    pane_top_w: f32,
+    /// Rows that get word marks this frame: visible ± one screen.
+    marked_rows: [Range<usize>; 2],
     hover_copy: Option<String>,
-    hover_bands: Vec<HoverBand>,
     placed: Vec<PlacedBridge>,
     omit_links: Vec<(f32, f32, f32, f32)>,
     old_gaps: Vec<(f32, f32)>,
     new_gaps: Vec<(f32, f32)>,
-    /// Row index whose top edge is the insert pinch (old side).
-    old_seam_rows: Vec<u32>,
-    /// Row index whose top edge is the delete pinch (new side).
-    new_seam_rows: Vec<u32>,
     #[cfg(target_os = "macos")]
     tree_vibrancy: Option<ColumnVibrancy>,
     /// Per-file Equal fold. Reset when the selected path changes.
     fold: FoldState,
     /// 0-based index of the Hunk at / nearest the viewport; drives chrome.
     hunk_index: Option<usize>,
+    /// Hunk-navigation position (row units) set by a jump or file open, before
+    /// `s_range` clamping. Jumps near the file ends move no pixels, so chrome
+    /// and the next jump follow this until the user scrolls.
+    hunk_s: Option<f32>,
     /// Diff-computation knobs; does not change Comparison identity.
     view_options: ViewOptions,
     /// Session-level mono size for both panes and ribbons (§3.5).
@@ -120,27 +120,16 @@ pub struct DiffView {
     bounds_sub: Option<gpui::Subscription>,
 }
 
-struct HoverBand {
-    top: f32,
-    bottom: f32,
-    copy: String,
-}
-
-struct AnchorCap {
-    side: Side,
-    ln: u32,
-    view_y: f32,
-}
-
 enum FontOp {
     Inc,
     Dec,
     Reset,
 }
 
+/// A visible bridge in window coordinates.
 #[derive(Clone)]
 struct PlacedBridge {
-    kind: RowKind,
+    kind: LineKind,
     x_l: f32,
     x_r: f32,
     y_l0: f32,
@@ -149,10 +138,17 @@ struct PlacedBridge {
     y_r1: f32,
 }
 
+fn side_ix(side: Side) -> usize {
+    match side {
+        Side::Old => 0,
+        Side::New => 1,
+    }
+}
+
 impl DiffView {
     pub fn with_snapshot(snapshot: DiffSnapshot, cx: &mut Context<Self>) -> Self {
         let review = Review::new(snapshot.comparison.clone());
-        Self {
+        let mut this = Self {
             focus: cx.focus_handle(),
             tree_collapsed: false,
             tree_width: f32::from(theme::DIFF_TREE_WIDTH),
@@ -163,6 +159,8 @@ impl DiffView {
             export_status: None,
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
+            layout: None,
+            row_text: [Vec::new(), Vec::new()],
             old_scroll: ScrollHandle::new(),
             new_scroll: ScrollHandle::new(),
             scroll_s: 0.,
@@ -170,40 +168,77 @@ impl DiffView {
             applied_old: 0.,
             applied_new: 0.,
             view_h: 0.,
+            pane_top_w: 0.,
+            marked_rows: [0..0, 0..0],
             hover_copy: None,
-            hover_bands: Vec::new(),
             placed: Vec::new(),
             omit_links: Vec::new(),
             old_gaps: Vec::new(),
             new_gaps: Vec::new(),
-            old_seam_rows: Vec::new(),
-            new_seam_rows: Vec::new(),
             #[cfg(target_os = "macos")]
             tree_vibrancy: None,
             fold: FoldState::collapsed(),
             hunk_index: None,
+            hunk_s: Some(0.),
             view_options: ViewOptions::default(),
             font_size: DiffFontSize::default(),
             search_query: String::new(),
             search_scope: SearchScope::Both,
             searching: false,
             bounds_sub: None,
-        }
+        };
+        this.rebuild_layout();
+        this
     }
 
     fn row_h(&self) -> f32 {
         self.font_size.row_height()
     }
 
+    /// Rebuild the Layout from the selected file, `fold` and the comment index.
+    fn rebuild_layout(&mut self) {
+        self.layout = None;
+        self.row_text = [Vec::new(), Vec::new()];
+        let Some(FileDiff::Text {
+            alignment,
+            old_text,
+            new_text,
+        }) = self.snapshot.as_ref().map(|s| &s.file)
+        else {
+            return;
+        };
+        let layout = Layout::build(
+            old_text.clone(),
+            new_text.clone(),
+            alignment,
+            Some(&self.fold),
+        );
+        self.row_text = [row_texts(&layout.old), row_texts(&layout.new)];
+        self.layout = Some(layout);
+        self.refresh_comments();
+    }
+
+    fn refresh_comments(&mut self) {
+        let (Some(layout), Some(snap)) = (self.layout.as_mut(), self.snapshot.as_ref()) else {
+            return;
+        };
+        match &self.review {
+            Some(review) => layout.set_comments(
+                review
+                    .comments_for_path(&snap.selected_path)
+                    .map(|c| &c.anchor),
+            ),
+            None => layout.set_comments(std::iter::empty()),
+        }
+    }
+
+    /// Recompute Alignment under the current ViewOptions. Caller rebuilds the Layout.
     fn recompute_alignment(&mut self) {
         let opts = self.view_options.clone();
-        let fold = self.fold.clone();
         let Some(snap) = self.snapshot.as_mut() else {
             return;
         };
         let FileDiff::Text {
-            display,
-            hunk_count,
             alignment,
             old_text,
             new_text,
@@ -212,9 +247,8 @@ impl DiffView {
             return;
         };
         *alignment = git::compute_alignment(old_text, new_text, &opts);
-        *hunk_count = alignment.hunks().len();
-        *display = display_rows_folded(old_text, new_text, alignment, &fold);
         self.hunk_index = None;
+        self.hunk_s = None;
     }
 
     fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
@@ -226,19 +260,18 @@ impl DiffView {
         cx.notify();
     }
 
+    /// Back to the file start. The first measured frame clamps `scroll_s` up
+    /// to the lower end of `s_range`.
     fn reset_scroll(&mut self) {
         self.scroll_s = 0.;
         self.scroll_nudge = 0.;
         self.applied_old = 0.;
         self.applied_new = 0.;
         self.hover_copy = None;
-        self.hover_bands.clear();
         self.placed.clear();
         self.omit_links.clear();
         self.old_gaps.clear();
         self.new_gaps.clear();
-        self.old_seam_rows.clear();
-        self.new_seam_rows.clear();
         self.old_scroll.set_offset(point(px(0.), px(0.)));
         self.new_scroll.set_offset(point(px(0.), px(0.)));
     }
@@ -246,120 +279,33 @@ impl DiffView {
     fn reset_fold(&mut self) {
         self.fold = FoldState::collapsed();
         self.hunk_index = None;
-    }
-
-    fn reproject_fold(&mut self) {
-        let Some(snap) = self.snapshot.as_mut() else {
-            return;
-        };
-        let FileDiff::Text {
-            display,
-            alignment,
-            old_text,
-            new_text,
-            ..
-        } = &mut snap.file
-        else {
-            return;
-        };
-        *display = display_rows_folded(old_text, new_text, alignment, &self.fold);
+        self.hunk_s = Some(0.);
     }
 
     fn with_anchor(&mut self, mutate: impl FnOnce(&mut Self)) {
         let cap = self.capture_anchor();
         mutate(self);
-        self.reproject_fold();
+        self.rebuild_layout();
         self.restore_anchor(cap);
+        self.hunk_s = None;
     }
 
-    fn capture_anchor(&self) -> Option<AnchorCap> {
-        let snap = self.snapshot.as_ref()?;
-        let FileDiff::Text { display, .. } = &snap.file else {
-            return None;
-        };
-        let row_h = self.row_h();
-        let anchor = if self.view_h < 1. {
-            0.
-        } else {
-            self.view_h / 3.
-        };
-        let old_top = -f32::from(self.old_scroll.offset().y);
-        let new_top = -f32::from(self.new_scroll.offset().y);
-        let old_hit = row_at(&display.old_rows, old_top, anchor, row_h);
-        let new_hit = row_at(&display.new_rows, new_top, anchor, row_h);
-        let hold_above = |side: Side, rows: &[DisplayRow], hit_i: usize, scroll: f32| {
-            for p in (0..hit_i).rev() {
-                if !matches!(rows[p].kind, RowKind::Omit { .. }) {
-                    return Some(AnchorCap {
-                        side,
-                        ln: rows[p].ln,
-                        view_y: p as f32 * row_h - scroll,
-                    });
-                }
-            }
-            None
-        };
-        if let Some(i) = old_hit {
-            if matches!(display.old_rows[i].kind, RowKind::Omit { .. }) {
-                return hold_above(Side::Old, &display.old_rows, i, old_top);
-            }
-        }
-        if let Some(i) = new_hit {
-            if matches!(display.new_rows[i].kind, RowKind::Omit { .. }) {
-                return hold_above(Side::New, &display.new_rows, i, new_top);
-            }
-        }
-        if let Some(i) = old_hit {
-            return Some(AnchorCap {
-                side: Side::Old,
-                ln: display.old_rows[i].ln,
-                view_y: i as f32 * row_h - old_top,
-            });
-        }
-        if let Some(i) = new_hit {
-            return Some(AnchorCap {
-                side: Side::New,
-                ln: display.new_rows[i].ln,
-                view_y: i as f32 * row_h - new_top,
-            });
-        }
-        None
+    fn viewport(&self) -> Option<Viewport<'_>> {
+        let layout = self.layout.as_ref()?;
+        Some(Viewport::new(layout, self.scroll_s, self.view_h, self.row_h()))
     }
 
-    fn restore_anchor(&mut self, cap: Option<AnchorCap>) {
-        let Some(cap) = cap else {
+    fn capture_anchor(&self) -> Option<viewport::AnchorCap> {
+        self.viewport()?.capture_anchor()
+    }
+
+    fn restore_anchor(&mut self, cap: Option<viewport::AnchorCap>) {
+        let (Some(cap), Some(layout)) = (cap, self.layout.as_ref()) else {
             return;
         };
-        let Some(FileDiff::Text { display, .. }) = self.snapshot.as_ref().map(|s| &s.file) else {
-            return;
-        };
-        let row_h = self.row_h();
-        let rows = if cap.side == Side::Old {
-            &display.old_rows
-        } else {
-            &display.new_rows
-        };
-        let Some(i) = rows
-            .iter()
-            .position(|r| r.ln == cap.ln && !matches!(r.kind, RowKind::Omit { .. }))
-        else {
-            return;
-        };
-        let anchor = if self.view_h < 1. {
-            0.
-        } else {
-            self.view_h / 3.
-        };
-        let want = anchor + i as f32 * row_h - cap.view_y;
-        let end = display.knots.last().map(|k| k.s as f32 * row_h).unwrap_or(0.);
-        self.scroll_s = s_from(
-            cap.side == Side::Old,
-            want,
-            &display.knots,
-            row_h,
-            self.scroll_s,
-        )
-        .clamp(0., end);
+        if let Some(s) = viewport::s_for_anchor(layout, cap, self.view_h, self.row_h(), self.scroll_s) {
+            self.scroll_s = s;
+        }
     }
 
     fn expand_omit(&mut self, omit_id: usize, cx: &mut Context<Self>) {
@@ -403,24 +349,18 @@ impl DiffView {
     }
 
     fn jump_hunk(&mut self, dir: i32, cx: &mut Context<Self>) {
-        let Some(FileDiff::Text {
-            display,
-            alignment,
-            ..
-        }) = self.snapshot.as_ref().map(|s| &s.file)
+        let (Some(FileDiff::Text { alignment, .. }), Some(layout)) =
+            (self.snapshot.as_ref().map(|s| &s.file), self.layout.as_ref())
         else {
             return;
         };
-        let hunk_count = alignment.hunks().len();
+        let hunk_count = layout.hunk_count;
         if hunk_count == 0 {
             return;
         }
-        let lands = display.hunk_lands.clone();
-        let knots = display.knots.clone();
-        let old_rows = display.old_rows.clone();
-        let new_rows = display.new_rows.clone();
+        let lands = &layout.hunk_lands;
         let row_h = self.row_h();
-        let s_rows = self.scroll_s / row_h;
+        let s_rows = self.hunk_s.unwrap_or(self.scroll_s / row_h);
         let next = if dir > 0 {
             (0..hunk_count).find(|&i| {
                 lands
@@ -444,9 +384,9 @@ impl DiffView {
         let Some(target) = hunk_jump_target(alignment, i) else {
             return;
         };
-        let end = knots.last().map(|k| k.s as f32 * row_h).unwrap_or(0.);
-        self.scroll_s = scroll_s_for_target(target, &old_rows, &new_rows, &knots, row_h, self.scroll_s)
-            .clamp(0., end);
+        let s = viewport::s_for_target(layout, target, row_h, self.scroll_s).unwrap_or(self.scroll_s);
+        self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
+        self.hunk_s = Some(s / row_h);
         self.hunk_index = Some(i);
         cx.notify();
     }
@@ -458,26 +398,16 @@ impl DiffView {
         let plan = match_jump_plan(alignment, &self.fold, side, ln);
         if let Some(id) = plan.expand {
             self.fold.expand(id);
-            self.reproject_fold();
+            self.rebuild_layout();
         }
-        let Some(FileDiff::Text { display, .. }) = self.snapshot.as_ref().map(|s| &s.file) else {
+        let Some(layout) = self.layout.as_ref() else {
             return;
         };
         let row_h = self.row_h();
-        let end = display
-            .knots
-            .last()
-            .map(|k| k.s as f32 * row_h)
-            .unwrap_or(0.);
-        self.scroll_s = scroll_s_for_target(
-            plan.target,
-            &display.old_rows,
-            &display.new_rows,
-            &display.knots,
-            row_h,
-            self.scroll_s,
-        )
-        .clamp(0., end);
+        let s = viewport::s_for_target(layout, plan.target, row_h, self.scroll_s)
+            .unwrap_or(self.scroll_s);
+        self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
+        self.hunk_s = Some(s / row_h);
         cx.notify();
     }
 
@@ -548,20 +478,19 @@ impl DiffView {
                 current.selected_path = incoming.selected_path;
                 current.changed_paths = incoming.changed_paths;
                 current.file = incoming.file;
-                self.reset_fold();
-                self.reset_scroll();
-                self.recompute_alignment();
             }
             _ => {
                 self.review = Some(Review::new(incoming.comparison.clone()));
                 self.drafting = None;
                 self.export_status = None;
                 self.snapshot = Some(incoming);
-                self.reset_fold();
-                self.reset_scroll();
-                self.recompute_alignment();
             }
         }
+        self.reset_fold();
+        self.reset_scroll();
+        self.recompute_alignment();
+        self.hunk_s = Some(0.);
+        self.rebuild_layout();
     }
 
     fn select_path(&mut self, path: String) {
@@ -584,6 +513,7 @@ impl DiffView {
         self.drafting = None;
         self.reset_fold();
         self.reset_scroll();
+        self.rebuild_layout();
         window_geometry_store::note_diff_selected_path(path);
         window_geometry_store::flush();
     }
@@ -615,6 +545,7 @@ impl DiffView {
         if let Some(review) = &mut self.review {
             review.add_line_comment(path, draft.side, draft.line, body);
         }
+        self.refresh_comments();
         cx.notify();
     }
 
@@ -689,17 +620,6 @@ impl DiffView {
         }
     }
 
-    fn has_comment(&self, side: Side, line: u32) -> bool {
-        let Some(path) = self.snapshot.as_ref().map(|s| s.selected_path.as_str()) else {
-            return false;
-        };
-        let Some(review) = &self.review else {
-            return false;
-        };
-        review
-            .comments_for_path(path)
-            .any(|c| c.anchor.line_on(side, line))
-    }
 
     fn export_to_clipboard(&mut self, cx: &mut Context<Self>) {
         let Some(review) = &self.review else {
@@ -723,28 +643,35 @@ impl DiffView {
         let delta = event.delta.pixel_delta(window.line_height());
         // AppKit scrollingDeltaY is negative when the user scrolls down.
         self.scroll_nudge -= f32::from(delta.y);
+        self.hunk_s = None;
         cx.notify();
     }
 
+    fn on_gutter_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let y = f32::from(event.position.y) - self.pane_top_w;
+        let copy = self.viewport().and_then(|vp| {
+            let i = vp.bridge_at(y)?;
+            self.layout
+                .as_ref()
+                .map(|layout| layout.bridges[i].position_copy())
+        });
+        if self.hover_copy != copy {
+            self.hover_copy = copy;
+            cx.notify();
+        }
+    }
+
     fn sync_scroll(&mut self) {
-        let Some(FileDiff::Text { display, .. }) = self.snapshot.as_ref().map(|s| &s.file) else {
+        let Some(layout) = self.layout.as_ref() else {
             return;
         };
-        let knots = display.knots.clone();
-        let bridges = display.bridges.clone();
-        let old_rows = display.old_rows.clone();
-        let new_rows = display.new_rows.clone();
-        let hunk_lands = display.hunk_lands.clone();
-        let old_n = old_rows.len();
-        let new_n = new_rows.len();
         let row_h = self.row_h();
         if self.view_h < 1. {
             return;
         }
-        let anchor = self.view_h / 3.;
-        let end = knots.last().map(|k| k.s as f32 * row_h).unwrap_or(0.);
+        let mut s = self.scroll_s;
         if self.scroll_nudge != 0. {
-            self.scroll_s = (self.scroll_s + self.scroll_nudge).clamp(0., end);
+            s += self.scroll_nudge;
             self.scroll_nudge = 0.;
         } else {
             let old_top = -f32::from(self.old_scroll.offset().y);
@@ -752,25 +679,34 @@ impl DiffView {
             let old_delta = (old_top - self.applied_old).abs();
             let new_delta = (new_top - self.applied_new).abs();
             if old_delta > 0.5 || new_delta > 0.5 {
-                let from_old = old_delta >= new_delta;
-                let (top, n) = if from_old {
-                    (old_top, old_n)
+                let (side, top) = if old_delta >= new_delta {
+                    (Side::Old, old_top)
                 } else {
-                    (new_top, new_n)
+                    (Side::New, new_top)
                 };
-                let content = content_from_scroll(top, n, anchor, row_h);
-                self.scroll_s =
-                    s_from(from_old, content, &knots, row_h, self.scroll_s).clamp(0., end);
+                let n = layout.side(side).rows();
+                let content = viewport::content_from_top(top, n, self.view_h, row_h);
+                s = viewport::s_for_content(layout, side, content, row_h, s);
+                self.hunk_s = None;
             }
         }
-        let (old_y, new_y) = interp(self.scroll_s, &knots, row_h);
-        let old_top = track(old_y, old_n, anchor, row_h);
-        let new_top = track(new_y, new_n, anchor, row_h);
+        let vp = Viewport::new(layout, s, self.view_h, row_h);
+        self.scroll_s = vp.s();
+        let old_top = vp.top(Side::Old);
+        let new_top = vp.top(Side::New);
         self.applied_old = old_top;
         self.applied_new = new_top;
         self.old_scroll.set_offset(point(px(0.), px(-old_top)));
         self.new_scroll.set_offset(point(px(0.), px(-new_top)));
-        self.hunk_index = nearest_hunk_index(self.scroll_s / row_h, &hunk_lands);
+        self.hunk_index = nearest_hunk_index(
+            self.hunk_s.unwrap_or(self.scroll_s / row_h),
+            &layout.hunk_lands,
+        );
+        let screen = (self.view_h / row_h).ceil() as usize;
+        self.marked_rows = [Side::Old, Side::New].map(|side| {
+            let rows = vp.visible_rows(side);
+            rows.start.saturating_sub(screen)..rows.end + screen
+        });
 
         let old_pane = self.old_scroll.bounds();
         let new_pane = self.new_scroll.bounds();
@@ -780,64 +716,29 @@ impl DiffView {
         let x_r = f32::from(new_pane.left());
         let old_top_w = f32::from(old_pane.top());
         let new_top_w = f32::from(new_pane.top());
-        self.old_gaps = gap_intervals(true, &bridges, old_n, new_n, old_top, new_top, self.view_h, row_h);
-        self.new_gaps = gap_intervals(false, &bridges, old_n, new_n, old_top, new_top, self.view_h, row_h);
-        self.old_seam_rows.clear();
-        self.new_seam_rows.clear();
-        for bridge in &bridges {
-            match bridge {
-                Bridge::Insert { old_seam, .. } => self.old_seam_rows.push(*old_seam),
-                Bridge::Delete { new_seam, .. } => self.new_seam_rows.push(*new_seam),
-                Bridge::Replace { .. } => {}
-            }
-        }
+        self.pane_top_w = old_top_w;
+        self.old_gaps = vp.gaps(Side::Old);
+        self.new_gaps = vp.gaps(Side::New);
         self.placed.clear();
         self.omit_links.clear();
-        self.hover_bands.clear();
         if x_r - x_l < 4. {
             return;
         }
-        for bridge in &bridges {
-            let Some(placed) = place_bridge(
-                bridge,
-                old_n,
-                new_n,
-                old_top,
-                new_top,
-                old_top_w,
-                new_top_w,
-                self.view_h,
-                row_h,
-                x_l,
-                x_r,
-            ) else {
-                continue;
-            };
-            let y0 = placed.y_l0.min(placed.y_r0);
-            let y1 = placed.y_l1.max(placed.y_r1);
-            self.hover_bands.push(HoverBand {
-                top: y0,
-                bottom: y1.max(y0 + 2.),
-                copy: bridge.position_copy(),
-            });
-            self.placed.push(placed);
-        }
-        for (i, row) in old_rows.iter().enumerate() {
-            let RowKind::Omit { id, .. } = row.kind else {
-                continue;
-            };
-            let Some(j) = new_rows.iter().position(|r| match r.kind {
-                RowKind::Omit { id: nid, .. } => nid == id,
-                _ => false,
-            }) else {
-                continue;
-            };
-            let y_l = old_top_w + i as f32 * row_h + row_h / 2. - old_top;
-            let y_r = new_top_w + j as f32 * row_h + row_h / 2. - new_top;
-            self.omit_links.push((x_l, y_l, x_r, y_r));
-        }
+        self.placed.extend(vp.bridges().into_iter().map(|p| PlacedBridge {
+            kind: p.kind,
+            x_l,
+            x_r,
+            y_l0: old_top_w + p.y_l0,
+            y_l1: old_top_w + p.y_l1,
+            y_r0: new_top_w + p.y_r0,
+            y_r1: new_top_w + p.y_r1,
+        }));
+        self.omit_links.extend(
+            vp.omit_links()
+                .into_iter()
+                .map(|(y_l, y_r)| (x_l, old_top_w + y_l, x_r, new_top_w + y_r)),
+        );
     }
-
 }
 
 impl Focusable for DiffView {
@@ -1100,8 +1001,9 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                 .map(|r| r.comments_for_path(&s.selected_path).count())
                 .unwrap_or(0);
             let mut sub = match &s.file {
-                FileDiff::Text { hunk_count, .. } => {
-                    let hunk_part = if *hunk_count == 0 {
+                FileDiff::Text { .. } => {
+                    let hunk_count = view.layout.as_ref().map(|l| l.hunk_count).unwrap_or(0);
+                    let hunk_part = if hunk_count == 0 {
                         "0 differences".into()
                     } else {
                         let n = view.hunk_index.unwrap_or(0) + 1;
@@ -1329,10 +1231,11 @@ fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
 }
 
 fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
-    match view.snapshot.as_ref().map(|s| &s.file) {
-        Some(FileDiff::Text { display, .. }) => {
+    match (view.snapshot.as_ref().map(|s| &s.file), view.layout.as_ref()) {
+        (Some(FileDiff::Text { .. }), Some(layout)) => {
+            let vp = Viewport::new(layout, view.scroll_s, view.view_h, view.row_h());
             let waves = view.omit_links.clone();
-            let ln_w = ln_col_width(line_number_digits(display));
+            let ln_w = ln_col_width(line_number_digits(layout));
             div()
                 .id("diff-panes")
                 .relative()
@@ -1340,9 +1243,9 @@ fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement 
                 .min_h(px(0.))
                 .flex()
                 .overflow_hidden()
-                .child(code_pane(true, display, view, cx))
-                .child(center_gutter(display, view, cx))
-                .child(code_pane(false, display, view, cx))
+                .child(code_pane(true, layout, &vp, view, cx))
+                .child(center_gutter(layout, view, cx))
+                .child(code_pane(false, layout, &vp, view, cx))
                 .child(
                     canvas(
                         |_, _, _| (),
@@ -1355,9 +1258,10 @@ fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement 
                 )
                 .into_any_element()
         }
-        Some(FileDiff::Binary) => placeholder("Binary file — no Alignment"),
-        Some(FileDiff::Error(msg)) => placeholder(msg),
-        None => placeholder("Open Diff from the main window"),
+        (Some(FileDiff::Text { .. }), None) => placeholder("No Layout"),
+        (Some(FileDiff::Binary), _) => placeholder("Binary file — no Alignment"),
+        (Some(FileDiff::Error(msg)), _) => placeholder(msg),
+        (None, _) => placeholder("Open Diff from the main window"),
     }
 }
 
@@ -1469,37 +1373,26 @@ fn placeholder(msg: &str) -> gpui::AnyElement {
 
 fn code_pane(
     left: bool,
-    display: &DisplayRows,
+    layout: &Layout,
+    vp: &Viewport<'_>,
     view: &DiffView,
     cx: &mut Context<DiffView>,
-) -> impl IntoElement {
+) -> Div {
     let id = if left { "code-left" } else { "code-right" };
     let side = if left { Side::Old } else { Side::New };
-    let rows = if left {
-        display.old_rows.clone()
-    } else {
-        display.new_rows.clone()
-    };
+    let rows = layout.side(side);
+    let texts = &view.row_text[side_ix(side)];
+    let marked_rows = view.marked_rows[side_ix(side)].clone();
     let empty = rows.is_empty();
-    let other_n = if left {
-        display.new_rows.len()
-    } else {
-        display.old_rows.len()
-    };
     let gaps = if left {
         view.old_gaps.clone()
     } else {
         view.new_gaps.clone()
     };
-    let seams = if left {
-        view.old_seam_rows.clone()
-    } else {
-        view.new_seam_rows.clone()
-    };
-    let seam_rows = seams.clone();
+    let seam_rows = vp.visible_seams(side).to_vec();
     let seam_color = if left { theme::add_bg() } else { theme::del_bg() };
     let seam_scroll = if left { view.applied_old } else { view.applied_new };
-    let seam = empty_seam(other_n, view.view_h, view.row_h());
+    let seam = vp.empty_seam(side);
     let handle = if left {
         view.old_scroll.clone()
     } else {
@@ -1511,9 +1404,8 @@ fn code_pane(
         .and_then(|d| (d.side == side).then_some(d.line));
     let row_h = view.row_h();
     let font_px = view.font_size.px() as f32;
-    let pad = content_pad(rows.len(), view.view_h, row_h);
+    let pad = vp.content_pad(side);
     let measure = left.then(|| cx.entity().downgrade());
-    let side_marks = replace_side_marks(left, display);
 
     div()
         .relative()
@@ -1536,23 +1428,25 @@ fn code_pane(
                         .flex()
                         .flex_col()
                         .w_full()
-                        .children(rows.into_iter().enumerate().map(move |(i, row)| {
-                            let marked = view.has_comment(side, row.ln);
-                            let drafting_here = drafting_line == Some(row.ln);
-                            let is_omit = matches!(row.kind, RowKind::Omit { .. });
-                            let omit_id = match row.kind {
-                                RowKind::Omit { id, .. } => Some(id),
-                                _ => None,
+                        .children(rows.iter_rows().enumerate().map(|(i, row)| {
+                            let (line, omit_id) = match row {
+                                Row::Line(l) => (Some(l), None),
+                                Row::Omit(o) => (None, Some(o.id)),
                             };
+                            let ln = line.map(|l| l.ln).unwrap_or(0);
+                            let marked = line.is_some_and(|l| rows.has_comment(l.ln));
+                            let drafting_here = line.is_some() && drafting_line == Some(ln);
                             let bg = if drafting_here {
                                 rgb(0xdbe4ff)
                             } else {
-                                kind_bg(row.kind)
+                                kind_bg(row_kind(row))
                             };
                             let row_id = if left { ("row-l", i) } else { ("row-r", i) };
-                            let line = row.ln;
-                            let parts = side_marks.get(i).cloned().flatten();
-                            let is_seam = seams.iter().any(|s| *s as usize == i);
+                            // Word marks only near the viewport; the LCS is memoized per block.
+                            let parts = line
+                                .filter(|_| marked_rows.contains(&i))
+                                .and_then(|l| layout.marks(side, l));
+                            let text = texts.get(i).cloned().unwrap_or_default();
                             div()
                                 .id(row_id)
                                 .relative()
@@ -1561,7 +1455,7 @@ fn code_pane(
                                 .bg(bg)
                                 .text_color(theme::text())
                                 .overflow_hidden()
-                                .when(marked && !is_omit, |d| {
+                                .when(marked, |d| {
                                     d.border_l_2().border_color(theme::accent())
                                 })
                                 .cursor_pointer()
@@ -1569,14 +1463,11 @@ fn code_pane(
                                     if let Some(id) = omit_id {
                                         this.expand_omit(id, cx);
                                     } else {
-                                        this.begin_draft(side, line, window, cx);
+                                        this.begin_draft(side, ln, window, cx);
                                     }
                                 }))
-                                .child(render_row_text(
-                                    if is_omit { String::new() } else { row.text },
-                                    if is_omit { None } else { parts },
-                                ))
-                                .when(is_seam, |row| {
+                                .child(render_row_text(text, parts))
+                                .when(rows.is_seam(i), |row| {
                                     row.child(seam_hairline(seam_color))
                                 })
                         }))
@@ -1615,13 +1506,10 @@ fn code_pane(
         )
 }
 
-fn center_gutter(
-    display: &DisplayRows,
-    view: &DiffView,
-    cx: &mut Context<DiffView>,
-) -> impl IntoElement {
+fn center_gutter(layout: &Layout, view: &DiffView, cx: &mut Context<DiffView>) -> Stateful<Div> {
     let placed = view.placed.clone();
-    let ln_w = ln_col_width(line_number_digits(display));
+    let ln_w = ln_col_width(line_number_digits(layout));
+    let row_h = view.row_h();
     div()
         .id("gutter")
         .relative()
@@ -1636,36 +1524,9 @@ fn center_gutter(
                 cx.notify();
             }
         }))
-        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-            let y = f32::from(event.position.y);
-            let copy = this
-                .hover_bands
-                .iter()
-                .find(|band| y >= band.top && y <= band.bottom)
-                .map(|band| band.copy.clone());
-            if this.hover_copy != copy {
-                this.hover_copy = copy;
-                cx.notify();
-            }
-        }))
-        .child(ln_col(
-            true,
-            &display.old_rows,
-            view.applied_old,
-            view.row_h(),
-            ln_w,
-            &view.old_seam_rows,
-            false,
-        ))
-        .child(ln_col(
-            false,
-            &display.new_rows,
-            view.applied_new,
-            view.row_h(),
-            ln_w,
-            &view.new_seam_rows,
-            false,
-        ))
+        .on_mouse_move(cx.listener(DiffView::on_gutter_move))
+        .child(ln_col(true, &layout.old, view.applied_old, row_h, ln_w, false))
+        .child(ln_col(false, &layout.new, view.applied_new, row_h, ln_w, false))
         .child(
             canvas(
                 |_, _, _| (),
@@ -1680,35 +1541,18 @@ fn center_gutter(
             .left_0()
             .size_full(),
         )
-        .child(ln_col(
-            true,
-            &display.old_rows,
-            view.applied_old,
-            view.row_h(),
-            ln_w,
-            &[],
-            true,
-        ))
-        .child(ln_col(
-            false,
-            &display.new_rows,
-            view.applied_new,
-            view.row_h(),
-            ln_w,
-            &[],
-            true,
-        ))
+        .child(ln_col(true, &layout.old, view.applied_old, row_h, ln_w, true))
+        .child(ln_col(false, &layout.new, view.applied_new, row_h, ln_w, true))
 }
 
 fn ln_col(
     left: bool,
-    rows: &[DisplayRow],
+    rows: &SideLayout,
     scroll_top: f32,
     row_h: f32,
     col_w: f32,
-    seams: &[u32],
     labels_only: bool,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let id = if labels_only {
         if left { "ln-left-text" } else { "ln-right-text" }
     } else if left {
@@ -1716,8 +1560,6 @@ fn ln_col(
     } else {
         "ln-right"
     };
-    let rows = rows.to_vec();
-    let seams = seams.to_vec();
     let seam_color = if left { theme::add_bg() } else { theme::del_bg() };
     div()
         .id(id)
@@ -1733,17 +1575,17 @@ fn ln_col(
         .text_color(theme::faint())
         .when(left, |col| col.text_right().pr_1())
         .when(!left, |col| col.pl_1())
-        .children(rows.into_iter().enumerate().map(move |(i, row)| {
+        .children(rows.iter_rows().enumerate().map(|(i, row)| {
             let ln_id = if left {
                 (if labels_only { "ln-lt" } else { "ln-l" }, i)
             } else {
                 (if labels_only { "ln-rt" } else { "ln-r" }, i)
             };
-            let label = match row.kind {
-                RowKind::Omit { .. } => String::new(),
-                _ => row.ln.to_string(),
+            let label = match row {
+                Row::Line(line) => line.ln.to_string(),
+                Row::Omit(_) => String::new(),
             };
-            let is_seam = seams.iter().any(|s| *s as usize == i);
+            let is_seam = !labels_only && rows.is_seam(i);
             div()
                 .id(ln_id)
                 .relative()
@@ -1751,11 +1593,12 @@ fn ln_col(
                 .h(px(row_h))
                 .whitespace_nowrap()
                 .overflow_hidden()
-                .when(!labels_only, |cell| cell.bg(kind_bg(row.kind)))
+                .when(!labels_only, |cell| cell.bg(kind_bg(row_kind(row))))
                 .child(label)
-                .when(is_seam && !labels_only, |cell| cell.child(seam_hairline(seam_color)))
+                .when(is_seam, |cell| cell.child(seam_hairline(seam_color)))
         }))
 }
+
 
 fn seam_hairline(color: gpui::Rgba) -> gpui::Div {
     div()
@@ -1903,21 +1746,7 @@ fn traffic_lights_space() -> Option<Div> {
     None
 }
 
-fn row_at(rows: &[DisplayRow], scroll_top: f32, anchor: f32, row_h: f32) -> Option<usize> {
-    if rows.is_empty() || row_h <= 0. {
-        return None;
-    }
-    let i = ((scroll_top + anchor) / row_h).floor() as isize;
-    if i < 0 {
-        Some(0)
-    } else if i as usize >= rows.len() {
-        Some(rows.len() - 1)
-    } else {
-        Some(i as usize)
-    }
-}
-
-fn nearest_hunk_index(s_rows: f32, lands: &[crate::domain::HunkLand]) -> Option<usize> {
+fn nearest_hunk_index(s_rows: f32, lands: &[HunkLand]) -> Option<usize> {
     if lands.is_empty() {
         return None;
     }
@@ -1932,90 +1761,32 @@ fn nearest_hunk_index(s_rows: f32, lands: &[crate::domain::HunkLand]) -> Option<
     Some(idx)
 }
 
-fn scroll_s_for_target(
-    target: HunkJumpTarget,
-    old_rows: &[DisplayRow],
-    new_rows: &[DisplayRow],
-    knots: &[ScrollKnot],
-    row_h: f32,
-    current_s: f32,
-) -> f32 {
-    let rows = if target.side == Side::Old {
-        old_rows
-    } else {
-        new_rows
-    };
-    let Some(i) = rows
-        .iter()
-        .position(|r| r.ln == target.ln && !matches!(r.kind, RowKind::Omit { .. }))
-    else {
-        return current_s;
-    };
-    s_from(
-        target.side == Side::Old,
-        i as f32 * row_h,
-        knots,
-        row_h,
-        current_s,
-    )
+/// Row text per visual row, shared so a frame clones a pointer, not the line.
+fn row_texts(side: &SideLayout) -> Vec<SharedString> {
+    side.iter_rows()
+        .map(|row| match row {
+            Row::Line(line) => SharedString::from(side.text(line).to_string()),
+            Row::Omit(_) => SharedString::default(),
+        })
+        .collect()
 }
 
-fn replace_side_marks(left: bool, display: &DisplayRows) -> Vec<Option<Vec<TokenPart>>> {
-    let n = if left {
-        display.old_rows.len()
-    } else {
-        display.new_rows.len()
-    };
-    let mut marks = vec![None; n];
-    for bridge in &display.bridges {
-        let Bridge::Replace {
-            old_from,
-            old_to,
-            new_from,
-            new_to,
-            ..
-        } = *bridge
-        else {
-            continue;
-        };
-        let olds: Vec<&str> = display.old_rows[old_from as usize..old_to as usize]
-            .iter()
-            .map(|r| r.text.as_str())
-            .collect();
-        let news: Vec<&str> = display.new_rows[new_from as usize..new_to as usize]
-            .iter()
-            .map(|r| r.text.as_str())
-            .collect();
-        let (old_m, new_m) = replace_marks(&olds, &news);
-        if left {
-            for (i, parts) in old_m.into_iter().enumerate() {
-                marks[old_from as usize + i] = Some(parts);
-            }
-        } else {
-            for (i, parts) in new_m.into_iter().enumerate() {
-                marks[new_from as usize + i] = Some(parts);
-            }
-        }
-    }
-    marks
-}
-
-fn render_row_text(text: String, parts: Option<Vec<TokenPart>>) -> impl IntoElement {
+fn render_row_text(text: SharedString, parts: Option<&[TokenPart]>) -> gpui::AnyElement {
     match parts {
         Some(parts) if parts.iter().any(|p| p.changed) => div()
             .flex()
             .flex_row()
             .items_center()
             .overflow_hidden()
-            .children(parts.into_iter().map(|p| {
+            .children(parts.iter().map(|p| {
                 if p.changed {
                     div()
                         .bg(theme::mod_chg())
                         .rounded(px(2.))
-                        .child(p.text)
+                        .child(p.text.clone())
                         .into_any_element()
                 } else {
-                    div().child(p.text).into_any_element()
+                    div().child(p.text.clone()).into_any_element()
                 }
             }))
             .into_any_element(),
@@ -2023,264 +1794,20 @@ fn render_row_text(text: String, parts: Option<Vec<TokenPart>>) -> impl IntoElem
     }
 }
 
-fn kind_bg(kind: RowKind) -> gpui::Rgba {
+fn kind_bg(kind: Option<LineKind>) -> gpui::Rgba {
     match kind {
-        RowKind::Replace => theme::mod_bg(),
-        RowKind::Insert => theme::add_bg(),
-        RowKind::Delete => theme::del_bg(),
-        RowKind::Equal | RowKind::Omit { .. } => theme::white(),
+        Some(LineKind::Replace) => theme::mod_bg(),
+        Some(LineKind::Insert) => theme::add_bg(),
+        Some(LineKind::Delete) => theme::del_bg(),
+        Some(LineKind::Equal) | None => theme::white(),
     }
 }
 
-/// Viewport Y of an empty side's only seam. A short opposite file cannot scroll
-/// its last line down to the one-third anchor, so the seam sits on that line.
-fn empty_seam(other_n: usize, view_h: f32, row_h: f32) -> f32 {
-    let anchor = view_h / 3.;
-    if other_n == 0 {
-        return anchor;
+fn row_kind(row: Row<'_>) -> Option<LineKind> {
+    match row {
+        Row::Line(line) => Some(line.kind),
+        Row::Omit(_) => None,
     }
-    ((other_n as f32 - 1.) * row_h).min(anchor)
-}
-
-fn content_pad(n: usize, view_h: f32, row_h: f32) -> f32 {
-    if n == 0 || view_h < 1. {
-        return 0.;
-    }
-    let anchor = view_h / 3.;
-    (view_h - anchor - row_h).max(0.)
-}
-
-fn max_scroll(n: usize, anchor: f32, row_h: f32) -> f32 {
-    if n == 0 {
-        0.
-    } else {
-        ((n as f32 - 1.) * row_h - anchor).max(0.)
-    }
-}
-
-fn track(content_y: f32, n: usize, anchor: f32, row_h: f32) -> f32 {
-    (content_y - anchor).clamp(0., max_scroll(n, anchor, row_h))
-}
-
-fn content_from_scroll(scroll_top: f32, n: usize, anchor: f32, row_h: f32) -> f32 {
-    if n == 0 || scroll_top <= 0. {
-        return 0.;
-    }
-    let max = max_scroll(n, anchor, row_h);
-    if scroll_top >= max - 0.5 {
-        n as f32 * row_h
-    } else {
-        scroll_top + anchor
-    }
-}
-
-fn interp(s: f32, knots: &[ScrollKnot], row_h: f32) -> (f32, f32) {
-    let Some(first) = knots.first() else {
-        return (0., 0.);
-    };
-    if s <= first.s as f32 * row_h {
-        return (first.old_y as f32 * row_h, first.new_y as f32 * row_h);
-    }
-    let last = knots[knots.len() - 1];
-    if s >= last.s as f32 * row_h {
-        return (last.old_y as f32 * row_h, last.new_y as f32 * row_h);
-    }
-    for i in 1..knots.len() {
-        let a = knots[i - 1];
-        let b = knots[i];
-        let a_s = a.s as f32 * row_h;
-        let b_s = b.s as f32 * row_h;
-        if s <= b_s {
-            let t = if b_s == a_s { 0. } else { (s - a_s) / (b_s - a_s) };
-            let old = (a.old_y as f32 + t * (b.old_y as f32 - a.old_y as f32)) * row_h;
-            let new = (a.new_y as f32 + t * (b.new_y as f32 - a.new_y as f32)) * row_h;
-            return (old, new);
-        }
-    }
-    (last.old_y as f32 * row_h, last.new_y as f32 * row_h)
-}
-
-fn s_from(old_side: bool, content_px: f32, knots: &[ScrollKnot], row_h: f32, current_s: f32) -> f32 {
-    let (cur_old, cur_new) = interp(current_s, knots, row_h);
-    let cur = if old_side { cur_old } else { cur_new };
-    if (cur - content_px).abs() < 0.5 {
-        return current_s;
-    }
-    let content_rows = content_px / row_h;
-    for i in 1..knots.len() {
-        let a = knots[i - 1];
-        let b = knots[i];
-        let (a_y, b_y) = if old_side {
-            (a.old_y, b.old_y)
-        } else {
-            (a.new_y, b.new_y)
-        };
-        if b_y > a_y {
-            let a_yf = a_y as f32;
-            let b_yf = b_y as f32;
-            if content_rows >= a_yf && content_rows <= b_yf {
-                let t = (content_rows - a_yf) / (b_yf - a_yf);
-                return (a.s as f32 + t * (b.s as f32 - a.s as f32)) * row_h;
-            }
-        }
-    }
-    let end = knots[knots.len() - 1];
-    let end_y = if old_side { end.old_y } else { end.new_y };
-    if content_rows >= end_y as f32 {
-        end.s as f32 * row_h
-    } else {
-        0.
-    }
-}
-
-fn gap_intervals(
-    old_pane: bool,
-    bridges: &[Bridge],
-    old_n: usize,
-    new_n: usize,
-    old_scroll: f32,
-    new_scroll: f32,
-    view_h: f32,
-    row_h: f32,
-) -> Vec<(f32, f32)> {
-    let n = if old_pane { old_n } else { new_n };
-    if n == 0 && view_h > 0. {
-        return vec![(0., view_h)];
-    }
-    let mut out = Vec::new();
-    for bridge in bridges {
-        let (y0, y1, cover_scroll, cover_n) = match bridge {
-            Bridge::Insert { new_from, new_to, .. } if old_pane => (
-                *new_from as f32 * row_h - new_scroll,
-                *new_to as f32 * row_h - new_scroll,
-                old_scroll,
-                old_n,
-            ),
-            Bridge::Delete { old_from, old_to, .. } if !old_pane => (
-                *old_from as f32 * row_h - old_scroll,
-                *old_to as f32 * row_h - old_scroll,
-                new_scroll,
-                new_n,
-            ),
-            _ => continue,
-        };
-        let covered = (-cover_scroll, cover_n as f32 * row_h - cover_scroll);
-        for (a, b) in subtract_span((y0, y1), covered) {
-            let top = a.max(0.);
-            let bot = b.min(view_h);
-            if bot - top > 0.5 {
-                out.push((top, bot));
-            }
-        }
-    }
-    out
-}
-
-fn subtract_span(span: (f32, f32), cover: (f32, f32)) -> Vec<(f32, f32)> {
-    let (a, b) = span;
-    let (c, d) = cover;
-    if b <= a {
-        return Vec::new();
-    }
-    if d <= c || b <= c || a >= d {
-        return vec![(a, b)];
-    }
-    let mut parts = Vec::new();
-    if a < c {
-        parts.push((a, c.min(b)));
-    }
-    if b > d {
-        parts.push((d.max(a), b));
-    }
-    parts
-}
-
-fn place_bridge(
-    bridge: &Bridge,
-    old_n: usize,
-    new_n: usize,
-    old_scroll: f32,
-    new_scroll: f32,
-    old_pane: f32,
-    new_pane: f32,
-    view_h: f32,
-    row_h: f32,
-    x_l: f32,
-    x_r: f32,
-) -> Option<PlacedBridge> {
-    let content_y = |rows: f32, scroll: f32, pane: f32| pane + rows * row_h - scroll;
-    let edge_y = |rows: f32, n: usize, other_n: usize, scroll: f32, pane: f32| {
-        if n == 0 {
-            pane + empty_seam(other_n, view_h, row_h)
-        } else {
-            content_y(rows, scroll, pane)
-        }
-    };
-    let (kind, y_l0, y_l1, y_r0, y_r1) = match *bridge {
-        Bridge::Insert {
-            old_seam,
-            new_from,
-            new_to,
-            ..
-        } => {
-            if new_to <= new_from {
-                return None;
-            }
-            let seam = edge_y(old_seam as f32, old_n, new_n, old_scroll, old_pane);
-            (
-                RowKind::Insert,
-                seam,
-                seam,
-                content_y(new_from as f32, new_scroll, new_pane),
-                content_y(new_to as f32, new_scroll, new_pane),
-            )
-        }
-        Bridge::Delete {
-            old_from,
-            old_to,
-            new_seam,
-            ..
-        } => {
-            if old_to <= old_from {
-                return None;
-            }
-            let seam = edge_y(new_seam as f32, new_n, old_n, new_scroll, new_pane);
-            (
-                RowKind::Delete,
-                content_y(old_from as f32, old_scroll, old_pane),
-                content_y(old_to as f32, old_scroll, old_pane),
-                seam,
-                seam,
-            )
-        }
-        Bridge::Replace {
-            old_from,
-            old_to,
-            new_from,
-            new_to,
-            ..
-        } => {
-            if old_to <= old_from && new_to <= new_from {
-                return None;
-            }
-            (
-                RowKind::Replace,
-                edge_y(old_from as f32, old_n, new_n, old_scroll, old_pane),
-                edge_y(old_to as f32, old_n, new_n, old_scroll, old_pane),
-                edge_y(new_from as f32, new_n, old_n, new_scroll, new_pane),
-                edge_y(new_to as f32, new_n, old_n, new_scroll, new_pane),
-            )
-        }
-    };
-    Some(PlacedBridge {
-        kind,
-        x_l,
-        x_r,
-        y_l0,
-        y_l1,
-        y_r0,
-        y_r1,
-    })
 }
 
 fn paint_bridges(window: &mut Window, placed: &[PlacedBridge], ln_w: f32) {
@@ -2297,7 +1824,7 @@ fn paint_bridges(window: &mut Window, placed: &[PlacedBridge], ln_w: f32) {
         }
         path.close();
         if let Ok(path) = path.build() {
-            window.paint_path(path, kind_bg(bridge.kind));
+            window.paint_path(path, kind_bg(Some(bridge.kind)));
         }
     }
 }
@@ -2311,7 +1838,7 @@ fn pinch_bezier(path: &mut PathBuilder, bridge: &PlacedBridge, ln_w: f32) {
     let mid_r = x_r - ln_w;
     let mw = (mid_r - mid_l).max(8.);
     match bridge.kind {
-        RowKind::Delete => {
+        LineKind::Delete => {
             let y0 = bridge.y_l0;
             let y1 = bridge.y_l1;
             let top = bridge.y_r0;
@@ -2333,7 +1860,7 @@ fn pinch_bezier(path: &mut PathBuilder, bridge: &PlacedBridge, ln_w: f32) {
             );
             path.line_to(point(px(x_l), px(y1)));
         }
-        RowKind::Insert => {
+        LineKind::Insert => {
             let top = bridge.y_l0;
             let bot = bridge.y_l0 + 2.;
             let y0 = bridge.y_r0;
