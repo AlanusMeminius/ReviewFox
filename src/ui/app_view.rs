@@ -1003,39 +1003,21 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
         MainState::Ready(loaded) => Some(loaded.comparison.repository.path().to_path_buf()),
         MainState::Empty | MainState::Error(_) => None,
     };
-    let recent_row = workspace_store::last_entry(&view.store).map(|e| {
-        let active = active_path.as_ref() == Some(&e.path);
-        (
-            e.path.clone(),
-            Repository::new(e.path.clone()).display_name(),
-            e.path.display().to_string(),
-            active,
-        )
-    });
-    let pinned_rows: Vec<(PathBuf, String, String, bool)> = workspace_store::pinned_entries(&view.store)
+    let gitlab_base = settings_store::effective_base_url(&settings_store::load_file());
+    let row = |path: PathBuf| {
+        let active = active_path.as_ref() == Some(&path);
+        let gitlab = gitlab::repo_matches_settings_host(&path, &gitlab_base);
+        let name = Repository::new(path.clone()).display_name();
+        (path, name, active, gitlab)
+    };
+    let pinned_rows: Vec<(PathBuf, String, bool, bool)> = workspace_store::pinned_entries(&view.store)
         .into_iter()
-        .map(|e| {
-            let active = active_path.as_ref() == Some(&e.path);
-            (
-                e.path.clone(),
-                Repository::new(e.path.clone()).display_name(),
-                e.path.display().to_string(),
-                active,
-            )
-        })
+        .map(|e| row(e.path.clone()))
         .collect();
     let pin_section = (!pinned_rows.is_empty()).then_some(pinned_rows);
-    let repos: Vec<(PathBuf, String, String, bool)> = workspace_store::repository_entries(&view.store)
+    let repos: Vec<(PathBuf, String, bool, bool)> = workspace_store::repository_entries(&view.store)
         .into_iter()
-        .map(|e| {
-            let active = active_path.as_ref() == Some(&e.path);
-            (
-                e.path.clone(),
-                Repository::new(e.path.clone()).display_name(),
-                e.path.display().to_string(),
-                active,
-            )
-        })
+        .map(|e| row(e.path.clone()))
         .collect();
 
     div()
@@ -1077,18 +1059,6 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
                     .pt_1()
                     .track_scroll(&scroll)
                     .overflow_y_scroll()
-                    .child(
-                        div()
-                            .px_2()
-                            .pb_1()
-                            .text_xs()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme::faint())
-                            .child("Recent"),
-                    )
-                    .children(recent_row.into_iter().map(|(path, name, path_str, active)| {
-                        sidebar_repo_row("recent-repo", path, name, path_str, active, None, cx)
-                    }))
                     .when_some(pin_section, |d, pinned_rows| {
                         d.child(
                             div()
@@ -1101,13 +1071,13 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
                                 .child("Pin"),
                         )
                         .children(pinned_rows.into_iter().enumerate().map(
-                            |(i, (path, name, path_str, active))| {
+                            |(i, (path, name, active, gitlab))| {
                                 sidebar_repo_row(
                                     ("pin-repo", i),
                                     path,
                                     name,
-                                    path_str,
                                     active,
+                                    gitlab,
                                     Some(RepoMenuKind::Pin),
                                     cx,
                                 )
@@ -1124,17 +1094,19 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
                             .text_color(theme::faint())
                             .child("Repositories"),
                     )
-                    .children(repos.into_iter().enumerate().map(|(i, (path, name, path_str, active))| {
-                        sidebar_repo_row(
-                            ("repo", i),
-                            path,
-                            name,
-                            path_str,
-                            active,
-                            Some(RepoMenuKind::Repositories),
-                            cx,
-                        )
-                    })),
+                    .children(repos.into_iter().enumerate().map(
+                        |(i, (path, name, active, gitlab))| {
+                            sidebar_repo_row(
+                                ("repo", i),
+                                path,
+                                name,
+                                active,
+                                gitlab,
+                                Some(RepoMenuKind::Repositories),
+                                cx,
+                            )
+                        },
+                    )),
                 sb,
             )
         })
@@ -1144,13 +1116,19 @@ fn sidebar_repo_row(
     id: impl Into<gpui::ElementId>,
     path: PathBuf,
     name: String,
-    path_str: String,
     active: bool,
+    gitlab: bool,
     menu: Option<RepoMenuKind>,
     cx: &mut Context<AppView>,
 ) -> gpui::AnyElement {
     let path_click = path.clone();
     let path_menu = path.clone();
+    let icon = if gitlab { "gitlab.svg" } else { "folder.svg" };
+    let icon_color = if active {
+        theme::on_sidebar_selected()
+    } else {
+        theme::muted()
+    };
     div()
         .id(id)
         .mb_1()
@@ -1159,9 +1137,12 @@ fn sidebar_repo_row(
         .rounded_lg()
         .min_w(px(0.))
         .overflow_hidden()
+        .flex()
+        .items_center()
+        .gap_2()
         .cursor_pointer()
-        .when(active, |d| d.bg(theme::capsule()))
-        .hover(|d| d.bg(theme::hover()))
+        .when(active, |d| d.bg(theme::sidebar_selected()))
+        .when(!active, |d| d.hover(|d| d.bg(theme::hover())))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.select_repo(path_click.clone(), cx);
         }))
@@ -1174,15 +1155,11 @@ fn sidebar_repo_row(
             )
         })
         .child(
-            div()
-                .min_w(px(0.))
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .text_sm()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme::text())
-                .child(name),
+            svg()
+                .size(px(16.))
+                .flex_none()
+                .path(icon)
+                .text_color(icon_color),
         )
         .child(
             div()
@@ -1190,9 +1167,14 @@ fn sidebar_repo_row(
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
-                .text_xs()
-                .text_color(theme::muted())
-                .child(path_str),
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(if active {
+                    theme::on_sidebar_selected()
+                } else {
+                    theme::text()
+                })
+                .child(name),
         )
         .into_any_element()
 }

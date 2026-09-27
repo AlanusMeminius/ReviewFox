@@ -28,7 +28,7 @@ pub enum Axis {
     Vertical,
 }
 
-pub const MIN_SIDEBAR_WIDTH: f32 = 160.;
+pub const MIN_SIDEBAR_WIDTH: f32 = 140.;
 pub const MAX_SIDEBAR_WIDTH: f32 = 360.;
 pub const MIN_COMMITS_WIDTH: f32 = 280.;
 pub const MIN_FILES_WIDTH: f32 = 200.;

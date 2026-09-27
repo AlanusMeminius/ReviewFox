@@ -9,7 +9,7 @@ A local Git worktree root identified by its canonical absolute path (symlinks re
 _Avoid_: project, clone, repo path (unspecified canonicalization), working copy
 
 **Workspace**:
-The user's current place in the app: which Repository is open and which Entry is selected; not Comparison identity (OIDs). Survives relaunch as a set of Workspaces plus which one is last (Recent in the UI) and which are pinned; last is opened on launch.
+The user's current place in the app: which Repository is open and which Entry is selected; not Comparison identity (OIDs). Survives relaunch as a set of Workspaces plus which one is last (persisted only; not a sidebar section) and which are pinned; last is opened on launch.
 _Avoid_: session, last opened (as a domain term), MRU
 
 **Entry**:

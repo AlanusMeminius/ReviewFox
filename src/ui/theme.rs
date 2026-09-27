@@ -2,7 +2,7 @@
 
 use gpui::{BoxShadow, Hsla, Pixels, Rgba, hsla, point, px, rgb};
 
-pub const SIDEBAR_WIDTH: Pixels = gpui::px(220.);
+pub const SIDEBAR_WIDTH: Pixels = gpui::px(188.);
 pub const FILES_WIDTH: Pixels = gpui::px(280.);
 pub const DIFF_TREE_WIDTH: Pixels = gpui::px(200.);
 pub const CHROME_HEIGHT: Pixels = gpui::px(36.);
@@ -85,8 +85,17 @@ pub fn sidebar() -> Rgba {
 pub fn hover() -> Rgba {
     rgb(0xe9ebef)
 }
+/// Chrome pill fill (branch / MR toggles) — neutral gray, not selection.
 pub fn capsule() -> Rgba {
     rgb(0xe5e7eb)
+}
+/// Sidebar active row — same blue as the app icon; chroma survives vibrancy.
+pub fn sidebar_selected() -> Rgba {
+    accent()
+}
+/// Primary label on [`sidebar_selected`].
+pub fn on_sidebar_selected() -> Rgba {
+    white()
 }
 pub fn range() -> Rgba {
     rgb(0xf1f5ff)

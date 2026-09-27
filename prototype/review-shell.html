@@ -24,7 +24,7 @@
       --surface: #ffffff;
       --sidebar: #f4f5f7;
       --hover: #e9ebef;
-      --selected: #e5e7eb;
+      --selected: #2457d6;
       --selected-soft: #f1f5ff;
       --accent: #2457d6;
       --add: #1a7f4b;
@@ -140,6 +140,9 @@
     .A-repo.active {
       background: var(--selected);
     }
+    .A-repo.active .name { color: #fff; }
+    .A-repo.active .path { color: rgba(255,255,255,.78); }
+    .A-repo.active:hover { background: var(--selected); }
     .A-repo .name { font-size: 13px; font-weight: 500; color: var(--text); }
     .A-repo .path { font-size: 11px; color: var(--muted); }
 
