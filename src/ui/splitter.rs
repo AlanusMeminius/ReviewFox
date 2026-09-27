@@ -144,13 +144,14 @@ pub fn handle(
             .w(px(HANDLE_WIDTH))
             .h_full()
             .cursor_col_resize(),
-        // Trailing / vertical sit between white panes; fill so transparent
-        // window root doesn't punch through (macOS Sidebar frost path).
+        // Trailing is the Changes capsule's left-edge hit target — leave clear
+        // so the soft cast shadow is not covered by an opaque strip.
         Axis::HorizontalTrailing => el
             .w(px(HANDLE_WIDTH))
             .h_full()
-            .bg(theme::white())
             .cursor_col_resize(),
+        // Vertical sits between white panes inside the capsule; fill so a
+        // Transparent window root doesn't punch through the 5px seam.
         Axis::Vertical => el
             .h(px(HANDLE_WIDTH))
             .w_full()

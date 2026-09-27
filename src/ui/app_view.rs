@@ -951,6 +951,8 @@ impl Render for AppView {
                 ))
             })
             // Stage: commits full-bleed; Changes floats on top (capsule-changes A).
+            // White underlay fills inset gaps around the capsule (macOS window is
+            // Transparent — without this the bottom 8px under Changes punches through).
             .child(
                 div()
                     .id("stage")
@@ -959,6 +961,7 @@ impl Render for AppView {
                     .flex_1()
                     .min_w(px(splitter::MIN_COMMITS_WIDTH))
                     .overflow_hidden()
+                    .bg(theme::white())
                     .child(render_commits(self, cx))
                     .child(render_files(self, cx)),
             )
@@ -1239,20 +1242,24 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
         .unwrap_or_else(|| "Merge requests".into());
     let connection = view.gitlab_connection.borrow().clone();
     let show_gitlab = gitlab_chrome_visible(view);
-    // Definite right edge so text_ellipsis sees the pane width (same idea as
-    // overlay_flex absolute inset). Leave shadow clearance so the thumb does
-    // not sit under the Changes cast.
+    // Full-bleed white under the Changes capsule; content column inset by
+    // float_gap so text/scrollbar clear the cast (prototype stage padding).
     let float_gap = px(theme::changes_float_clearance(view.files_width));
 
     div()
         .id("commits")
         .absolute()
         .inset_0()
-        .right(float_gap)
-        .flex()
-        .flex_col()
         .bg(theme::white())
         .child(
+            div()
+                .id("commits-content")
+                .absolute()
+                .inset_0()
+                .right(float_gap)
+                .flex()
+                .flex_col()
+                .child(
             div()
                 .h(theme::CHROME_HEIGHT)
                 .flex_none()
@@ -1444,7 +1451,8 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
         })
         .when(view.mr_picker.is_some() && gitlab_chrome_visible(view), |d| {
             d.child(deferred(render_mr_picker(view, cx)))
-        })
+        }),
+        )
 }
 
 struct MrEntry {
@@ -2124,7 +2132,8 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
         .border_t_1()
         .border_color(theme::line())
         .bg(theme::white())
-        // Match capsule bottom radii (parent overflow clip alone still reads square).
+        // Parent overflow_hidden+rounded still paints square at the south edge in
+        // GPUI; match capsule radii on the footer so the bottom corners read round.
         .rounded_b(px(theme::CHANGES_RADIUS))
         .child(
             div()
