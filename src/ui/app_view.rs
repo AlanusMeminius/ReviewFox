@@ -1,14 +1,15 @@
 use gpui::{
-    anchored, deferred, App, ClickEvent, ClipboardItem, Context, Corner, Div, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    ParentElement, Pixels, Point, Render, StatefulInteractiveElement, Styled, TitlebarOptions,
-    Window, WindowBounds, WindowControlArea, WindowDecorations, WindowHandle, WindowOptions, div,
-    prelude::*, px, rgb, size, svg, Bounds,
+    anchored, canvas, deferred, ease_out_quint, Animation, AnimationExt, App, Bounds, ClickEvent,
+    ClipboardItem, Context, Corner, Div, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, Size,
+    StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds, WindowControlArea,
+    WindowDecorations, WindowHandle, WindowOptions, div, prelude::*, px, rgb, size, svg,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::domain::{Oid, PathStatus, Repository};
 use crate::git::{self, BranchBrowser, BranchInfo, CommitInfo};
@@ -38,6 +39,9 @@ pub struct AppView {
     diff_window: Option<WindowHandle<DiffView>>,
     branch_picker: Option<BranchPicker>,
     mr_picker: Option<MrPicker>,
+    /// Live window bounds of the chrome capsules (updated each frame via canvas).
+    branch_toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
+    mr_toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// In-memory MR Entry (list = GitLab commits; Comparison = diff_refs).
     mr_entry: Option<MrEntry>,
     gitlab_connection: Rc<RefCell<GitLabConnection>>,
@@ -115,6 +119,8 @@ impl AppView {
             diff_window: None,
             branch_picker: None,
             mr_picker: None,
+            branch_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
+            mr_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_entry: None,
             gitlab_connection,
             settings_window,
@@ -296,6 +302,12 @@ impl AppView {
 
     fn toggle_branch_picker(&mut self, cx: &mut Context<Self>) {
         self.mr_picker = None;
+        if self.branch_picker.is_some() {
+            self.branch_picker = None;
+            cx.notify();
+            return;
+        }
+        let bounds = self.branch_toggle_bounds.get();
         let (branches, current) = match &self.state {
             MainState::Ready(loaded) => (
                 git::list_branches(loaded.comparison.repository.path()).unwrap_or_default(),
@@ -303,7 +315,7 @@ impl AppView {
             ),
             MainState::Empty | MainState::Error(_) => (Vec::new(), String::new()),
         };
-        self.branch_picker = Some(BranchPicker::new(branches, &current));
+        self.branch_picker = Some(BranchPicker::new(branches, &current, bounds));
         cx.notify();
     }
 
@@ -319,17 +331,21 @@ impl AppView {
             return;
         }
         self.branch_picker = None;
+        let bounds = self.mr_toggle_bounds.get();
 
         let repo_path = match &self.state {
             MainState::Ready(loaded) => loaded.comparison.repository.path().to_path_buf(),
             MainState::Empty | MainState::Error(_) => {
-                self.mr_picker = Some(MrPicker::failed("Open a repository to list merge requests."));
+                self.mr_picker = Some(MrPicker::failed(
+                    "Open a repository to list merge requests.",
+                    bounds,
+                ));
                 cx.notify();
                 return;
             }
         };
 
-        self.mr_picker = Some(MrPicker::loading());
+        self.mr_picker = Some(MrPicker::loading(bounds));
         cx.notify();
 
         let base = settings_store::effective_base_url(&settings_store::load_file());
@@ -355,7 +371,7 @@ impl AppView {
 
             let picker = match project {
                 ResolveProjectResult::Err(e) => {
-                    MrPicker::failed(gitlab::format_resolve_project_error(&e))
+                    MrPicker::failed(gitlab::format_resolve_project_error(&e), Bounds::default())
                 }
                 ResolveProjectResult::Ok(identity) => {
                     let list_result = cx
@@ -371,16 +387,23 @@ impl AppView {
                         })
                         .await;
                     match list_result {
-                        ListMergeRequestsResult::Ok(mrs) => MrPicker::ready(mrs, selected_iid),
-                        ListMergeRequestsResult::Err(e) => {
-                            MrPicker::failed(gitlab::format_list_merge_requests_error(&e))
+                        ListMergeRequestsResult::Ok(mrs) => {
+                            MrPicker::ready(mrs, selected_iid, Bounds::default())
                         }
+                        ListMergeRequestsResult::Err(e) => MrPicker::failed(
+                            gitlab::format_list_merge_requests_error(&e),
+                            Bounds::default(),
+                        ),
                     }
                 }
             };
 
             let _ = this.update(cx, |view, cx| {
-                view.mr_picker = Some(picker);
+                let Some(open) = &view.mr_picker else {
+                    return;
+                };
+                let bounds = open.bounds;
+                view.mr_picker = Some(picker.with_bounds(bounds));
                 cx.notify();
             });
         })
@@ -966,6 +989,12 @@ impl Render for AppView {
                     .child(render_files(self, cx)),
             )
             .when(self.repo_menu.is_some(), |d| d.child(render_repo_menu(self, cx)))
+            .when(self.branch_picker.is_some(), |d| {
+                d.child(deferred(render_branch_picker(self, cx)))
+            })
+            .when(self.mr_picker.is_some() && gitlab_chrome_visible(self), |d| {
+                d.child(deferred(render_mr_picker(self, cx)))
+            })
     }
 }
 
@@ -1275,19 +1304,33 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                         .child(open_repo_button("open-repo-collapsed", cx))
                 })
                 .when(!view.repos_collapsed, |row| row.px_3())
-                .child(
+                .child({
+                    let track = view.branch_toggle_bounds.clone();
+                    let open = view.branch_picker.is_some();
                     div()
                         .id("branch-picker-toggle")
-                        .px_1()
-                        .rounded_md()
+                        .relative()
+                        .px_2()
+                        .py_1()
+                        .rounded_full()
+                        .bg(theme::capsule())
                         .flex()
                         .items_center()
                         .gap_1()
                         .min_w(px(0.))
                         .overflow_hidden()
                         .cursor_pointer()
-                        .hover(|d| d.bg(theme::hover()))
+                        .when(open, |d| d.opacity(0.))
+                        .when(!open, |d| d.hover(|d| d.bg(theme::hover())))
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_branch_picker(cx)))
+                        .child(
+                            canvas(
+                                move |bounds, _, _| track.set(bounds),
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .size_full(),
+                        )
                         .child(
                             svg()
                                 .size_4()
@@ -1304,14 +1347,19 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                                 .text_xs()
                                 .text_color(theme::text())
                                 .child(branch),
-                        ),
-                )
+                        )
+                })
                 .when(show_gitlab, |row| {
+                    let track = view.mr_toggle_bounds.clone();
+                    let open = view.mr_picker.is_some();
                     row.child(
                         div()
                             .id("mr-picker-toggle")
-                            .px_1()
-                            .rounded_md()
+                            .relative()
+                            .px_2()
+                            .py_1()
+                            .rounded_full()
+                            .bg(theme::capsule())
                             .flex()
                             .items_center()
                             .gap_1()
@@ -1319,8 +1367,17 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                             .min_w(px(0.))
                             .overflow_hidden()
                             .cursor_pointer()
-                            .hover(|d| d.bg(theme::hover()))
+                            .when(open, |d| d.opacity(0.))
+                            .when(!open, |d| d.hover(|d| d.bg(theme::hover())))
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_mr_picker(cx)))
+                            .child(
+                                canvas(
+                                    move |bounds, _, _| track.set(bounds),
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .size_full(),
+                            )
                             .child(
                                 div()
                                     .min_w(px(0.))
@@ -1443,14 +1500,6 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                 )
                 .into_any_element()
             }
-        })
-        .when(view.branch_picker.is_some(), |d| {
-            // Deferred so the popover paints above the commit list's absolute
-            // scroll layer (sibling order alone is not enough).
-            d.child(deferred(render_branch_picker(view, cx)))
-        })
-        .when(view.mr_picker.is_some() && gitlab_chrome_visible(view), |d| {
-            d.child(deferred(render_mr_picker(view, cx)))
         }),
         )
 }
@@ -1647,65 +1696,28 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
         return div().into_any_element();
     };
 
+    const WIDTH: f32 = 380.;
+    const HEIGHT: f32 = 420.;
+    let origin = picker.bounds.origin;
+    let seed = picker.bounds.size;
+
     // Match branch picker: fixed size, one overlay_box, filter + rows in the same scroll.
-    match &picker.body {
+    let body = match &picker.body {
         MrPickerBody::Loading => div()
-            .id("mr-picker")
-            .absolute()
-            .top(theme::CHROME_HEIGHT)
-            .left(px(140.))
-            .w(px(380.))
-            .h(px(420.))
-            .p_1()
-            .bg(theme::white())
-            .border_1()
-            .border_color(theme::line())
-            .rounded_lg()
-            .shadow_lg()
-            .occlude()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.mr_picker = None;
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .size_full()
-                    .bg(theme::white())
-                    .px_2()
-                    .py_3()
-                    .text_sm()
-                    .text_color(theme::muted())
-                    .child("Loading open merge requests…"),
-            )
+            .size_full()
+            .px_2()
+            .py_3()
+            .text_sm()
+            .text_color(theme::muted())
+            .child("Loading open merge requests…")
             .into_any_element(),
         MrPickerBody::Failed(msg) => div()
-            .id("mr-picker")
-            .absolute()
-            .top(theme::CHROME_HEIGHT)
-            .left(px(140.))
-            .w(px(380.))
-            .h(px(420.))
-            .p_1()
-            .bg(theme::white())
-            .border_1()
-            .border_color(theme::line())
-            .rounded_lg()
-            .shadow_lg()
-            .occlude()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.mr_picker = None;
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .size_full()
-                    .bg(theme::white())
-                    .px_2()
-                    .py_3()
-                    .text_sm()
-                    .text_color(rgb(0xb42318))
-                    .child(msg.clone()),
-            )
+            .size_full()
+            .px_2()
+            .py_3()
+            .text_sm()
+            .text_color(rgb(0xb42318))
+            .child(msg.clone())
             .into_any_element(),
         MrPickerBody::Ready {
             query,
@@ -1719,173 +1731,239 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
             } else {
                 format!("Filter: {query}")
             };
-            div()
-                .id("mr-picker")
-                .absolute()
-                .top(theme::CHROME_HEIGHT)
-                .left(px(140.))
-                .w(px(380.))
-                .h(px(420.))
-                .p_1()
-                .bg(theme::white())
-                .border_1()
-                .border_color(theme::line())
-                .rounded_lg()
-                .shadow_lg()
-                .occlude()
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.mr_picker = None;
-                    cx.notify();
-                }))
-                .child(scrollbar::overlay_box(
-                    div()
-                        .id("mr-picker-scroll")
-                        .size_full()
-                        .bg(theme::white())
-                        .track_scroll(&scroll)
-                        .overflow_y_scroll()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
+            // Explicit px size (not size_full %): percentage width under animated/anchored
+            // parents re-triggers the text_ellipsis → few-glyphs collapse (a59dbf2).
+            let inner_w = WIDTH - 8.;
+            let inner_h = HEIGHT - 8.;
+            picker_scroll_area(
+                "mr-picker-scroll",
+                inner_w,
+                inner_h,
+                div()
+                    .id("mr-picker-scroll")
+                    .w(px(inner_w))
+                    .h(px(inner_h))
+                    .bg(theme::white())
+                    .track_scroll(&scroll)
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .child(filter),
+                    )
+                    .when(matches.is_empty(), |d| {
+                        d.child(
                             div()
-                                .px_2()
-                                .py_1()
-                                .text_xs()
-                                .text_color(theme::muted())
-                                .child(filter),
-                        )
-                        .when(matches.is_empty(), |d| {
-                            d.child(
-                                div()
-                                    .px_3()
-                                    .py_2()
-                                    .text_sm()
-                                    .text_color(theme::muted())
-                                    .child("No matching merge requests."),
-                            )
-                        })
-                        .children(matches.iter().enumerate().map(|(i, mr)| {
-                            let select_mr = mr.clone();
-                            let title = format!("!{} · {}", mr.iid, mr.title);
-                            let branches =
-                                format!("{} → {}", mr.source_branch, mr.target_branch);
-                            div()
-                                .id(("mr", i))
                                 .px_3()
                                 .py_2()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .when(i == *selected, |d| d.bg(theme::range()))
-                                .hover(|d| d.bg(theme::hover()))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.select_mr(select_mr.clone(), cx);
-                                }))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(theme::text())
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .whitespace_nowrap()
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme::muted())
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .whitespace_nowrap()
-                                        .child(branches),
-                                )
-                        })),
-                    sb,
-                ))
-                .into_any_element()
+                                .text_sm()
+                                .text_color(theme::muted())
+                                .child("No matching merge requests."),
+                        )
+                    })
+                    .children(matches.iter().enumerate().map(|(i, mr)| {
+                        let select_mr = mr.clone();
+                        let title = format!("!{} · {}", mr.iid, mr.title);
+                        let branches =
+                            format!("{} → {}", mr.source_branch, mr.target_branch);
+                        div()
+                            .id(("mr", i))
+                            .w(px(inner_w))
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .when(i == *selected, |d| d.bg(theme::range()))
+                            .hover(|d| d.bg(theme::hover()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_mr(select_mr.clone(), cx);
+                            }))
+                            .child(picker_line(theme::text(), true, title))
+                            .child(picker_line(theme::muted(), false, branches))
+                    })),
+                sb,
+            )
+            .into_any_element()
         }
-    }
+    };
+
+    anchored()
+        .position(origin)
+        .anchor(Corner::TopLeft)
+        .child(picker_clip_shell(
+            "mr-picker",
+            "mr-picker-open",
+            seed,
+            WIDTH,
+            HEIGHT,
+            cx.listener(|this, _, _, cx| {
+                this.mr_picker = None;
+                cx.notify();
+            }),
+            body,
+        ))
+        .into_any_element()
 }
 
 fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let Some(picker) = &view.branch_picker else {
         return div().into_any_element();
     };
+    const WIDTH: f32 = 320.;
+    const HEIGHT: f32 = 420.;
+    let origin = picker.bounds.origin;
+    let seed = picker.bounds.size;
     let (scroll, sb) = scrollbar::vertical("branch-picker-sb", cx);
-    div()
-        .id("branch-picker")
-        .absolute()
-        .top(theme::CHROME_HEIGHT)
-        .left(px(4.))
-        .w(px(320.))
-        .h(px(420.))
-        .p_1()
-        .bg(theme::white())
-        .border_1()
-        .border_color(theme::line())
-        .rounded_lg()
-        .shadow_lg()
-        // block clicks from reaching the commit list beneath; close on outside click
-        .occlude()
-        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-            this.branch_picker = None;
-            cx.notify();
-        }))
-        .child(scrollbar::overlay_box(
-            div()
-                .id("branch-picker-scroll")
-                .size_full()
-                .bg(theme::white())
-                .track_scroll(&scroll)
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_xs()
-                        .text_color(theme::muted())
-                        .child(format!("Filter: {}", picker.query)),
-                )
-                .children(picker.matches.iter().enumerate().map(|(i, branch)| {
-                    let name = branch.name.clone();
-                    div()
-                        .id(("branch", i))
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .when(i == picker.selected, |d| d.bg(theme::range()))
-                        .hover(|d| d.bg(theme::hover()))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_branch(&name, cx);
-                        }))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme::text())
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(branch.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::muted())
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(format!(
-                                    "{} · {} · {}",
-                                    branch.tip.author, branch.tip.time_label, branch.tip.summary
-                                )),
-                        )
-                })),
-            sb,
+    let inner_w = WIDTH - 8.;
+    let inner_h = HEIGHT - 8.;
+    let body = picker_scroll_area(
+        "branch-picker-scroll",
+        inner_w,
+        inner_h,
+        div()
+            .id("branch-picker-scroll")
+            .w(px(inner_w))
+            .h(px(inner_h))
+            .bg(theme::white())
+            .track_scroll(&scroll)
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(theme::muted())
+                    .child(format!("Filter: {}", picker.query)),
+            )
+            .children(picker.matches.iter().enumerate().map(|(i, branch)| {
+                let name = branch.name.clone();
+                div()
+                    .id(("branch", i))
+                    .w(px(inner_w))
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(i == picker.selected, |d| d.bg(theme::range()))
+                    .hover(|d| d.bg(theme::hover()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_branch(&name, cx);
+                    }))
+                    .child(picker_line(theme::text(), true, branch.name.clone()))
+                    .child(picker_line(
+                        theme::muted(),
+                        false,
+                        format!(
+                            "{} · {} · {}",
+                            branch.tip.author, branch.tip.time_label, branch.tip.summary
+                        ),
+                    ))
+            })),
+        sb,
+    );
+
+    anchored()
+        .position(origin)
+        .anchor(Corner::TopLeft)
+        .child(picker_clip_shell(
+            "branch-picker",
+            "branch-picker-open",
+            seed,
+            WIDTH,
+            HEIGHT,
+            cx.listener(|this, _, _, cx| {
+                this.branch_picker = None;
+                cx.notify();
+            }),
+            body,
         ))
         .into_any_element()
+}
+
+/// Outer clip grows from capsule seed (top-left → bottom-right); inner board stays at
+/// fixed px size so ellipsis keeps a definite width (a59dbf2 lesson).
+fn picker_clip_shell(
+    id: &'static str,
+    anim_id: &'static str,
+    seed: Size<Pixels>,
+    width: f32,
+    height: f32,
+    on_down_out: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    body: impl IntoElement,
+) -> impl IntoElement {
+    let seed_w = f32::from(seed.width).max(1.);
+    let seed_h = f32::from(seed.height).max(1.);
+    div()
+        .id(id)
+        .overflow_hidden()
+        .bg(theme::white())
+        .rounded(px(theme::CHANGES_RADIUS))
+        .shadow(theme::changes_capsule_shadow())
+        .occlude()
+        .on_mouse_down_out(on_down_out)
+        .child(
+            div()
+                .w(px(width))
+                .h(px(height))
+                .p_1()
+                .child(body),
+        )
+        .with_animation(
+            anim_id,
+            Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+            move |this, t| {
+                this.w(px(seed_w + (width - seed_w) * t))
+                    .h(px(seed_h + (height - seed_h) * t))
+            },
+        )
+}
+
+fn picker_scroll_area(
+    _id: &'static str,
+    width: f32,
+    height: f32,
+    content: impl IntoElement,
+    scrollbar: gpui::Entity<scrollbar::VerticalScrollbar>,
+) -> Div {
+    div()
+        .relative()
+        .w(px(width))
+        .h(px(height))
+        .child(div().absolute().inset_0().w(px(width)).h(px(height)).child(content))
+        .child(div().absolute().inset_0().child(scrollbar))
+}
+
+/// Commit-list pattern: outer overflow clip + inner ellipsis, both with definite width chain.
+fn picker_line(
+    color: gpui::Rgba,
+    primary: bool,
+    text: impl Into<gpui::SharedString>,
+) -> Div {
+    div()
+        .w_full()
+        .min_w(px(0.))
+        .overflow_hidden()
+        .child(
+            div()
+                .w_full()
+                .min_w(px(0.))
+                .when(primary, |d| d.text_sm())
+                .when(!primary, |d| d.text_xs())
+                .text_color(color)
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(text.into()),
+        )
 }
 
 fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -2212,22 +2290,30 @@ enum MrPickerBody {
 
 struct MrPicker {
     body: MrPickerBody,
+    /// Capsule window bounds at open — panel top-left locks here and grows over it.
+    bounds: Bounds<Pixels>,
 }
 
 impl MrPicker {
-    fn loading() -> Self {
+    fn loading(bounds: Bounds<Pixels>) -> Self {
         Self {
             body: MrPickerBody::Loading,
+            bounds,
         }
     }
 
-    fn failed(message: impl Into<String>) -> Self {
+    fn failed(message: impl Into<String>, bounds: Bounds<Pixels>) -> Self {
         Self {
             body: MrPickerBody::Failed(message.into()),
+            bounds,
         }
     }
 
-    fn ready(all: Vec<MergeRequestSummary>, selected_iid: Option<u64>) -> Self {
+    fn ready(
+        all: Vec<MergeRequestSummary>,
+        selected_iid: Option<u64>,
+        bounds: Bounds<Pixels>,
+    ) -> Self {
         let selected = selected_iid
             .and_then(|iid| all.iter().position(|mr| mr.iid == iid))
             .unwrap_or(0);
@@ -2238,7 +2324,13 @@ impl MrPicker {
                 query: String::new(),
                 selected,
             },
+            bounds,
         }
+    }
+
+    fn with_bounds(mut self, bounds: Bounds<Pixels>) -> Self {
+        self.bounds = bounds;
+        self
     }
 
     fn refresh(&mut self) {
@@ -2318,12 +2410,20 @@ struct BranchPicker {
     matches: Vec<BranchInfo>,
     query: String,
     selected: usize,
+    /// Capsule window bounds at open — panel top-left locks here and grows over it.
+    bounds: Bounds<Pixels>,
 }
 
 impl BranchPicker {
-    fn new(branches: Vec<BranchInfo>, current: &str) -> Self {
+    fn new(branches: Vec<BranchInfo>, current: &str, bounds: Bounds<Pixels>) -> Self {
         let selected = branches.iter().position(|b| b.name == current).unwrap_or(0);
-        Self { matches: branches.clone(), all: branches, query: String::new(), selected }
+        Self {
+            matches: branches.clone(),
+            all: branches,
+            query: String::new(),
+            selected,
+            bounds,
+        }
     }
 
     fn refresh(&mut self) {
