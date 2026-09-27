@@ -16,7 +16,10 @@ use crate::ui::scrollbar;
 use crate::ui::text_field::{TextField, TextFieldEvent, TextFieldStyle};
 use crate::ui::theme;
 
-actions!(font_picker, [Open, SelectPrev, SelectNext, Dismiss]);
+actions!(
+    font_picker,
+    [Open, SelectPrev, SelectNext, Dismiss, FocusNext, FocusPrev]
+);
 
 /// Key context on the trigger (Enter / Space open the popover).
 const TRIGGER_CONTEXT: &str = "FontPickerTrigger";
@@ -35,6 +38,10 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("up", SelectPrev, Some(CONTEXT)),
         KeyBinding::new("down", SelectNext, Some(CONTEXT)),
         KeyBinding::new("escape", Dismiss, Some(CONTEXT)),
+        // Instead of the Settings window's Tab: close, then move on from the
+        // trigger as if the popover had not been open.
+        KeyBinding::new("tab", FocusNext, Some(CONTEXT)),
+        KeyBinding::new("shift-tab", FocusPrev, Some(CONTEXT)),
     ]
 }
 
@@ -50,6 +57,8 @@ pub enum FontPickerEvent {
 /// [`FontPickerEvent::Confirm`]; the trigger reads the [`Appearance`] Global.
 pub struct FontPicker {
     id: SharedString,
+    /// Registry key of the list's overlay scrollbar.
+    scrollbar_id: String,
     role: FontRole,
     trigger_focus: FocusHandle,
     /// Window bounds of the trigger, so a mouse-down on it leaves the popover
@@ -74,8 +83,10 @@ impl FontPicker {
         tab_index: isize,
         cx: &mut Context<Self>,
     ) -> Self {
+        let id = id.into();
         Self {
-            id: id.into(),
+            scrollbar_id: format!("{id}-list-sb"),
+            id,
             role,
             trigger_focus: cx.focus_handle().tab_index(tab_index).tab_stop(true),
             trigger_bounds: Rc::new(Cell::new(Bounds::default())),
@@ -99,11 +110,7 @@ impl FontPicker {
     /// scrolled into view; the search field takes focus.
     fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.role.family(cx.global::<Appearance>()).name.clone();
-        let fonts = appearance::installed_fonts(cx)
-            .iter()
-            .map(|name| SharedString::from(name.clone()))
-            .collect();
-        let list = FontList::new(fonts, current);
+        let list = FontList::new(appearance::installed_fonts(cx), current);
 
         let search = cx.new(|cx| {
             TextField::new("Search fonts…", false, cx).with_style(TextFieldStyle::Search)
@@ -130,17 +137,21 @@ impl FontPicker {
                     TextFieldEvent::Confirm => picker.confirm(window, cx),
                 },
             ),
-            // Tab (or anything else) moving focus away closes it; focus stays
-            // where it went.
-            cx.on_blur(&search_focus, window, |picker, _, cx| {
-                picker.popover = None;
-                cx.notify();
+            // Focus moving elsewhere without going through `dismiss` (e.g. a
+            // click on a focusable element outside) closes it; focus stays
+            // where it went. A window that merely goes inactive keeps it open,
+            // so focus is not left on a removed field.
+            cx.on_blur(&search_focus, window, |picker, window, cx| {
+                if window.is_window_active() {
+                    picker.popover = None;
+                    cx.notify();
+                }
             }),
         ];
 
         // The list scrolls through the registry's handle so the overlay
         // scrollbar tracks it; each open starts from the top.
-        let (base_handle, _) = scrollbar::vertical(format!("{}-list-sb", self.id), cx);
+        let (base_handle, _) = scrollbar::vertical(self.scrollbar_id.clone(), cx);
         base_handle.set_offset(point(px(0.), px(0.)));
         let scroll = UniformListScrollHandle(Rc::new(RefCell::new(UniformListScrollState {
             base_handle,
@@ -198,6 +209,16 @@ impl FontPicker {
             .relative()
             .key_context(TRIGGER_CONTEXT)
             .on_action(cx.listener(|picker, _: &Open, window, cx| picker.toggle(window, cx)))
+            // While open, a press on the trigger must not move focus to it:
+            // the search field would blur and close the popover, and the
+            // click would then reopen it. The click closes it instead. Runs
+            // in the capture phase, before the Button's bubble-phase focus
+            // transfer, which `prevent_default` suppresses.
+            .capture_any_mouse_down(cx.listener(|picker, _, window, _| {
+                if picker.popover.is_some() {
+                    window.prevent_default();
+                }
+            }))
             .child(
                 Button::new(self.element_id("trigger"), trigger_label(family))
                     .style(ButtonStyle::Outlined)
@@ -222,7 +243,7 @@ impl FontPicker {
     }
 
     fn render_popover(&self, popover: &Popover, cx: &mut Context<Self>) -> impl IntoElement {
-        let (_, scrollbar) = scrollbar::vertical(format!("{}-list-sb", self.id), cx);
+        let (_, scrollbar) = scrollbar::vertical(self.scrollbar_id.clone(), cx);
         let count = popover.list.len();
         let trigger_bounds = self.trigger_bounds.clone();
 
@@ -275,6 +296,14 @@ impl FontPicker {
                 }),
             )
             .on_action(cx.listener(|picker, _: &Dismiss, window, cx| picker.dismiss(window, cx)))
+            .on_action(cx.listener(|picker, _: &FocusNext, window, cx| {
+                picker.dismiss(window, cx);
+                window.focus_next();
+            }))
+            .on_action(cx.listener(|picker, _: &FocusPrev, window, cx| {
+                picker.dismiss(window, cx);
+                window.focus_prev();
+            }))
             .on_mouse_down_out(
                 cx.listener(move |picker, event: &MouseDownEvent, window, cx| {
                     if !trigger_bounds.get().contains(&event.position) {
@@ -370,7 +399,9 @@ impl Render for FontPicker {
             .child(self.render_trigger(cx))
             .when_some(self.popover.as_ref(), |picker, popover| {
                 // Anchored at the trigger's bottom-left, 2px below; deferred so
-                // it paints above the page and escapes its scroll clip.
+                // it paints above the page and escapes its scroll clip. Near a
+                // window edge it is shifted back inside (8px margin) rather
+                // than flipped above the trigger, like Zed's popover.
                 picker.child(
                     div().absolute().top(relative(1.)).left_0().child(
                         deferred(

@@ -1,9 +1,13 @@
+use std::sync::Arc;
+
 use gpui::SharedString;
 
 /// What the font picker shows: font names filtered by the query, and the
 /// selected match (Zed `FontPickerDelegate`, minus the rendering).
 pub struct FontList {
-    fonts: Vec<SharedString>,
+    fonts: Arc<[SharedString]>,
+    /// `fonts` lowercased once, for the case-insensitive filter.
+    lowercase: Vec<String>,
     current: SharedString,
     /// Indices into `fonts` that match the query, in list order.
     matches: Vec<usize>,
@@ -14,14 +18,16 @@ pub struct FontList {
 impl FontList {
     /// All of `fonts`, the selection on `current` (else the first). An empty
     /// `fonts` (not loaded yet) lists just `current`.
-    pub fn new(fonts: Vec<SharedString>, current: SharedString) -> Self {
+    pub fn new(fonts: Arc<[SharedString]>, current: SharedString) -> Self {
         let fonts = if fonts.is_empty() {
-            vec![current.clone()]
+            Arc::from([current.clone()])
         } else {
             fonts
         };
+        let lowercase = fonts.iter().map(|font| font.to_lowercase()).collect();
         let mut list = Self {
             fonts,
+            lowercase,
             current,
             matches: Vec::new(),
             selected: 0,
@@ -35,7 +41,7 @@ impl FontList {
     pub fn set_query(&mut self, query: &str) {
         let query = query.to_lowercase();
         self.matches = (0..self.fonts.len())
-            .filter(|&ix| self.fonts[ix].to_lowercase().contains(&query))
+            .filter(|&ix| self.lowercase[ix].contains(&query))
             .collect();
         self.selected = self
             .matches
@@ -88,7 +94,8 @@ mod tests {
     use super::*;
 
     fn list(fonts: &[&'static str], current: &'static str) -> FontList {
-        FontList::new(fonts.iter().map(|&f| f.into()).collect(), current.into())
+        let fonts: Vec<SharedString> = fonts.iter().map(|&f| f.into()).collect();
+        FontList::new(fonts.into(), current.into())
     }
 
     fn shown(list: &FontList) -> Vec<&str> {

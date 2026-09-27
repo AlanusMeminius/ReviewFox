@@ -4,6 +4,7 @@
 //! window.
 
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 
 use gpui::{App, Global, Pixels, SharedString, Styled, px};
 
@@ -91,7 +92,7 @@ impl FontRole {
     }
 
     /// The family Default resolves to on this machine.
-    pub fn default_family(self, installed: &[String]) -> &'static str {
+    pub fn default_family(self, installed: &[SharedString]) -> &'static str {
         match self {
             FontRole::Ui => DEFAULT_UI_FONT,
             FontRole::Code => default_code_font(installed),
@@ -100,7 +101,7 @@ impl FontRole {
 
     /// Store a chosen family; like [`Self::set_size`], `None` (Reset) and the
     /// family Default resolves to both remove the field.
-    pub fn set_family(self, file: &mut SettingsFile, family: Option<&str>, installed: &[String]) {
+    pub fn set_family(self, file: &mut SettingsFile, family: Option<&str>, installed: &[SharedString]) {
         let stored = family
             .filter(|&family| family != self.default_family(installed))
             .map(str::to_string);
@@ -114,8 +115,8 @@ impl FontRole {
 /// Code Font Default: Plex Mono when installed, else the system monospace. The
 /// OS fallback for a missing Plex is proportional, which breaks column
 /// alignment and tab stops.
-fn default_code_font(installed: &[String]) -> &'static str {
-    if installed.iter().any(|name| name == PLEX_MONO) {
+fn default_code_font(installed: &[SharedString]) -> &'static str {
+    if installed.iter().any(|name| name.as_ref() == PLEX_MONO) {
         PLEX_MONO
     } else if cfg!(windows) {
         "Consolas"
@@ -127,15 +128,21 @@ fn default_code_font(installed: &[String]) -> &'static str {
 }
 
 /// Installed font names (sorted, deduplicated), read once at startup: what
-/// [`update`] resolves against and what the font picker lists.
-struct InstalledFonts(Vec<String>);
+/// [`update`] resolves against and what the font picker lists (shared, so
+/// opening the picker does not copy it).
+struct InstalledFonts(Arc<[SharedString]>);
 
 impl Global for InstalledFonts {}
 
 /// Resolve `settings.json` into the Global and re-render every window whenever
 /// it changes. Call before opening any window.
 pub fn init(cx: &mut App) {
-    let installed = cx.text_system().all_font_names();
+    let installed: Arc<[SharedString]> = cx
+        .text_system()
+        .all_font_names()
+        .into_iter()
+        .map(SharedString::from)
+        .collect();
     cx.set_global(resolve(&settings_store::load_file(), &installed));
     cx.set_global(InstalledFonts(installed));
     // Views cached with `AnyView::cached` re-render only on a refresh.
@@ -149,15 +156,22 @@ pub fn update(cx: &mut App, edit: impl FnOnce(&mut SettingsFile)) {
     let mut file = settings_store::load_file();
     edit(&mut file);
     settings_store::save_file(&file).ok();
-    let next = resolve(&file, installed_fonts(cx));
+    let next = resolve(&file, &cx.global::<InstalledFonts>().0);
     if &next != cx.global::<Appearance>() {
         cx.set_global(next);
     }
 }
 
 /// The installed font names, cached since startup.
-pub fn installed_fonts(cx: &App) -> &[String] {
-    &cx.global::<InstalledFonts>().0
+pub fn installed_fonts(cx: &App) -> Arc<[SharedString]> {
+    cx.global::<InstalledFonts>().0.clone()
+}
+
+/// Store a picked family (`None`: Reset) through [`update`]; see
+/// [`FontRole::set_family`].
+pub fn set_family(cx: &mut App, role: FontRole, family: Option<&str>) {
+    let installed = installed_fonts(cx);
+    update(cx, |file| role.set_family(file, family, &installed));
 }
 
 /// UI Font family to render with.
@@ -195,7 +209,7 @@ pub trait UiTextSize: Styled + Sized {
 
 impl<E: Styled> UiTextSize for E {}
 
-pub fn resolve(file: &SettingsFile, installed: &[String]) -> Appearance {
+pub fn resolve(file: &SettingsFile, installed: &[SharedString]) -> Appearance {
     Appearance {
         ui_font: resolve_family(
             file.ui_font_family.as_deref(),
@@ -225,10 +239,10 @@ fn round_size(stored: Option<f32>) -> Option<u32> {
         .map(|v| v.round().max(0.) as u32)
 }
 
-fn resolve_family(stored: Option<&str>, default: &'static str, installed: &[String]) -> Family {
-    let found = stored.filter(|s| installed.iter().any(|name| name == s));
+fn resolve_family(stored: Option<&str>, default: &'static str, installed: &[SharedString]) -> Family {
+    let found = stored.and_then(|s| installed.iter().find(|name| name.as_ref() == s));
     Family {
-        name: found.map_or_else(|| default.into(), |s| SharedString::from(s.to_string())),
+        name: found.map_or_else(|| default.into(), SharedString::clone),
         stored: stored.map(str::to_string),
         not_installed: stored.is_some() && found.is_none(),
     }
@@ -238,8 +252,8 @@ fn resolve_family(stored: Option<&str>, default: &'static str, installed: &[Stri
 mod tests {
     use super::*;
 
-    fn installed(names: &[&str]) -> Vec<String> {
-        names.iter().map(|n| n.to_string()).collect()
+    fn installed(names: &[&'static str]) -> Vec<SharedString> {
+        names.iter().map(|&n| n.into()).collect()
     }
 
     #[test]

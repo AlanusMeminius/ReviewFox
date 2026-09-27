@@ -81,6 +81,12 @@ struct FontGroup {
     preview: &'static [&'static str],
 }
 
+/// A font group's controls.
+struct FontControls {
+    family: Entity<FontPicker>,
+    size: Entity<NumberField>,
+}
+
 const FONT_GROUPS: [FontGroup; 2] = [
     FontGroup {
         role: FontRole::Ui,
@@ -177,10 +183,8 @@ pub struct SettingsView {
     has_saved_token: bool,
     keychain_error: Option<KeychainError>,
     gitlab_connection: Rc<RefCell<GitLabConnection>>,
-    ui_font_family: Entity<FontPicker>,
-    code_font_family: Entity<FontPicker>,
-    ui_font_size: Entity<NumberField>,
-    code_font_size: Entity<NumberField>,
+    /// One per [`FONT_GROUPS`] entry, same order.
+    font_controls: [FontControls; 2],
     nav_focus: FocusHandle,
     nav: NavState,
     /// Last nav interaction came from the keyboard: show the focus border.
@@ -225,35 +229,34 @@ impl SettingsView {
             // Resets (and any other outside change) re-sync the size fields.
             cx.observe_global::<Appearance>(|view, cx| view.sync_font_sizes(cx)),
         ];
-        let [ui_font_size, code_font_size] = FONT_GROUPS.map(|group| {
-            let field = cx.new(|cx| {
+        let font_controls = FONT_GROUPS.map(|group| {
+            let family = cx.new(|cx| {
+                let id = format!("{}-family", group.id);
+                FontPicker::new(id, group.role, group.family_tab_index, cx)
+            });
+            subscriptions.push(cx.subscribe(
+                &family,
+                move |_, _, event: &FontPickerEvent, cx| match event {
+                    FontPickerEvent::Confirm(family) => {
+                        appearance::set_family(cx, group.role, Some(family))
+                    }
+                },
+            ));
+            let size = cx.new(|cx| {
                 let role = group.role;
                 let size = role.size(cx.global::<Appearance>());
                 let id = ElementId::Name(format!("{}-size-field", group.id).into());
                 NumberField::new(id, size, role.size_range(), group.size_tab_index, window, cx)
             });
             subscriptions.push(cx.subscribe(
-                &field,
+                &size,
                 move |_, _, event: &NumberFieldEvent, cx| match *event {
                     NumberFieldEvent::Change(size) => {
                         appearance::update(cx, |file| group.role.set_size(file, Some(size)))
                     }
                 },
             ));
-            field
-        });
-        let [ui_font_family, code_font_family] = FONT_GROUPS.map(|group| {
-            let picker = cx.new(|cx| {
-                let id = format!("{}-family", group.id);
-                FontPicker::new(id, group.role, group.family_tab_index, cx)
-            });
-            subscriptions.push(cx.subscribe(
-                &picker,
-                move |_, _, event: &FontPickerEvent, cx| match event {
-                    FontPickerEvent::Confirm(family) => set_family(group.role, Some(family), cx),
-                },
-            ));
-            picker
+            FontControls { family, size }
         });
 
         // The scroll handle lives in a global registry and outlives the window.
@@ -268,10 +271,7 @@ impl SettingsView {
             has_saved_token,
             keychain_error: None,
             gitlab_connection,
-            ui_font_family,
-            code_font_family,
-            ui_font_size,
-            code_font_size,
+            font_controls,
             nav_focus: cx.focus_handle().tab_index(TAB_NAV).tab_stop(true),
             nav: NavState::new(PAGES),
             nav_keyboard: false,
@@ -329,35 +329,18 @@ impl SettingsView {
         self.commit_base_url(cx);
     }
 
-    fn family_picker(&self, role: FontRole) -> &Entity<FontPicker> {
-        match role {
-            FontRole::Ui => &self.ui_font_family,
-            FontRole::Code => &self.code_font_family,
-        }
-    }
-
-    fn size_field(&self, role: FontRole) -> &Entity<NumberField> {
-        match role {
-            FontRole::Ui => &self.ui_font_size,
-            FontRole::Code => &self.code_font_size,
-        }
-    }
-
     fn sync_font_sizes(&mut self, cx: &mut Context<Self>) {
-        for group in FONT_GROUPS {
+        for (group, controls) in FONT_GROUPS.iter().zip(&self.font_controls) {
             let size = group.role.size(cx.global::<Appearance>());
-            self.size_field(group.role)
-                .update(cx, |field, cx| field.set_value(size, cx));
+            controls.size.update(cx, |field, cx| field.set_value(size, cx));
         }
     }
 
     /// Closing does not blur the size fields; apply a typed size directly
     /// rather than through their Change events while the window goes away.
     fn commit_font_sizes(&mut self, cx: &mut Context<Self>) {
-        for group in FONT_GROUPS {
-            let pending = self
-                .size_field(group.role)
-                .update(cx, |field, cx| field.take_pending(cx));
+        for (group, controls) in FONT_GROUPS.iter().zip(&self.font_controls) {
+            let pending = controls.size.update(cx, |field, cx| field.take_pending(cx));
             if let Some(size) = pending {
                 appearance::update(cx, |file| group.role.set_size(file, Some(size)));
             }
@@ -701,13 +684,23 @@ impl SettingsView {
             .flex_col()
             // Section end: the last preview's 16px plus this make the usual 40px.
             .pb(px(24.))
-            .children(FONT_GROUPS.map(|group| self.render_font_group(group, cx)))
+            .children(
+                FONT_GROUPS
+                    .iter()
+                    .zip(&self.font_controls)
+                    .map(|(&group, controls)| self.render_font_group(group, controls, cx)),
+            )
             .into_any_element()
     }
 
     /// Heading, rows (each with its divider), then the preview in the group's
     /// resolved family and size.
-    fn render_font_group(&self, group: FontGroup, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_font_group(
+        &self,
+        group: FontGroup,
+        controls: &FontControls,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let appearance = cx.global::<Appearance>();
         let family = group.role.family(appearance).name.clone();
         // For the UI Font this is `ui_text(13.)`: the size is the body size.
@@ -724,8 +717,8 @@ impl SettingsView {
                     .text_color(theme::text())
                     .child(group.title),
             )
-            .child(self.render_family_row(group, cx))
-            .child(self.render_size_row(group, cx))
+            .child(render_family_row(group, controls, cx))
+            .child(render_size_row(group, controls, cx))
             .child(
                 div().pt(px(16.)).pb(px(16.)).child(
                     font_preview(group.preview)
@@ -734,48 +727,51 @@ impl SettingsView {
                 ),
             )
     }
-
-    /// `Family` row; Reset to Default (shown while a family is stored, also
-    /// one that is not installed) removes the field from `settings.json`.
-    fn render_family_row(&self, group: FontGroup, cx: &mut Context<Self>) -> SettingRow {
-        let role = group.role;
-        let id = format!("{}-family", group.id);
-        let stored = role.family(cx.global::<Appearance>()).stored.is_some();
-        SettingRow::new(ElementId::Name(id.clone().into()), "Family")
-            .when(stored, |row| {
-                row.title_action(
-                    Button::icon_only(ElementId::Name(format!("{id}-reset").into()), "undo.svg")
-                        .tooltip(RESET_TO_DEFAULT)
-                        .on_click(cx.listener(move |_, _, _, cx| set_family(role, None, cx))),
-                )
-            })
-            .control(self.family_picker(role).clone())
-    }
-
-    /// `Size` row; Reset to Default removes the field from `settings.json`.
-    fn render_size_row(&self, group: FontGroup, cx: &mut Context<Self>) -> SettingRow {
-        let role = group.role;
-        let id = format!("{}-size", group.id);
-        let non_default = role.size(cx.global::<Appearance>()) != role.default_size();
-        SettingRow::new(ElementId::Name(id.clone().into()), "Size")
-            .when(non_default, |row| {
-                row.title_action(
-                    Button::icon_only(ElementId::Name(format!("{id}-reset").into()), "undo.svg")
-                        .tooltip(RESET_TO_DEFAULT)
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            appearance::update(cx, |file| role.set_size(file, None))
-                        })),
-                )
-            })
-            .control(self.size_field(role).clone())
-    }
 }
 
-/// Store a picked family (`None`: Reset). The resolved Default is stored as
-/// unset, like a size equal to its default.
-fn set_family(role: FontRole, family: Option<&str>, cx: &mut App) {
-    let installed = appearance::installed_fonts(cx).to_vec();
-    appearance::update(cx, |file| role.set_family(file, family, &installed));
+/// `Family` row; Reset to Default (shown while a family is stored, also one
+/// that is not installed) removes the field from `settings.json`.
+fn render_family_row(
+    group: FontGroup,
+    controls: &FontControls,
+    cx: &mut Context<SettingsView>,
+) -> SettingRow {
+    let role = group.role;
+    let id = format!("{}-family", group.id);
+    let stored = role.family(cx.global::<Appearance>()).stored.is_some();
+    SettingRow::new(ElementId::Name(id.clone().into()), "Family")
+        .when(stored, |row| {
+            row.title_action(
+                Button::icon_only(ElementId::Name(format!("{id}-reset").into()), "undo.svg")
+                    .tooltip(RESET_TO_DEFAULT)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        appearance::set_family(cx, role, None)
+                    })),
+            )
+        })
+        .control(controls.family.clone())
+}
+
+/// `Size` row; Reset to Default removes the field from `settings.json`.
+fn render_size_row(
+    group: FontGroup,
+    controls: &FontControls,
+    cx: &mut Context<SettingsView>,
+) -> SettingRow {
+    let role = group.role;
+    let id = format!("{}-size", group.id);
+    let non_default = role.size(cx.global::<Appearance>()) != role.default_size();
+    SettingRow::new(ElementId::Name(id.clone().into()), "Size")
+        .when(non_default, |row| {
+            row.title_action(
+                Button::icon_only(ElementId::Name(format!("{id}-reset").into()), "undo.svg")
+                    .tooltip(RESET_TO_DEFAULT)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        appearance::update(cx, |file| role.set_size(file, None))
+                    })),
+            )
+        })
+        .control(controls.size.clone())
 }
 
 /// Preview lines in a quiet box; the caller sets the family and size.
