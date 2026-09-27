@@ -212,7 +212,9 @@ impl SettingsView {
 
         let mut file = settings_store::load_file();
         file.gitlab_base_url = (normalized != DEFAULT_BASE_URL).then(|| normalized.clone());
-        settings_store::save_file(&file);
+        // A refused save (unreadable file) keeps the value for this session
+        // only; the user's broken file stays as they left it.
+        settings_store::save_file(&file).ok();
         self.saved_base_url = normalized;
         if self.has_saved_token {
             self.refresh_connection(cx);

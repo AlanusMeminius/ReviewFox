@@ -73,6 +73,8 @@ pub struct DualPane {
     widest_seen: [f32; 2],
     /// Mono advance of `'0'` at `(font px, advance)` in `code_font`.
     mono_advance: Option<(f32, f32)>,
+    /// Advance of `'0'` in `code_font` at the line-number size.
+    ln_advance: Option<f32>,
     /// Element height, set in prepaint. 0 until the first frame.
     view_h: f32,
     /// Device pixels per logical pixel, from the last prepaint.
@@ -115,6 +117,7 @@ impl DualPane {
             max_x: [0.; 2],
             widest_seen: [0.; 2],
             mono_advance: None,
+            ln_advance: None,
             view_h: 0.,
             scale: 1.,
             hover_copy: None,
@@ -141,10 +144,17 @@ impl DualPane {
         if family != self.code_font {
             self.code_font = family;
             self.mono_advance = None;
-            self.widest_seen = [0.; 2];
-            self.shapes.clear();
+            self.ln_advance = None;
+            self.invalidate_shapes();
             cx.notify();
         }
+    }
+
+    /// Drop shaped text and the widest-line bound it fed; the next prepaint
+    /// reshapes what is visible.
+    fn invalidate_shapes(&mut self) {
+        self.shapes.clear();
+        self.widest_seen = [0.; 2];
     }
 
     /// Open a file at its start with everything folded.
@@ -224,8 +234,7 @@ impl DualPane {
     /// Rebuild the Layout from the file, `fold` and the comment index.
     fn rebuild_layout(&mut self) {
         self.layout = None;
-        self.shapes.clear();
-        self.widest_seen = [0.; 2];
+        self.invalidate_shapes();
         let Some(file) = self.file.as_ref() else {
             return;
         };
@@ -408,8 +417,7 @@ impl DualPane {
                 *x *= next_px / prev_px;
             }
         }
-        self.widest_seen = [0.; 2];
-        self.shapes.clear();
+        self.invalidate_shapes();
         cx.notify();
     }
 
@@ -458,14 +466,16 @@ impl DualPane {
         {
             return advance;
         }
-        let text = window.text_system();
-        let id = text.resolve_font(&font(self.code_font.clone()));
-        let advance = text
-            .advance(id, px(font_px), '0')
-            .map(|s| f32::from(s.width))
-            .unwrap_or(font_px * 0.6);
+        let advance = zero_advance(&self.code_font, font_px, window);
         self.mono_advance = Some((font_px, advance));
         advance
+    }
+
+    /// Line-number digit advance; see [`element::ln_col_width`].
+    fn ln_advance(&mut self, window: &Window) -> f32 {
+        *self
+            .ln_advance
+            .get_or_insert_with(|| zero_advance(&self.code_font, element::LN_FONT_PX, window))
     }
 
     /// Show both scrollbars and (re)arm the idle hide timer.
@@ -629,12 +639,14 @@ impl DualPane {
         let row_h = self.row_h();
         let font_px = self.font_size.px() as f32;
         let advance = self.mono_advance(font_px, window);
+        let ln_advance = self.ln_advance(window);
         let layout = self.layout.as_ref()?;
         let t_vp = trace::start();
         let vp = Viewport::new(layout, self.scroll_s, self.view_h, row_h).snapped(self.scale);
         let viewport_took = trace::since(t_vp);
         let s = vp.s();
-        let geom = Geom::new(bounds, ln_col_width(line_number_digits(layout)), self.scale);
+        let ln_w = ln_col_width(line_number_digits(layout), ln_advance);
+        let geom = Geom::new(bounds, ln_w, self.scale);
         let tracks = [Side::Old, Side::New]
             .map(|side| thumb_for(self.view_h, vp.max_top(side), vp.top(side)).is_some());
         let hitboxes = insert_hitboxes(&geom, tracks, window);
@@ -645,7 +657,7 @@ impl DualPane {
                 geom,
                 row_h,
                 font_px,
-                family: &self.code_font,
+                code_family: &self.code_font,
                 scale: self.scale,
                 decorations: Decorations {
                     drafting: self.drafting,
@@ -683,6 +695,15 @@ impl DualPane {
         frame.stats.prepaint = trace::since(t_prepaint);
         Some(frame)
     }
+}
+
+/// Advance of `'0'` in `family` at `font_px`.
+fn zero_advance(family: &SharedString, font_px: f32, window: &Window) -> f32 {
+    let text = window.text_system();
+    let id = text.resolve_font(&font(family.clone()));
+    text.advance(id, px(font_px), '0')
+        .map(|s| f32::from(s.width))
+        .unwrap_or(font_px * 0.6)
 }
 
 impl Render for DualPane {

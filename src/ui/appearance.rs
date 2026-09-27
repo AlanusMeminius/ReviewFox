@@ -35,8 +35,8 @@ impl Global for Appearance {}
 pub const DEFAULT_UI_FONT: &str = "IBM Plex Sans";
 /// Code Font Default when installed.
 const PLEX_MONO: &str = "IBM Plex Mono";
-pub const DEFAULT_FONT_SIZE: u32 = 13;
-/// UI Font size range; the Code Font size range is `DiffFontSize`'s.
+/// UI Font size default and range. The Code Font's are `DiffFontSize`'s.
+pub const UI_FONT_SIZE_DEFAULT: u32 = 13;
 pub const UI_FONT_SIZE_MIN: u32 = 11;
 pub const UI_FONT_SIZE_MAX: u32 = 15;
 
@@ -72,12 +72,13 @@ pub fn init(cx: &mut App) {
 }
 
 /// Apply `edit` to `settings.json`, save it, and replace the Global when the
-/// resolved result changed. Observers of [`Appearance`] hear about it.
+/// resolved result changed. Observers of [`Appearance`] hear about it. A
+/// refused save still applies live, for this session only.
 #[allow(dead_code)] // No Settings page edits fonts yet.
 pub fn update(cx: &mut App, edit: impl FnOnce(&mut SettingsFile)) {
     let mut file = settings_store::load_file();
     edit(&mut file);
-    settings_store::save_file(&file);
+    settings_store::save_file(&file).ok();
     let next = resolve(&file, &cx.global::<InstalledFonts>().0);
     if &next != cx.global::<Appearance>() {
         cx.set_global(next);
@@ -97,23 +98,27 @@ pub fn code_font(cx: &App) -> SharedString {
 pub fn resolve(file: &SettingsFile, installed: &[String]) -> Appearance {
     Appearance {
         ui_font: resolve_family(file.ui_font_family.as_deref(), DEFAULT_UI_FONT, installed),
-        ui_font_size: resolve_size(file.ui_font_size, UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX),
+        ui_font_size: round_size(file.ui_font_size)
+            .map_or(UI_FONT_SIZE_DEFAULT, |px| px.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX)),
         code_font: resolve_family(
             file.code_font_family.as_deref(),
             default_code_font(installed),
             installed,
         ),
-        code_font_size: resolve_size(file.code_font_size, DiffFontSize::MIN, DiffFontSize::MAX),
+        // `DiffFontSize::new` owns the Code Font size range.
+        code_font_size: DiffFontSize::new(
+            round_size(file.code_font_size).unwrap_or(DiffFontSize::DEFAULT),
+        )
+        .base(),
     }
 }
 
-/// Unset or not a number is Default; out of range is clamped (step 1, so
-/// fractions round).
-fn resolve_size(stored: Option<f32>, min: u32, max: u32) -> u32 {
-    match stored {
-        Some(v) if v.is_finite() => (v.round().max(0.) as u32).clamp(min, max),
-        _ => DEFAULT_FONT_SIZE,
-    }
+/// Sizes step by 1, so fractions round; unset or not a number is `None`
+/// (Default). The caller clamps.
+fn round_size(stored: Option<f32>) -> Option<u32> {
+    stored
+        .filter(|v| v.is_finite())
+        .map(|v| v.round().max(0.) as u32)
 }
 
 fn resolve_family(stored: Option<&str>, default: &'static str, installed: &[String]) -> Family {

@@ -24,9 +24,9 @@ use crate::domain::Side;
 use crate::ui::scrollbar::{self, ThumbGeom};
 use crate::ui::theme;
 
-const LN_FONT_PX: f32 = 10.;
-/// Wider than Menlo/Consolas at 10px (~6px) so a digit is never clipped. Line
-/// numbers use the Code Font family; a wider face may need more.
+pub(super) const LN_FONT_PX: f32 = 10.;
+/// Floor for a line-number digit's width: wider than Menlo/Consolas at 10px
+/// (~6px) so a digit is never clipped. A wider Code Font uses its own advance.
 const LN_DIGIT_PX: f32 = 8.;
 /// Line-number inset from the code side of its column.
 const LN_PAD: f32 = 4.;
@@ -168,8 +168,9 @@ pub(super) fn line_number_digits(layout: &Layout) -> u32 {
     digits.max(2)
 }
 
-pub(super) fn ln_col_width(digits: u32) -> f32 {
-    digits as f32 * LN_DIGIT_PX + LN_PAD
+/// `digit_advance`: the Code Font's `'0'` advance at [`LN_FONT_PX`].
+pub(super) fn ln_col_width(digits: u32, digit_advance: f32) -> f32 {
+    digits as f32 * digit_advance.max(LN_DIGIT_PX) + LN_PAD
 }
 
 struct RowPaint {
@@ -239,7 +240,7 @@ pub(super) struct FrameInput<'a> {
     pub row_h: f32,
     pub font_px: f32,
     /// Code Font family, for both the code text and the line numbers.
-    pub family: &'a SharedString,
+    pub code_family: &'a SharedString,
     pub scale: f32,
     pub decorations: Decorations,
     pub bars: &'a BarState,
@@ -258,7 +259,7 @@ pub(super) fn build_frame(
         geom,
         row_h,
         font_px,
-        family,
+        code_family,
         scale,
         decorations,
         bars,
@@ -288,7 +289,7 @@ pub(super) fn build_frame(
                 .entry((side, i as u32))
                 .or_insert_with(|| {
                     let t = trace::start();
-                    let shape = shape_row(layout, side, row, font_px, family, window);
+                    let shape = shape_row(layout, side, row, font_px, code_family, window);
                     stats.shaped += 1;
                     stats.shape += trace::since(t);
                     shape
@@ -1038,7 +1039,10 @@ mod tests {
 
     #[test]
     fn line_number_column_fits_the_digits() {
-        assert_eq!(ln_col_width(2), 2. * LN_DIGIT_PX + LN_PAD);
-        assert_eq!(ln_col_width(5), 5. * LN_DIGIT_PX + LN_PAD);
+        // Consolas / Menlo digits (~6px at 10px) keep the 8px floor.
+        assert_eq!(ln_col_width(2, 6.), 2. * 8. + LN_PAD);
+        assert_eq!(ln_col_width(5, 6.), 5. * 8. + LN_PAD);
+        // A wider Code Font widens the column instead of spilling into the code.
+        assert_eq!(ln_col_width(3, 9.5), 3. * 9.5 + LN_PAD);
     }
 }

@@ -1,7 +1,7 @@
 //! Settings: GitLab base URL and Appearance fonts in `settings.json`, PAT in
 //! OS keychain only.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::PathBuf;
 
 pub const DEFAULT_BASE_URL: &str = "https://gitlab.com";
@@ -10,21 +10,41 @@ const KEYRING_SERVICE: &str = "ReviewFox";
 const KEYRING_ACCOUNT: &str = "gitlab_pat";
 
 /// Every field is optional and omitted when `None`: missing means Default, so a
-/// changed default reaches users who never touched the setting.
+/// changed default reaches users who never touched the setting. A field of the
+/// wrong type loads as `None` rather than failing the whole file, so one bad
+/// hand edit cannot wipe the others on the next save.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SettingsFile {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub gitlab_base_url: Option<String>,
     /// Stored as written; resolution (installed check, clamping) is
     /// `ui::appearance`'s job, so an uninstalled family survives a save.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub ui_font_family: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub ui_font_size: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub code_font_family: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub code_font_size: Option<f32>,
+}
+
+/// `Some` when the value parses as `T`, `None` otherwise (never an error).
+fn lenient<'de, D: Deserializer<'de>, T: serde::de::DeserializeOwned>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
+/// Why [`save_file`] wrote nothing.
+#[derive(Debug)]
+pub enum SaveError {
+    /// The file on disk is not a JSON object; saving over it would lose
+    /// whatever the user was editing.
+    Unreadable,
+    #[allow(dead_code)] // For `Debug`; no caller reports the cause yet.
+    Io(std::io::Error),
 }
 
 pub fn normalize_base_url(raw: &str) -> String {
@@ -68,29 +88,12 @@ pub fn effective_base_url(file: &SettingsFile) -> String {
 }
 
 pub fn load_file() -> SettingsFile {
-    let Some(path) = store_path() else {
-        return SettingsFile::default();
-    };
-    let Ok(bytes) = std::fs::read(path) else {
-        return SettingsFile::default();
-    };
-    serde_json::from_slice(&bytes).unwrap_or_default()
+    store_path().map_or_else(SettingsFile::default, |path| load_file_at(&path))
 }
 
-pub fn save_file(file: &SettingsFile) {
-    let Some(path) = store_path() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let Ok(json) = serde_json::to_vec_pretty(file) else {
-        return;
-    };
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, &json).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+pub fn save_file(file: &SettingsFile) -> Result<(), SaveError> {
+    let path = store_path().ok_or(SaveError::Io(std::io::ErrorKind::NotFound.into()))?;
+    save_file_at(&path, file)
 }
 
 pub fn load_pat() -> Option<String> {
@@ -112,19 +115,26 @@ pub fn store_path_for_tests(root: &std::path::Path) -> PathBuf {
     root.join("ReviewFox").join(FILENAME)
 }
 
-pub fn save_file_at(path: &std::path::Path, file: &SettingsFile) {
+/// Refuses to replace an existing file that is not a JSON object.
+pub fn save_file_at(path: &std::path::Path, file: &SettingsFile) -> Result<(), SaveError> {
+    if let Ok(bytes) = std::fs::read(path)
+        && !matches!(
+            serde_json::from_slice::<serde_json::Value>(&bytes),
+            Ok(serde_json::Value::Object(_))
+        )
+    {
+        return Err(SaveError::Unreadable);
+    }
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(SaveError::Io)?;
     }
-    let Ok(json) = serde_json::to_vec_pretty(file) else {
-        return;
-    };
+    let json = serde_json::to_vec_pretty(file).map_err(|e| SaveError::Io(e.into()))?;
     let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, &json).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    std::fs::write(&tmp, &json).map_err(SaveError::Io)?;
+    std::fs::rename(&tmp, path).map_err(SaveError::Io)
 }
 
+/// Missing or unreadable is Default; see [`SettingsFile`] for bad fields.
 pub fn load_file_at(path: &std::path::Path) -> SettingsFile {
     let Ok(bytes) = std::fs::read(path) else {
         return SettingsFile::default();
@@ -171,7 +181,7 @@ mod tests {
             gitlab_base_url: Some("https://gitlab.example.com".into()),
             ..Default::default()
         };
-        save_file_at(&path, &file);
+        save_file_at(&path, &file).unwrap();
         let loaded = load_file_at(&path);
         assert_eq!(loaded, file);
         fs::remove_dir_all(dir.path()).ok();
@@ -188,7 +198,7 @@ mod tests {
             code_font_size: Some(16.),
             ..Default::default()
         };
-        save_file_at(&path, &file);
+        save_file_at(&path, &file).unwrap();
         assert_eq!(load_file_at(&path), file);
         fs::remove_dir_all(dir.path()).ok();
     }
@@ -203,9 +213,46 @@ mod tests {
         assert_eq!(loaded.ui_font_family, None);
         assert_eq!(loaded.code_font_size, None);
 
-        save_file_at(&path, &loaded);
+        save_file_at(&path, &loaded).unwrap();
         let json = fs::read_to_string(&path).unwrap();
         assert!(!json.contains("font"), "unset font fields must not be written: {json}");
+        fs::remove_dir_all(dir.path()).ok();
+    }
+
+    #[test]
+    fn a_malformed_field_is_dropped_and_the_rest_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path_for_tests(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{ "gitlab_base_url": "https://gitlab.example.com", "ui_font_size": "14", "code_font_family": 7, "code_font_size": 16 }"#,
+        )
+        .unwrap();
+        let loaded = load_file_at(&path);
+        assert_eq!(
+            loaded,
+            SettingsFile {
+                gitlab_base_url: Some("https://gitlab.example.com".into()),
+                code_font_size: Some(16.),
+                ..Default::default()
+            }
+        );
+        fs::remove_dir_all(dir.path()).ok();
+    }
+
+    #[test]
+    fn save_never_overwrites_a_file_that_is_not_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path_for_tests(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let broken = r#"{ "gitlab_base_url": "https://gitlab.example.com", "#;
+        fs::write(&path, broken).unwrap();
+
+        let mut file = load_file_at(&path);
+        file.ui_font_size = Some(14.);
+        assert!(save_file_at(&path, &file).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), broken);
         fs::remove_dir_all(dir.path()).ok();
     }
 }

@@ -73,7 +73,8 @@ DualPaneElement (one Element: old pane | gutter | new pane)
 |---|---|---|
 | Layout | (alignment, fold) | fold / ignore-whitespace / file change |
 | Word marks | Replace block index | Layout rebuild |
-| Shaped lines | (side, visual row) | Layout rebuild, font size change; evicted outside visible ± one screen |
+| Shaped lines | (side, visual row) | Layout rebuild, font size change, Code Font family change; evicted outside visible ± one screen |
+| Mono advances (code text, line-number digit) | font px / — | Code Font family change (code-text advance also on font size change) |
 | Viewport | — | never cached; recomputed each frame |
 
 ## 7. Verification
