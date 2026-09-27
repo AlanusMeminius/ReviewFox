@@ -274,8 +274,12 @@ pub fn preferred_remote_url(
     Ok(remotes[0].clone())
 }
 
-/// Fetch any missing commit objects by full SHA from `remote_url`.
-pub fn fetch_oids(repo_path: &Path, remote_url: &str, oids: &[String]) -> Result<()> {
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Fetch any missing commit objects from `remote_url` via the system `git` (ADR-0009):
+/// the MR head ref plus the missing SHAs, objects only — no refs, no FETCH_HEAD,
+/// no gc/maintenance, never prompts.
+pub fn fetch_oids(repo_path: &Path, remote_url: &str, iid: u64, oids: &[String]) -> Result<()> {
     let repo = git2::Repository::open(repo_path).map_err(map_git)?;
     let mut needed: Vec<String> = Vec::new();
     for sha in oids {
@@ -292,17 +296,51 @@ pub fn fetch_oids(repo_path: &Path, remote_url: &str, oids: &[String]) -> Result
         return Ok(());
     }
 
-    let mut remote = repo
-        .remote_anonymous(remote_url)
-        .map_err(map_git)?;
-    let refspecs: Vec<String> = needed
-        .iter()
-        .map(|sha| format!("+{sha}:refs/reviewfox/fetch/{sha}"))
-        .collect();
-    let mut opts = git2::FetchOptions::new();
-    remote
-        .fetch(&refspecs, Some(&mut opts), None)
-        .map_err(|e| err(format!("git fetch failed: {e}")))?;
+    // Respect a user-chosen ssh; otherwise make ssh fail instead of prompting.
+    let user_ssh = std::env::var_os("GIT_SSH_COMMAND").is_some()
+        || std::env::var_os("GIT_SSH").is_some()
+        || repo
+            .config()
+            .and_then(|c| c.get_string("core.sshCommand"))
+            .is_ok();
+
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
+        .arg(repo_path)
+        .args([
+            "-c",
+            "fetch.writeCommitGraph=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "--no-prune",
+            "--no-auto-gc",
+            "--no-auto-maintenance",
+            remote_url,
+        ])
+        .arg(format!("refs/merge-requests/{iid}/head"))
+        .args(&needed)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    if !user_ssh {
+        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    run_fetch(cmd)?;
 
     for sha in &needed {
         let git_oid = git2::Oid::from_str(sha).map_err(|e| err(e.to_string()))?;
@@ -313,6 +351,51 @@ pub fn fetch_oids(repo_path: &Path, remote_url: &str, oids: &[String]) -> Result
         }
     }
     Ok(())
+}
+
+/// Run a prepared `git fetch`, killing it after `FETCH_TIMEOUT`; stderr becomes the error.
+fn run_fetch(mut cmd: std::process::Command) -> Result<()> {
+    use std::io::Read;
+
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            err("git executable not found on PATH; install Git to load merge requests")
+        } else {
+            err(format!("could not run git fetch: {e}"))
+        }
+    })?;
+    // Drain stderr on a thread so a chatty git never blocks on a full pipe.
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
+
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= FETCH_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err(format!(
+                    "git fetch timed out after {}s; run `git fetch` in this repository from a terminal to check connectivity and credentials",
+                    FETCH_TIMEOUT.as_secs()
+                )));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => return Err(err(format!("could not wait for git fetch: {e}"))),
+        }
+    };
+    let stderr = reader.join().unwrap_or_default();
+    if status.success() {
+        return Ok(());
+    }
+    Err(err(format!(
+        "git fetch failed: {}\nRun `git fetch` in this repository from a terminal to check credentials.",
+        stderr.trim()
+    )))
 }
 
 /// Build CommitInfo rows from forge commit metadata after objects exist locally.
@@ -847,6 +930,57 @@ mod tests {
         git(&dir, &["add", "a.txt", "b.txt"]);
         git(&dir, &["commit", "-m", "third"]);
         dir
+    }
+
+    fn git_out(cwd: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git");
+        assert!(out.status.success(), "git {args:?} failed");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn fetch_oids_pulls_objects_without_touching_refs() {
+        let upstream = temp_repo();
+        let root = upstream.with_extension("fetch");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let remote = root.join("remote.git");
+        let local = root.join("local");
+        let remote_str = remote.to_str().unwrap();
+        git(&root, &["clone", "--bare", upstream.to_str().unwrap(), remote_str]);
+        git(&root, &["clone", remote_str, local.to_str().unwrap()]);
+
+        // MR commit reachable only via refs/merge-requests/1/head.
+        git(&upstream, &["checkout", "-b", "mr"]);
+        std::fs::write(upstream.join("mr.txt"), "mr\n").unwrap();
+        git(&upstream, &["add", "mr.txt"]);
+        git(&upstream, &["commit", "-m", "mr"]);
+        let mr_sha = git_out(&upstream, &["rev-parse", "HEAD"]);
+        git(&upstream, &["push", remote_str, "mr:refs/merge-requests/1/head"]);
+        // Target-branch commit the local clone has not fetched yet.
+        git(&upstream, &["checkout", "-"]);
+        std::fs::write(upstream.join("c.txt"), "base\n").unwrap();
+        git(&upstream, &["add", "c.txt"]);
+        git(&upstream, &["commit", "-m", "base moved"]);
+        let base_sha = git_out(&upstream, &["rev-parse", "HEAD"]);
+        git(&upstream, &["push", remote_str, "HEAD"]);
+
+        let refs_before = git_out(&local, &["for-each-ref"]);
+        let url = format!("file:///{}", remote_str.replace('\\', "/").trim_start_matches('/'));
+        fetch_oids(&local, &url, 1, &[mr_sha.clone(), base_sha.clone()]).expect("fetch");
+
+        let repo = git2::Repository::open(&local).unwrap();
+        assert!(repo.find_commit(git2::Oid::from_str(&mr_sha).unwrap()).is_ok());
+        assert!(repo.find_commit(git2::Oid::from_str(&base_sha).unwrap()).is_ok());
+        assert!(!local.join(".git").join("FETCH_HEAD").exists());
+        assert_eq!(git_out(&local, &["for-each-ref"]), refs_before);
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&upstream);
     }
 
     #[test]
