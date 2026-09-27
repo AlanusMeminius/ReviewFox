@@ -12,11 +12,12 @@ mod mac_column_vibrancy;
 mod scrollbar;
 mod splitter;
 mod theme;
+mod window_geometry;
 
 use gpui::{
-    App, AppContext, Application, AssetSource, Bounds, KeyBinding, Menu, MenuItem, SharedString,
+    App, AppContext, Application, AssetSource, KeyBinding, Menu, MenuItem, SharedString,
     TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle,
-    WindowOptions, actions, point, px, size,
+    WindowOptions, actions, point, px,
 };
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -26,6 +27,7 @@ use std::sync::Arc;
 use app_view::AppView;
 use crate::git::BranchBrowser;
 use crate::reqwest_client::ReqwestClient;
+use crate::window_geometry_store;
 use crate::workspace_store;
 use gitlab_connection::GitLabConnection;
 use settings_window::SettingsView;
@@ -73,6 +75,12 @@ impl AssetSource for Assets {
 
 pub fn run() {
     let boot = restore_last();
+    let geometry = window_geometry_store::load();
+    let restore_diff = if geometry.diff_open {
+        geometry.diff_reopen.clone()
+    } else {
+        None
+    };
 
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
         #[cfg(target_os = "macos")]
@@ -87,7 +95,11 @@ pub fn run() {
             Rc::new(RefCell::new(None));
         let gitlab_connection = Rc::new(RefCell::new(GitLabConnection::default()));
 
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &Quit, cx| {
+            window_geometry_store::begin_quit();
+            window_geometry_store::flush();
+            cx.quit();
+        });
         cx.on_action({
             let settings_window = settings_window.clone();
             let gitlab_connection = gitlab_connection.clone();
@@ -132,15 +144,23 @@ pub fn run() {
         }]);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
+                window_geometry_store::begin_quit();
+                window_geometry_store::flush();
                 cx.quit();
             }
         })
         .detach();
 
-        let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
+        let geometry = window_geometry_store::snapshot();
+        let bounds = window_geometry::resolve_bounds(
+            geometry.main.as_ref(),
+            window_geometry::main_default_size(),
+            cx,
+        );
 
         let boot = boot.clone();
         let gitlab_connection = gitlab_connection.clone();
+        let restore_diff = restore_diff.clone();
         let _main = cx
             .open_window(
                 WindowOptions {
@@ -157,12 +177,12 @@ pub fn run() {
                     ..Default::default()
                 },
                 move |_, cx| {
-                    cx.new(|cx| AppView::new(boot, gitlab_connection, cx))
+                    cx.new(|cx| AppView::new(boot, gitlab_connection, restore_diff, cx))
                 },
             )
             .expect("open main window");
 
-        // Diff opens via Open Diff on the main Changes chrome.
+        // Diff opens via Open Diff on the main Changes chrome, or boot restore.
         cx.activate(true);
     });
 }

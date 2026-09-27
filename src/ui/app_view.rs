@@ -3,7 +3,7 @@ use gpui::{
     ClipboardItem, Context, Corner, Div, FocusHandle, Focusable, InteractiveElement, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, Size,
     StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds, WindowControlArea,
-    WindowDecorations, WindowHandle, WindowOptions, div, prelude::*, px, rgb, size, svg,
+    WindowDecorations, WindowHandle, WindowOptions, div, prelude::*, px, rgb, svg,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -11,13 +11,14 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::domain::{PathStatus, Repository};
+use crate::domain::{Comparison, Oid, PathStatus, Repository};
 use crate::git::{self, BranchBrowser, BranchInfo, CommitInfo};
 use crate::gitlab::{
     self, FetchMergeRequestResult, ListMergeRequestCommitsResult, ListMergeRequestsResult,
     MergeRequestDetail, MergeRequestSummary, ResolveProjectResult,
 };
 use crate::settings_store;
+use crate::window_geometry_store::{self, DiffReopen};
 use crate::workspace_store::{self, MrEntryLabel, WorkspaceEntry, WorkspaceStore};
 use super::diff_window::{DiffSnapshot, DiffView};
 use super::file_tree::{self, TreeRow};
@@ -28,6 +29,7 @@ use super::scrollbar;
 use super::splitter::{self, Axis, ResizeState};
 use super::current_repo;
 use super::theme;
+use super::window_geometry;
 
 pub struct AppView {
     focus: FocusHandle,
@@ -45,6 +47,7 @@ pub struct AppView {
     mr_entry: Option<MrEntry>,
     repo_menu: Option<RepoContextMenu>,
     activation_sub: Option<gpui::Subscription>,
+    bounds_sub: Option<gpui::Subscription>,
     /// Ephemeral; paths in set are collapsed. Default empty = all expanded.
     collapsed_dirs: HashSet<String>,
     /// Reset collapsed_dirs when this no longer matches current ChangedPath list.
@@ -95,6 +98,7 @@ impl AppView {
     pub fn new(
         boot: Option<BranchBrowser>,
         gitlab_connection: Rc<RefCell<GitLabConnection>>,
+        restore_diff: Option<DiffReopen>,
         cx: &mut Context<Self>,
     ) -> Self {
         let state = match boot {
@@ -122,6 +126,7 @@ impl AppView {
             mr_entry: None,
             repo_menu: None,
             activation_sub: None,
+            bounds_sub: None,
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
             sidebar_width: splitter::default_sidebar_width(),
@@ -138,7 +143,23 @@ impl AppView {
         if let Some(label) = pending_mr {
             view.begin_restore_mr(label, cx);
         }
+        if let Some(reopen) = restore_diff {
+            cx.spawn(async move |this, cx| {
+                this.update(cx, |this, cx| {
+                    this.try_restore_diff(reopen, cx);
+                })
+                .ok();
+            })
+            .detach();
+        }
         view
+    }
+
+    fn try_restore_diff(&mut self, reopen: DiffReopen, cx: &mut Context<Self>) {
+        let Some(snapshot) = rebuild_diff_snapshot(&reopen) else {
+            return;
+        };
+        open_or_update_diff(&mut self.diff_window, snapshot, &mut **cx);
     }
 
     fn sidebar_resize_handler(&self, cx: &Context<Self>) -> splitter::ResizeHandler {
@@ -833,6 +854,8 @@ fn open_or_update_diff(
     snapshot: DiffSnapshot,
     cx: &mut App,
 ) {
+    remember_diff_reopen_from_snapshot(&snapshot);
+
     if let Some(h) = *handle {
         let snap = snapshot.clone();
         if h.update(cx, |view, window, cx| {
@@ -846,7 +869,12 @@ fn open_or_update_diff(
         }
     }
 
-    let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
+    let geometry = window_geometry_store::snapshot();
+    let bounds = window_geometry::resolve_bounds(
+        geometry.diff.as_ref(),
+        window_geometry::diff_default_size(),
+        cx,
+    );
     let snap = snapshot.clone();
     match cx.open_window(
         WindowOptions {
@@ -867,6 +895,49 @@ fn open_or_update_diff(
         Ok(h) => *handle = Some(h),
         Err(e) => eprintln!("failed to open diff window: {e}"),
     }
+}
+
+fn remember_diff_reopen_from_snapshot(snapshot: &DiffSnapshot) {
+    window_geometry_store::note_diff_opened(DiffReopen {
+        repository: snapshot.comparison.repository.path().to_path_buf(),
+        base_oid: snapshot.comparison.base_oid.to_string(),
+        head_oid: snapshot.comparison.head_oid.to_string(),
+        selected_path: snapshot.selected_path.clone(),
+    });
+}
+
+fn rebuild_diff_snapshot(reopen: &DiffReopen) -> Option<DiffSnapshot> {
+    let base_oid: Oid = reopen.base_oid.parse().ok()?;
+    let head_oid: Oid = reopen.head_oid.parse().ok()?;
+    let comparison = Comparison {
+        repository: Repository::new(reopen.repository.clone()),
+        base_oid,
+        head_oid,
+    };
+    let changed_paths = git::list_changed_paths_for(&comparison).ok()?;
+    if changed_paths.is_empty() {
+        return None;
+    }
+    let path = if changed_paths
+        .iter()
+        .any(|p| p.path == reopen.selected_path)
+    {
+        reopen.selected_path.clone()
+    } else {
+        changed_paths[0].path.clone()
+    };
+    let status = changed_paths
+        .iter()
+        .find(|p| p.path == path)
+        .map(|p| p.status)
+        .unwrap_or(PathStatus::Modify);
+    let file = git::file_diff(&comparison, &path, status, &Default::default());
+    Some(DiffSnapshot {
+        comparison,
+        changed_paths,
+        selected_path: path,
+        file,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -890,6 +961,12 @@ impl Focusable for AppView {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(h) = self.diff_window {
+            if h.update(cx, |_, _, _| ()).is_err() {
+                self.diff_window = None;
+                window_geometry_store::note_diff_closed_while_app_alive();
+            }
+        }
         if self.activation_sub.is_none() {
             self.activation_sub = Some(cx.observe_window_activation(window, |view, window, cx| {
                 if !window.is_window_active()
@@ -902,6 +979,12 @@ impl Render for AppView {
                     view.repo_menu = None;
                     cx.notify();
                 }
+            }));
+        }
+        if self.bounds_sub.is_none() {
+            self.bounds_sub = Some(cx.observe_window_bounds(window, |_, window, cx| {
+                window_geometry_store::set_main_bounds(window_geometry::stored_from_window(window));
+                window_geometry::debounce_flush(cx);
             }));
         }
         self.sync_collapsed_dirs();

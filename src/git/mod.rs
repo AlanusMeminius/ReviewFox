@@ -519,6 +519,11 @@ fn delta_path(delta: &git2::DiffDelta<'_>, status: PathStatus) -> Option<String>
     Some(path.to_string_lossy().replace('\\', "/"))
 }
 
+pub fn list_changed_paths_for(comparison: &Comparison) -> Result<Vec<ChangedPath>> {
+    let repo = open_repo(comparison)?;
+    list_changed_paths(&repo, comparison)
+}
+
 pub fn list_changed_paths(
     repo: &git2::Repository,
     comparison: &Comparison,

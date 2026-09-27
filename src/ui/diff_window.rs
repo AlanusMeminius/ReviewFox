@@ -18,12 +18,14 @@ const LN_COL: f32 = 32.;
 const BRIDGE_COL: f32 = 24.;
 use crate::export;
 use crate::git::{self, FileDiff};
+use crate::window_geometry_store;
 use super::file_tree::{self, TreeRow};
 #[cfg(target_os = "macos")]
 use super::mac_column_vibrancy::ColumnVibrancy;
 use super::scrollbar;
 use super::splitter::{self, Axis, ResizeState};
 use super::theme;
+use super::window_geometry;
 
 /// Own snapshot for the Diff window — not a live shared model with main.
 #[derive(Clone, Debug)]
@@ -87,6 +89,7 @@ pub struct DiffView {
     search_scope: SearchScope,
     /// When true, keystrokes edit `search_query` (like the draft bar).
     searching: bool,
+    bounds_sub: Option<gpui::Subscription>,
 }
 
 struct HoverBand {
@@ -156,6 +159,7 @@ impl DiffView {
             search_query: String::new(),
             search_scope: SearchScope::Both,
             searching: false,
+            bounds_sub: None,
         }
     }
 
@@ -547,11 +551,13 @@ impl DiffView {
             .map(|p| p.status)
             .unwrap_or(PathStatus::Modify);
         let file = git::file_diff(&snap.comparison, &path, status, &opts);
-        snap.selected_path = path;
+        snap.selected_path = path.clone();
         snap.file = file;
         self.drafting = None;
         self.reset_fold();
         self.reset_scroll();
+        window_geometry_store::note_diff_selected_path(path);
+        window_geometry_store::flush();
     }
 
     fn begin_draft(&mut self, side: Side, line: u32, window: &mut Window, cx: &mut Context<Self>) {
@@ -814,6 +820,12 @@ impl Focusable for DiffView {
 
 impl Render for DiffView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.bounds_sub.is_none() {
+            self.bounds_sub = Some(cx.observe_window_bounds(window, |_, window, cx| {
+                window_geometry_store::set_diff_bounds(window_geometry::stored_from_window(window));
+                window_geometry::debounce_flush(cx);
+            }));
+        }
         self.sync_collapsed_dirs();
         self.sync_scroll();
         let tree_w = if self.tree_collapsed {

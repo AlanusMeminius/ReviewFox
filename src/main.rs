@@ -7,6 +7,7 @@ mod gitlab;
 mod reqwest_client;
 mod settings_store;
 mod ui;
+mod window_geometry_store;
 mod workspace_store;
 
 fn main() {
