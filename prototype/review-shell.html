@@ -9,7 +9,8 @@
     Question: ReviewFox main + Diff chrome look.
     VERDICT (2026-09-25): A accepted — see docs/adr/0003-beads-rail-shell-from-prototype-a.md
     B/C parked. Keep this file as the visual primary source.
-    open prototype/review-shell.html
+    Diff dual-pane lives in prototype/diff-view.html (separate window).
+    open prototype/review-shell.html · Diff: prototype/diff-view.html
   -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -46,7 +47,7 @@
       height: 100%; padding: 16px;
       display: flex; gap: 12px; align-items: stretch; justify-content: center;
     }
-    .desk { display: flex; gap: 12px; max-width: 1500px; width: 100%; height: 100%; min-width: 0; }
+    .desk { display: flex; gap: 12px; max-width: 1280px; width: 100%; height: 100%; min-width: 0; }
 
     .win {
       background: var(--surface);
@@ -88,8 +89,16 @@
     }
 
     /* ========== A: Beads-like three column ========== */
-    .A-main { flex: 1.25; min-width: 0; }
-    .A-diff { flex: 1.05; min-width: 0; }
+    .A-main { flex: 1; min-width: 0; }
+    .open-diff {
+      margin-left: auto;
+      height: 26px; padding: 0 10px;
+      border: 0; border-radius: 6px;
+      background: var(--accent); color: #fff;
+      font-size: 12px; font-weight: 500; cursor: pointer;
+      text-decoration: none; display: inline-flex; align-items: center;
+    }
+    .open-diff:hover { filter: brightness(1.05); }
 
     .A-cols {
       flex: 1; display: grid; min-height: 0;
@@ -184,7 +193,7 @@
     }
     .A-files-chrome {
       height: 36px; flex-shrink: 0;
-      display: flex; align-items: center;
+      display: flex; align-items: center; gap: 8px;
       padding: 0 12px;
       font-size: 12px; font-weight: 600; color: var(--muted);
       /* no bottom border; vertical divider already from center */
@@ -217,116 +226,6 @@
     .A-tree .badge.D { color: var(--del); }
     .A-tree .stats { margin-left: auto; font-size: 10px; color: var(--faint); }
 
-    /* ========== Diff window — full-height tree|diff, color only ========== */
-    .A-diff-cols {
-      flex: 1; display: flex; min-height: 0;
-    }
-    .A-diff-tree {
-      width: 200px; flex-shrink: 0;
-      background: var(--sidebar);
-      display: flex; flex-direction: column;
-      min-width: 0; overflow: hidden;
-      /* no vertical rule — frost vs white only, runs to window top */
-      transition: width 200ms ease;
-    }
-    .A-diff-tree.collapsed { width: 0; }
-    .A-diff-tree-chrome {
-      height: 36px; flex-shrink: 0;
-      display: flex; align-items: center; gap: 8px;
-      padding: 0 8px 0 12px;
-      /* no bottom border */
-    }
-    .A-diff-tree-body { flex: 1; overflow: auto; padding: 4px 6px 12px; }
-
-    .A-diff-main {
-      flex: 1; min-width: 0;
-      background: #fff;
-      display: flex; flex-direction: column;
-    }
-    .A-diff-main-chrome {
-      height: 36px; flex-shrink: 0;
-      display: flex; align-items: center; gap: 8px;
-      padding: 0 12px;
-      /* no bottom border — not a titlebar rule */
-    }
-    .A-diff-main-chrome .path {
-      flex: 1; min-width: 0;
-      font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--muted);
-    }
-    .A-diff-main-chrome .count { font-size: 12px; color: var(--muted); flex-shrink: 0; }
-
-    .A-dual-wrap {
-      flex: 1; min-width: 0; display: flex; flex-direction: column;
-    }
-    .A-dual-heads {
-      display: grid; grid-template-columns: 1fr 56px 1fr;
-      flex-shrink: 0;
-      font-size: 11px; color: var(--muted);
-    }
-    .A-dual-heads > div {
-      padding: 4px 10px 8px;
-      background: transparent;
-    }
-    .A-dual-heads .mid { background: transparent; }
-
-    .A-dual {
-      flex: 1; min-height: 0;
-      display: grid;
-      grid-template-columns: 1fr 56px 1fr;
-    }
-    .A-code {
-      overflow: auto; /* own scrollbar */
-      font-family: "IBM Plex Mono", monospace; font-size: 12px;
-      line-height: 20px;
-      background: #fff;
-    }
-    .A-code .line {
-      min-height: 20px; padding: 0 12px; white-space: pre;
-    }
-    .A-code .line.mod { background: var(--mod-bg); }
-    .A-code .line.add { background: var(--add-bg); }
-    .A-code .line.del { background: var(--del-bg); }
-    .A-code .line.gap {
-      background: repeating-linear-gradient(
-        -45deg, #f0f2f5, #f0f2f5 4px, #e6e9ee 4px, #e6e9ee 8px
-      );
-      min-height: 10px;
-    }
-    .A-code .kw { color: #0033b3; font-weight: 500; }
-    .A-code .str { color: #067d17; }
-    .A-code .cm { color: #8c8c8c; }
-
-    /* Central gutter: two line-number columns + connectors */
-    .A-gutter {
-      background: #f7f8fb;
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      font-family: "IBM Plex Mono", monospace;
-      font-size: 11px;
-      line-height: 20px;
-      color: var(--faint);
-      position: relative;
-      overflow: hidden;
-      user-select: none;
-      box-shadow: inset 1px 0 0 #e8eaef, inset -1px 0 0 #e8eaef;
-    }
-    .A-gutter .col { text-align: right; padding-right: 6px; }
-    .A-gutter .col.right { text-align: left; padding-left: 6px; padding-right: 0; }
-    .A-gutter .ln { height: 20px; }
-    .A-gutter .ln.mod { background: var(--mod-bg); color: #5b6b85; }
-    .A-gutter .ribbon {
-      position: absolute;
-      left: 0; right: 0;
-      background: rgba(36, 87, 214, 0.14);
-      border-radius: 2px;
-      pointer-events: none;
-    }
-    .A-gutter .chev {
-      position: absolute; left: 50%; transform: translateX(-50%);
-      font-size: 10px; color: var(--accent); line-height: 20px;
-      pointer-events: none;
-    }
-
     /* B/C kept minimal stubs so switcher still works */
     .stub {
       flex: 1; display: grid; place-items: center; padding: 40px;
@@ -345,6 +244,7 @@
       <div class="hint">← → · A is the chosen direction</div>
     </div>
     <button type="button" id="nextVar">›</button>
+    <a href="diff-view.html" style="color:#93c5fd;text-decoration:none;margin-left:8px;font-size:12px">Diff →</a>
   </div>
 
   <script>
@@ -427,7 +327,7 @@
       document.getElementById("stateDump").textContent = JSON.stringify(
         {
           variant: v,
-          note: "A refined: no titlebar rules; color boundaries; full-height commit|tree rule; capsule repo select; real file tree; CLion center line nos",
+          note: "A: Beads rail main shell; Diff is prototype/diff-view.html",
           comparison: MOCK.comparison,
           reposCollapsed: MOCK.reposCollapsed,
           diffTreeCollapsed: MOCK.diffTreeCollapsed,
@@ -463,88 +363,6 @@
           </div>`;
         })
         .join("");
-    }
-
-    /** Dual panes + center line numbers (CLion-like). Rows are visual-aligned. */
-    function dualModel() {
-      // visual rows: each has left text, right text, left ln, right ln, kind
-      return [
-        { l: 18, r: 18, left: '<span class="kw">pub enum</span> Alignment {', right: '<span class="kw">pub enum</span> Alignment {', k: "" },
-        { l: 19, r: 19, left: "    Equal { old: u32, new: u32 },", right: "    Equal { old: u32, new: u32 },", k: "" },
-        { l: 20, r: null, left: "    Insert { after_old: u32, news: Range },", right: "", k: "del" },
-        { l: 21, r: null, left: "    Delete { olds: Range, at_new: u32 },", right: "", k: "del" },
-        { l: 22, r: 20, left: "    Change { olds: Range, news: Range },", right: "    Replace { olds: LineSpan, news: LineSpan },", k: "mod" },
-        { l: null, r: 21, left: "", right: "    Insert { after_old: u32, news: LineSpan },", k: "add" },
-        { l: null, r: 22, left: "", right: "    Delete { olds: LineSpan, at_new: u32 },", k: "add" },
-        { l: 23, r: 23, left: "}", right: "}", k: "" },
-        { l: 24, r: 24, left: "", right: "", k: "" },
-        { l: 25, r: 25, left: '<span class="kw">impl</span> Alignment {', right: '<span class="kw">impl</span> Alignment {', k: "" },
-        { l: 26, r: 26, left: "    <span class=\"kw\">fn</span> is_change(&self) -> bool {", right: "    <span class=\"kw\">fn</span> is_replace(&self) -> bool {", k: "mod" },
-        { l: 27, r: 27, left: "        matches!(self, Self::Change { .. })", right: "        matches!(self, Self::Replace { .. })", k: "mod" },
-        { l: 28, r: 28, left: "    }", right: "    }", k: "" },
-        { l: 29, r: 29, left: "}", right: "}", k: "" },
-      ];
-    }
-
-    function renderDual() {
-      const rows = dualModel();
-      const left = rows
-        .map((row) => {
-          if (row.k === "add" && !row.left) return `<div class="line gap"></div>`;
-          return `<div class="line ${row.k}">${row.left || " "}</div>`;
-        })
-        .join("");
-      const right = rows
-        .map((row) => {
-          if (row.k === "del" && !row.right) return `<div class="line gap"></div>`;
-          return `<div class="line ${row.k}">${row.right || " "}</div>`;
-        })
-        .join("");
-      const lnL = rows
-        .map((row) => `<div class="ln ${row.k}">${row.l ?? ""}</div>`)
-        .join("");
-      const lnR = rows
-        .map((row) => `<div class="ln ${row.k}">${row.r ?? ""}</div>`)
-        .join("");
-      // ribbons covering mod/add/del block roughly rows 2–6 (0-based) and 10–11
-      return `
-        <div class="A-dual-heads">
-          <div class="truncate mono">alignment.rs · ${esc(MOCK.comparison.base)}</div>
-          <div class="mid"></div>
-          <div class="truncate mono">alignment.rs · ${esc(MOCK.comparison.head)}</div>
-        </div>
-        <div class="A-dual">
-          <div class="A-code" id="codeL">${left}</div>
-          <div class="A-gutter" id="gutter">
-            <div class="ribbon" style="top:${2 * 20}px;height:${5 * 20}px"></div>
-            <div class="ribbon" style="top:${10 * 20}px;height:${2 * 20}px"></div>
-            <div class="chev" style="top:${4 * 20}px">»</div>
-            <div class="chev" style="top:${10 * 20}px">»</div>
-            <div class="col">${lnL}</div>
-            <div class="col right">${lnR}</div>
-          </div>
-          <div class="A-code" id="codeR">${right}</div>
-        </div>`;
-    }
-
-    function syncScroll() {
-      const L = document.getElementById("codeL");
-      const R = document.getElementById("codeR");
-      const G = document.getElementById("gutter");
-      if (!L || !R || !G) return;
-      let lock = false;
-      const sync = (src, a, b) => {
-        src.addEventListener("scroll", () => {
-          if (lock) return;
-          lock = true;
-          a.scrollTop = src.scrollTop;
-          b.scrollTop = src.scrollTop;
-          lock = false;
-        });
-      };
-      // demo: sync all three; each pane still has its own scrollbar
-      sync(L, R, G);
-      sync(R, L, G);
     }
 
     function renderA(desk) {
@@ -600,36 +418,12 @@
               </div>
             </section>
             <aside class="A-files">
-              <div class="A-files-chrome">Changes</div>
+              <div class="A-files-chrome">
+                <span>Changes</span>
+                <a class="open-diff" href="diff-view.html">Open Diff</a>
+              </div>
               <div class="A-tree">${renderTree(MOCK.tree)}</div>
             </aside>
-          </div>
-        </div>
-        <div class="win A-diff">
-          <div class="A-diff-cols">
-            <aside class="A-diff-tree ${MOCK.diffTreeCollapsed ? "collapsed" : ""}">
-              <div class="A-diff-tree-chrome">
-                <div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
-                <button type="button" class="A-side-toggle" data-act="toggle-diff-tree" title="Hide file tree">
-                  ${sidebarToggleIcon()}
-                </button>
-              </div>
-              <div class="A-diff-tree-body">
-                <div class="A-tree">${renderTree(MOCK.tree)}</div>
-              </div>
-            </aside>
-            <section class="A-diff-main">
-              <div class="A-diff-main-chrome">
-                ${
-                  MOCK.diffTreeCollapsed
-                    ? `<button type="button" class="A-side-toggle" data-act="toggle-diff-tree" title="Show file tree">${sidebarToggleIcon()}</button>`
-                    : ""
-                }
-                <div class="path truncate">${esc(MOCK.selectedFile)}</div>
-                <div class="count">2 differences</div>
-              </div>
-              <div class="A-dual-wrap">${renderDual()}</div>
-            </section>
           </div>
         </div>`;
     }
@@ -644,12 +438,6 @@
       desk.querySelectorAll("[data-act='toggle-repos']").forEach((el) =>
         el.addEventListener("click", () => {
           MOCK.reposCollapsed = !MOCK.reposCollapsed;
-          render();
-        })
-      );
-      desk.querySelectorAll("[data-act='toggle-diff-tree']").forEach((el) =>
-        el.addEventListener("click", () => {
-          MOCK.diffTreeCollapsed = !MOCK.diffTreeCollapsed;
           render();
         })
       );
@@ -699,7 +487,6 @@
       if (v === "A") {
         renderA(desk);
         bind(desk);
-        requestAnimationFrame(syncScroll);
       } else {
         renderParked(desk, meta.name);
       }

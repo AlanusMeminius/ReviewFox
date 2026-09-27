@@ -53,8 +53,8 @@ A contiguous algorithm-produced change block within one file of a Comparison und
 _Avoid_: change region (as identity), semantic region, diff block (ambiguous)
 
 **Alignment**:
-An ordered description of how old and new file lines correspond: equal, insert, delete, or replace (replace may be many-to-many; pairwise line maps are optional refinement only).
-_Avoid_: virtual row (view projection), line matrix (rendering), mapping (vague)
+The position relationships for one file under ViewOptions: an ordered list of equal (paired old/new line numbers), insert (new lines plus the old-side insertion point between two lines, or file start/end), delete (old lines plus the new-side deletion point), or replace (one change block of old lines and new lines, including a same-line textual edit; never a delete of the old line plus an insert of the new line). Pairwise old-line→new-line only when that refinement is reliable—never implied by padding alone.
+_Avoid_: virtual row (view projection), line matrix (rendering), mapping (vague), 位置关系 (as a second domain object beside Alignment), change (as a fourth Alignment op)
 
 **Anchor**:
 The attachment of a DraftComment to a place in a Comparison: either a file-level attachment (path only, no line span) or a line attachment (path, side old/new, line span, optional owning Hunk). v1 keys files by path only—no rename crossing. Not a ChangedPath (changeset listing).

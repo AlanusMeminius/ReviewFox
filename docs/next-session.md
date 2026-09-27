@@ -11,6 +11,7 @@
 - **Viewing-flow UX** (2026-09-26): nested ChangedPath trees (main read-only + Diff clickable), ± stats + M/A/D, `Open Diff` button (only refresh path for Diff), unified Diff scroll, gap/ribbon/checkbox polish, IBM Plex font names, `ChangedPath` in CONTEXT
 - **Diff chrome sync** (2026-09-26): tree toggle/traffic-lights match main, resizable tree|dual splitter (`clamp_diff_tree_width`), Export icon button, dual-heads row removed
 - **Workspace sidebar** (2026-09-26): persist `{last, pinned, workspaces}` to Application Support; restore `last` on launch; sidebar is **Recent** (0–1, no context menu) + **Pin** (hidden when empty, newest on top) + **Repositories** (non-pinned only, alpha by display name); right-click Pin → Unpin|Remove, Repositories → Pin|Remove; Open Repo / branch select / click row write immediately; CLI argv / `REVIEWFOX_REPO` removed.
+- **Dual-pane P1** (2026-09-26): Alignment bridges in **`prototype/diff-view.html`** (split from shell); insert/delete wedges, replace trapezoid (incl. 3→1), hover position copy; see `docs/dual-pane-diff.md`
 
 ## Still deferred
 
@@ -27,6 +28,7 @@
 
 ## Next candidates (when ready)
 
+- **Dual-pane track** — `docs/dual-pane-diff.md` (ADR-0006); **P1 done** in `prototype/diff-view.html`; next **P2** fold + hunk jump
 - Draft text input polish
 - UnresolvedAnchor when Comparison changes with open comments
 - Review reopen persistence (parked)
