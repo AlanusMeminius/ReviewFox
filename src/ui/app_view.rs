@@ -878,7 +878,7 @@ fn open_or_update_diff(
     if let Some(h) = *handle {
         let snap = snapshot.clone();
         if h.update(cx, |view, window, cx| {
-            view.apply_snapshot(snap);
+            view.apply_snapshot(snap, cx);
             window.activate_window();
             cx.notify();
         })
@@ -909,7 +909,7 @@ fn open_or_update_diff(
             window_background: super::window_background_appearance(),
             ..Default::default()
         },
-        move |_, cx| cx.new(|cx| DiffView::with_snapshot(snap, cx)),
+        move |window, cx| cx.new(|cx| DiffView::with_snapshot(snap, window, cx)),
     ) {
         Ok(h) => *handle = Some(h),
         Err(e) => eprintln!("failed to open diff window: {e}"),
@@ -919,14 +919,17 @@ fn open_or_update_diff(
 fn remember_diff_reopen_from_snapshot(snapshot: &DiffSnapshot) {
     window_geometry_store::note_diff_opened(DiffReopen {
         repository: snapshot.comparison.repository.path().to_path_buf(),
-        base_oid: snapshot.comparison.base_oid.to_string(),
+        base_oid: snapshot.comparison.base_oid.map(|o| o.to_string()),
         head_oid: snapshot.comparison.head_oid.to_string(),
         selected_path: snapshot.selected_path.clone(),
     });
 }
 
 fn rebuild_diff_snapshot(reopen: &DiffReopen) -> Option<DiffSnapshot> {
-    let base_oid: Oid = reopen.base_oid.parse().ok()?;
+    let base_oid: Option<Oid> = match &reopen.base_oid {
+        Some(s) => Some(s.parse().ok()?),
+        None => None,
+    };
     let head_oid: Oid = reopen.head_oid.parse().ok()?;
     let comparison = Comparison {
         repository: Repository::new(reopen.repository.clone()),

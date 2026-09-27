@@ -3,6 +3,7 @@ mod app_icon;
 mod app_view;
 mod current_repo;
 mod gitlab_connection;
+mod diff;
 mod diff_window;
 mod file_tree;
 mod settings_window;

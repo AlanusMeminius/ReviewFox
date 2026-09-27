@@ -1,6 +1,7 @@
 # Dual-pane Diff — Design & Plan
 
 Status: interaction rules for fold and scroll settled in grill (2026-09-26). Prototype Diff at `prototype/diff-view.html` proves the single-omission case only. Next: implement §3.1–§3.5, then GPUI port.
+GPUI structure / performance: `docs/diffview-architecture.md` (ADR-0008).
 References: `CONTEXT.md` (Alignment / Hunk / ViewOptions), ADR-0001, ADR-0003, ADR-0006, CLion side-by-side UX, `prototype/diff-view.html`.
 
 ## 1. Intent

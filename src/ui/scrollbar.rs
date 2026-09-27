@@ -14,13 +14,13 @@ use gpui::{
     point, prelude::*, px, rgb,
 };
 
-const THUMB_WIDTH: f32 = 6.;
-const TRACK_WIDTH: f32 = 10.;
+pub(crate) const THUMB_WIDTH: f32 = 6.;
+pub(crate) const TRACK_WIDTH: f32 = 10.;
 const MIN_THUMB: f32 = 24.;
-const PAD: f32 = 4.;
-const HIDE_DELAY: Duration = Duration::from_secs(1);
-const THUMB_IDLE: u32 = 0xd8dde6;
-const THUMB_ACTIVE: u32 = 0xb8c0cc;
+pub(crate) const PAD: f32 = 4.;
+pub(crate) const HIDE_DELAY: Duration = Duration::from_secs(1);
+pub(crate) const THUMB_IDLE: u32 = 0xd8dde6;
+pub(crate) const THUMB_ACTIVE: u32 = 0xb8c0cc;
 
 /// Which outer edge hosts the overlay thumb.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,16 +56,16 @@ impl Handle {
     }
 }
 
-struct ThumbGeom {
-    thumb_height: Pixels,
-    thumb_top: Pixels,
+pub(crate) struct ThumbGeom {
+    pub(crate) thumb_height: Pixels,
+    pub(crate) thumb_top: Pixels,
     max_offset: Pixels,
-    track_height: Pixels,
+    pub(crate) track_height: Pixels,
 }
 
 impl ThumbGeom {
     /// Pure geometry seam: viewport + max scroll offset + current offset → thumb.
-    fn from_metrics(viewport: Pixels, max_offset: Pixels, offset_y: Pixels) -> Option<Self> {
+    pub(crate) fn from_metrics(viewport: Pixels, max_offset: Pixels, offset_y: Pixels) -> Option<Self> {
         let track_height = (viewport - px(PAD * 2.)).max(px(0.));
         if max_offset <= px(0.) || track_height <= px(0.) {
             return None;
@@ -80,6 +80,18 @@ impl ThumbGeom {
             max_offset,
             track_height,
         })
+    }
+
+    /// Scroll offset (negative, like `ScrollHandle`) that puts the thumb top at
+    /// `thumb_top` within the track.
+    pub(crate) fn offset_for(&self, thumb_top: Pixels) -> Pixels {
+        let travel = (self.track_height - self.thumb_height).max(px(0.));
+        let ratio = if travel > px(0.) {
+            (thumb_top / travel).clamp(0., 1.)
+        } else {
+            0.
+        };
+        -self.max_offset * ratio
     }
 
     fn compute(handle: &Handle) -> Option<Self> {
@@ -207,13 +219,7 @@ impl VerticalScrollbar {
     }
 
     fn jump_to_thumb_top(&self, thumb_top: Pixels, geom: &ThumbGeom) {
-        let travel = (geom.track_height - geom.thumb_height).max(px(0.));
-        let ratio = if travel > px(0.) {
-            (thumb_top / travel).clamp(0., 1.)
-        } else {
-            0.
-        };
-        self.handle.set_offset_y(-geom.max_offset * ratio);
+        self.handle.set_offset_y(geom.offset_for(thumb_top));
     }
 
     fn thumb_shown(&self) -> bool {
@@ -490,6 +496,14 @@ mod tests {
         let bottom = ThumbGeom::from_metrics(px(100.), px(100.), px(-100.)).unwrap();
         let travel = bottom.track_height - bottom.thumb_height;
         assert_eq!(bottom.thumb_top, travel);
+    }
+
+    #[test]
+    fn offset_for_inverts_thumb_top() {
+        let geom = ThumbGeom::from_metrics(px(100.), px(300.), px(-150.)).unwrap();
+        assert_eq!(geom.offset_for(geom.thumb_top), px(-150.));
+        assert_eq!(geom.offset_for(px(-5.)), px(0.));
+        assert_eq!(geom.offset_for(px(1000.)), px(-300.));
     }
 
     #[test]

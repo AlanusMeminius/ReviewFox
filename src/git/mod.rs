@@ -1,12 +1,13 @@
 //! git2 adapter: Repository / Comparison I/O → domain types. No UI chrome.
 
 use crate::domain::{
-    Alignment, AlignmentOp, ChangedPath, Comparison, DisplayRows, LineSpan, Oid, PathStatus,
-    Repository, Side, ViewOptions, display_rows_folded, split_lines,
+    Alignment, AlignmentOp, ChangedPath, Comparison, LineSpan, Oid, PathStatus, Repository, Side,
+    ViewOptions, split_lines,
 };
 use crate::workspace_store::{self, WorkspaceEntry};
 use similar::{DiffOp, TextDiff};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
@@ -120,7 +121,7 @@ impl BranchBrowser {
         let mut bb = Self {
             comparison: Comparison {
                 repository,
-                base_oid: commits[0].oid, // placeholder; set by fold
+                base_oid: None, // placeholder; set by fold
                 head_oid: commits[0].oid,
             },
             changed_paths: Vec::new(),
@@ -158,10 +159,7 @@ impl BranchBrowser {
             .iter()
             .find(|b| b.name == name)
             .ok_or_else(|| err("branch not found"))?;
-        let base_oid = {
-            let head = repo.find_commit(oid_to_git(branch.oid)).map_err(map_git)?;
-            head.parent_id(0).map(oid_from_git).map_err(map_git)?
-        };
+        let base_oid = first_parent_oid(&repo, branch.oid)?;
         self.branch = branch.name.clone();
         self.commits = list_commits_from(&repo, branch.oid)?;
         self.in_range = vec![false; self.commits.len()];
@@ -204,7 +202,8 @@ impl BranchBrowser {
     }
 
     /// Reload ChangedPaths for an explicit OID pair (MR Entry / forced Comparison).
-    pub fn set_comparison_oids(&mut self, base_oid: Oid, head_oid: Oid) -> Result<()> {
+    /// `base_oid: None` = empty tree.
+    pub fn set_comparison_oids(&mut self, base_oid: Option<Oid>, head_oid: Oid) -> Result<()> {
         self.comparison.base_oid = base_oid;
         self.comparison.head_oid = head_oid;
         let repo = open_repo(&self.comparison)?;
@@ -402,7 +401,7 @@ fn apply_range_fold(repo: &git2::Repository, bb: &mut BranchBrowser) -> Result<(
     let head_oid = bb.commits[head_idx].oid;
 
     let base_oid = if last_idx + 1 < bb.commits.len() {
-        bb.commits[last_idx + 1].oid
+        Some(bb.commits[last_idx + 1].oid)
     } else {
         first_parent_oid(repo, bb.commits[last_idx].oid)?
     };
@@ -416,15 +415,13 @@ fn apply_range_fold(repo: &git2::Repository, bb: &mut BranchBrowser) -> Result<(
     Ok(())
 }
 
-fn first_parent_oid(repo: &git2::Repository, commit: Oid) -> Result<Oid> {
+/// First parent of `commit`, or `None` for a root commit (base = empty tree).
+fn first_parent_oid(repo: &git2::Repository, commit: Oid) -> Result<Option<Oid>> {
     let c = repo.find_commit(oid_to_git(commit)).map_err(map_git)?;
     if c.parent_count() == 0 {
-        return Err(err(format!(
-            "commit {} has no parent; cannot form Comparison",
-            commit.short()
-        )));
+        return Ok(None);
     }
-    Ok(oid_from_git(c.parent_id(0).map_err(map_git)?))
+    Ok(Some(oid_from_git(c.parent_id(0).map_err(map_git)?)))
 }
 
 fn list_commits_from(repo: &git2::Repository, start: Oid) -> Result<Vec<CommitInfo>> {
@@ -528,19 +525,24 @@ pub fn list_changed_paths(
     repo: &git2::Repository,
     comparison: &Comparison,
 ) -> Result<Vec<ChangedPath>> {
-    let base = repo
-        .find_commit(oid_to_git(comparison.base_oid))
-        .map_err(map_git)?;
+    // `None` base = empty tree: every head path is an Add.
+    let base_tree = match comparison.base_oid {
+        Some(oid) => Some(
+            repo.find_commit(oid_to_git(oid))
+                .and_then(|c| c.tree())
+                .map_err(map_git)?,
+        ),
+        None => None,
+    };
     let head = repo
         .find_commit(oid_to_git(comparison.head_oid))
         .map_err(map_git)?;
-    let base_tree = base.tree().map_err(map_git)?;
     let head_tree = head.tree().map_err(map_git)?;
 
     // Renames OFF — DiffOptions default; do not call find_similar.
     let mut opts = git2::DiffOptions::new();
     let diff = repo
-        .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), Some(&mut opts))
+        .diff_tree_to_tree(base_tree.as_ref(), Some(&head_tree), Some(&mut opts))
         .map_err(map_git)?;
 
     let mut out: Vec<ChangedPath> = Vec::new();
@@ -602,7 +604,7 @@ pub fn side_lines(comparison: &Comparison, side: Side, path: &str) -> Result<Vec
     let repo = open_repo(comparison)?;
     let oid = match side {
         Side::Old => comparison.base_oid,
-        Side::New => comparison.head_oid,
+        Side::New => Some(comparison.head_oid),
     };
     let bytes = blob_text_at(&repo, oid, path)?.unwrap_or_default();
     if is_binary(&bytes) {
@@ -615,11 +617,15 @@ pub fn side_lines(comparison: &Comparison, side: Side, path: &str) -> Result<Vec
         .collect())
 }
 
+/// Blob bytes of `path` at `commit_oid`; `None` commit = empty tree (no blob).
 fn blob_text_at(
     repo: &git2::Repository,
-    commit_oid: Oid,
+    commit_oid: Option<Oid>,
     path: &str,
 ) -> Result<Option<Vec<u8>>> {
+    let Some(commit_oid) = commit_oid else {
+        return Ok(None);
+    };
     let commit = repo.find_commit(oid_to_git(commit_oid)).map_err(map_git)?;
     let tree = commit.tree().map_err(map_git)?;
     match tree.get_path(Path::new(path)) {
@@ -651,14 +657,14 @@ pub fn is_binary(data: &[u8]) -> bool {
     suspicious * 100 > sample.len() * 10
 }
 
+/// One file of a Comparison: text plus its Alignment. The dual-pane view
+/// projection (rows, bridges, fold) is built by the Diff UI, not here.
 #[derive(Clone, Debug)]
 pub enum FileDiff {
     Text {
-        display: DisplayRows,
-        hunk_count: usize,
         alignment: Alignment,
-        old_text: String,
-        new_text: String,
+        old_text: Arc<str>,
+        new_text: Arc<str>,
     },
     Binary,
     Error(String),
@@ -690,26 +696,17 @@ fn file_diff_inner(
     };
     let new_bytes = match status {
         PathStatus::Delete => Vec::new(),
-        _ => blob_text_at(&repo, comparison.head_oid, path)?.unwrap_or_default(),
+        _ => blob_text_at(&repo, Some(comparison.head_oid), path)?.unwrap_or_default(),
     };
 
     if is_binary(&old_bytes) || is_binary(&new_bytes) {
         return Ok(FileDiff::Binary);
     }
 
-    let old_text = String::from_utf8_lossy(&old_bytes).into_owned();
-    let new_text = String::from_utf8_lossy(&new_bytes).into_owned();
+    let old_text: Arc<str> = String::from_utf8_lossy(&old_bytes).into();
+    let new_text: Arc<str> = String::from_utf8_lossy(&new_bytes).into();
     let alignment = compute_alignment(&old_text, &new_text, options);
-    let hunk_count = alignment.hunks().len();
-    let display = display_rows_folded(
-        &old_text,
-        &new_text,
-        &alignment,
-        &crate::domain::FoldState::collapsed(),
-    );
     Ok(FileDiff::Text {
-        display,
-        hunk_count,
         alignment,
         old_text,
         new_text,
@@ -878,17 +875,13 @@ mod tests {
             &ViewOptions::default(),
         );
         match diff {
-            FileDiff::Text {
-                display,
-                hunk_count,
-                ..
-            } => {
-                assert!(hunk_count >= 1);
+            FileDiff::Text { alignment, .. } => {
+                assert!(!alignment.hunks().is_empty());
                 assert!(
-                    display
-                        .new_rows
+                    alignment
+                        .ops
                         .iter()
-                        .any(|r| r.kind == crate::domain::RowKind::Insert)
+                        .any(|op| matches!(op, AlignmentOp::Insert { .. }))
                 );
             }
             other => panic!("expected text diff, got {other:?}"),
@@ -951,14 +944,14 @@ mod tests {
         assert!(bb.in_range[1]);
         assert!(!bb.in_range[0]);
         assert_eq!(bb.comparison.head_oid, bb.commits[1].oid);
-        assert_eq!(bb.comparison.base_oid, bb.commits[2].oid);
+        assert_eq!(bb.comparison.base_oid, Some(bb.commits[2].oid));
 
         // Shift-extend to tip → first..third (base = first commit)
         bb.select_commit(0, true).expect("shift");
         assert!(bb.in_range[0] && bb.in_range[1]);
         assert!(!bb.in_range[2]);
         assert_eq!(bb.comparison.head_oid, bb.commits[0].oid);
-        assert_eq!(bb.comparison.base_oid, bb.commits[2].oid);
+        assert_eq!(bb.comparison.base_oid, Some(bb.commits[2].oid));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -969,8 +962,8 @@ mod tests {
         let mut bb = BranchBrowser::open(&dir).expect("open");
         let head = bb.commits[0].oid;
         let base = bb.commits[2].oid;
-        bb.set_comparison_oids(base, head).expect("set oids");
-        assert_eq!(bb.comparison.base_oid, base);
+        bb.set_comparison_oids(Some(base), head).expect("set oids");
+        assert_eq!(bb.comparison.base_oid, Some(base));
         assert_eq!(bb.comparison.head_oid, head);
         assert!(
             bb.changed_paths
@@ -997,7 +990,124 @@ mod tests {
         assert!(!bb.in_range[1]);
         assert!(!bb.in_range[2]);
         assert_eq!(bb.comparison.head_oid, head);
-        assert_eq!(bb.comparison.base_oid, parent);
+        assert_eq!(bb.comparison.base_oid, Some(parent));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn root_commit_alone_compares_against_empty_tree() {
+        let dir = temp_repo();
+        let mut bb = BranchBrowser::open(&dir).expect("open");
+        let root = bb.commits.len() - 1;
+        bb.select_commit(root, false).expect("select root commit");
+        assert_eq!(bb.comparison.base_oid, None);
+        assert_eq!(bb.comparison.head_oid, bb.commits[root].oid);
+        assert_eq!(
+            bb.comparison.label(),
+            format!("root..{}", bb.commits[root].oid.short())
+        );
+        assert_eq!(
+            bb.changed_paths,
+            vec![ChangedPath {
+                path: "a.txt".into(),
+                status: PathStatus::Add,
+                additions: 1,
+                deletions: 0,
+            }]
+        );
+
+        match file_diff(&bb.comparison, "a.txt", PathStatus::Add, &ViewOptions::default()) {
+            FileDiff::Text {
+                alignment,
+                old_text,
+                new_text,
+            } => {
+                assert!(old_text.is_empty());
+                assert_eq!(&*new_text, "one
+");
+                assert_eq!(
+                    alignment.ops,
+                    vec![AlignmentOp::Insert {
+                        after_old: 0,
+                        news: LineSpan { start: 1, count: 1 },
+                    }]
+                );
+            }
+            other => panic!("expected text diff, got {other:?}"),
+        }
+        assert!(side_lines(&bb.comparison, Side::Old, "a.txt").unwrap().is_empty());
+        assert_eq!(
+            side_lines(&bb.comparison, Side::New, "a.txt").unwrap(),
+            vec!["one".to_string()]
+        );
+
+        // Rebuilding the same Comparison from its OIDs (Diff reopen path) works too.
+        let reloaded = list_changed_paths_for(&bb.comparison).expect("reload");
+        assert_eq!(reloaded, bb.changed_paths);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn range_including_root_is_all_additions() {
+        let dir = temp_repo();
+        let mut bb = BranchBrowser::open(&dir).expect("open");
+        let root = bb.commits.len() - 1;
+        bb.select_commit(0, false).expect("select tip");
+        bb.select_commit(root, true).expect("shift to root");
+        assert!(bb.in_range.iter().all(|&v| v));
+        assert_eq!(bb.comparison.base_oid, None);
+        assert_eq!(bb.comparison.head_oid, bb.commits[0].oid);
+        assert_eq!(
+            bb.changed_paths,
+            vec![
+                ChangedPath {
+                    path: "a.txt".into(),
+                    status: PathStatus::Add,
+                    additions: 3,
+                    deletions: 0,
+                },
+                ChangedPath {
+                    path: "b.txt".into(),
+                    status: PathStatus::Add,
+                    additions: 1,
+                    deletions: 0,
+                },
+            ]
+        );
+        match file_diff(&bb.comparison, "b.txt", PathStatus::Add, &ViewOptions::default()) {
+            FileDiff::Text { old_text, new_text, .. } => {
+                assert!(old_text.is_empty());
+                assert_eq!(&*new_text, "new
+");
+            }
+            other => panic!("expected text diff, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn single_commit_repo_opens_with_empty_base() {
+        let dir = std::env::temp_dir().join(format!(
+            "reviewfox-root-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init"]);
+        std::fs::write(dir.join("x.txt"), "1
+2
+").unwrap();
+        git(&dir, &["add", "x.txt"]);
+        git(&dir, &["commit", "-m", "only"]);
+
+        let bb = BranchBrowser::open(&dir).expect("open single-commit repo");
+        assert_eq!(bb.comparison.base_oid, None);
+        assert_eq!(bb.changed_paths.len(), 1);
+        assert_eq!(bb.changed_paths[0].status, PathStatus::Add);
+        assert_eq!(bb.changed_paths[0].additions, 2);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

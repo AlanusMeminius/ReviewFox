@@ -101,7 +101,7 @@ mod tests {
     fn review_with_body(body: &str) -> Review {
         let comparison = Comparison {
             repository: Repository::new(PathBuf::from("/tmp/repo")),
-            base_oid: Oid::from_bytes([1; 20]),
+            base_oid: Some(Oid::from_bytes([1; 20])),
             head_oid: Oid::from_bytes([2; 20]),
         };
         let mut review = Review::new(comparison);
@@ -121,7 +121,7 @@ mod tests {
     fn empty_review_exports_empty() {
         let comparison = Comparison {
             repository: Repository::new(PathBuf::from("/tmp/repo")),
-            base_oid: Oid::from_bytes([1; 20]),
+            base_oid: Some(Oid::from_bytes([1; 20])),
             head_oid: Oid::from_bytes([2; 20]),
         };
         assert!(export_review(&Review::new(comparison)).is_empty());
