@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::domain::{
-    Anchor, ChangedPath, Comparison, PathStatus, Review, SearchMatch, SearchScope, Side,
+    Anchor, ChangedPath, Comparison, DiffFontSize, PathStatus, Review, SearchMatch, SearchScope, Side,
     ViewOptions, search_file,
 };
 
@@ -21,7 +21,9 @@ use super::file_tree::{self, TreeRow};
 use super::mac_column_vibrancy::ColumnVibrancy;
 use super::scrollbar;
 use super::splitter::{self, Axis, ResizeState};
+use super::icon_button::IconButton;
 use super::theme;
+use super::tooltip::{self, Tooltip};
 use super::window_geometry;
 
 /// Own snapshot for the Diff window — not a live shared model with main.
@@ -336,6 +338,19 @@ impl DiffView {
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let mods = &event.keystroke.modifiers;
+        if mods.secondary() && !mods.alt && !mods.shift {
+            let op = match event.keystroke.key.as_str() {
+                "=" | "+" => Some(FontOp::Inc),
+                "-" => Some(FontOp::Dec),
+                "0" => Some(FontOp::Reset),
+                _ => None,
+            };
+            if let Some(op) = op {
+                self.font_size(op, cx);
+                return;
+            }
+        }
         if self.searching {
             match event.keystroke.key.as_str() {
                 "escape" => {
@@ -407,6 +422,12 @@ impl DiffView {
     }
 
 
+    fn font_size(&mut self, op: FontOp, cx: &mut Context<Self>) {
+        self.with_pane(cx, |pane, cx| pane.set_font_size(op, cx));
+        // The toolbar shows the size, so it re-renders with the pane.
+        cx.notify();
+    }
+
     fn export_to_clipboard(&mut self, cx: &mut Context<Self>) {
         let Some(review) = &self.review else {
             return;
@@ -474,11 +495,12 @@ impl DiffView {
                             .overflow_hidden()
                             .bg(theme::sidebar())
                             .flex()
+                            .flex_col()
                             .pt(px(theme::CHANGES_TOP_INSET))
-                            .pb(px(theme::CHANGES_INSET))
                             .pl(px(theme::CHANGES_INSET))
                             .pr(px(theme::CHANGES_INSET))
-                            .child(render_dual_pane(self, cx)),
+                            .child(render_dual_pane(self, cx))
+                            .child(render_status_bar(self, cx)),
                     ),
             )
             .into_any_element()
@@ -548,19 +570,9 @@ fn collapsed_leading_width() -> f32 {
     controls
 }
 
-fn render_titlebar(
-    view: &DiffView,
-    window: &Window,
-    cx: &mut Context<DiffView>,
-) -> impl IntoElement {
-    // Leading zone spans exactly what sits left of the stage, so what follows starts
-    // on the stage's left edge and lines up with the island below.
-    let leading_w = if view.tree_collapsed {
-        px(collapsed_leading_width())
-    } else {
-        px(view.tree_width + splitter::HANDLE_WIDTH)
-    };
-    let (path, subtitle) = match &view.snapshot {
+/// The selected file's path and where the reader is in it, as `(path, subtitle)`.
+fn file_status(view: &DiffView, cx: &mut Context<DiffView>) -> (String, String) {
+    match &view.snapshot {
         Some(s) => {
             let n = view
                 .review
@@ -590,8 +602,57 @@ fn render_titlebar(
             (s.selected_path.clone(), sub)
         }
         None => ("—".into(), "No file selected".into()),
-    };
+    }
+}
 
+/// Rides on the stage under the island: the file being read and where in it.
+fn render_status_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
+    let (path, subtitle) = file_status(view, cx);
+    div()
+        .id("diff-status-bar")
+        .flex_none()
+        .h(px(STATUS_BAR_HEIGHT))
+        // Text starts where the island's content does, one radius in.
+        .px(px(theme::CHANGES_RADIUS))
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_xs()
+        .text_color(theme::muted())
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .font_family(theme::MONO_FONT)
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(path),
+        )
+        .child(
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .child(subtitle),
+        )
+}
+
+/// The status bar's band below the island. It replaces the stage's bottom inset,
+/// so the text sits centred between the island and the window edge.
+const STATUS_BAR_HEIGHT: f32 = 28.;
+
+fn render_titlebar(
+    view: &DiffView,
+    window: &Window,
+    cx: &mut Context<DiffView>,
+) -> impl IntoElement {
+    // Leading zone spans exactly what sits left of the stage, so what follows starts
+    // on the stage's left edge and lines up with the island below.
+    let leading_w = if view.tree_collapsed {
+        px(collapsed_leading_width())
+    } else {
+        px(view.tree_width + splitter::HANDLE_WIDTH)
+    };
     div()
         .id("diff-titlebar")
         .h(theme::TITLEBAR_HEIGHT)
@@ -644,69 +705,65 @@ fn render_titlebar(
                 .pl(px(theme::CHANGES_INSET))
                 .child(
                     div()
+                        .id("diff-titlebar-drag")
+                        .h_full()
                         .flex_1()
+                        // Holds the toolbar right; on a crowded toolbar it yields before the buttons do.
                         .min_w(px(0.))
-                        .font_family(theme::MONO_FONT)
-                        .text_xs()
-                        .text_color(theme::muted())
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(path),
+                        .window_control_area(WindowControlArea::Drag)
+                        .occlude(),
                 )
                 .child(
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .text_color(theme::muted())
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(subtitle),
+                    IconButton::new("prev-hunk", "arrow_up.svg", "Previous Hunk")
+                        .shortcut("[")
+                        .on_click(cx.listener(|this, _, _, cx| this.jump_hunk(-1, cx))),
                 )
-                .child(chrome_button("prev-hunk", "↑", cx, |this, cx| {
-                    this.jump_hunk(-1, cx);
-                }))
-                .child(chrome_button("next-hunk", "↓", cx, |this, cx| {
-                    this.jump_hunk(1, cx);
-                }))
-                .child(chrome_button("expand-all", "Expand", cx, |this, cx| {
-                    this.with_pane(cx, |pane, cx| pane.expand_all(cx));
-                }))
-                .child(chrome_button("collapse-eq", "Collapse", cx, |this, cx| {
-                    this.with_pane(cx, |pane, cx| pane.collapse_unchanged(cx));
-                }))
-                .child(chrome_toggle(
-                    "ignore-ws",
-                    "Ignore WS",
-                    view.view_options.ignore_whitespace,
-                    cx,
-                    |this, cx| this.toggle_ignore_whitespace(cx),
-                ))
-                .child(chrome_button("font-dec", "A−", cx, |this, cx| {
-                    this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Dec, cx));
-                }))
-                .child(chrome_button("font-reset", "A", cx, |this, cx| {
-                    this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Reset, cx));
-                }))
-                .child(chrome_button("font-inc", "A+", cx, |this, cx| {
-                    this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Inc, cx));
-                }))
-                .child(chrome_toggle(
-                    "find",
-                    "Find",
-                    view.searching,
-                    cx,
-                    |this, cx| {
-                        if this.searching {
-                            this.searching = false;
-                            cx.notify();
-                        } else {
-                            this.searching = true;
-                            this.set_drafting(None, cx);
-                            cx.notify();
-                        }
-                    },
-                ))
-                .child(export_button(cx))
+                .child(
+                    IconButton::new("next-hunk", "arrow_down.svg", "Next Hunk")
+                        .shortcut("]")
+                        .on_click(cx.listener(|this, _, _, cx| this.jump_hunk(1, cx))),
+                )
+                .child(toolbar_divider())
+                .child(
+                    IconButton::new("expand-all", "unfold_vertical.svg", "Expand All")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.with_pane(cx, |pane, cx| pane.expand_all(cx));
+                        })),
+                )
+                .child(
+                    IconButton::new("collapse-eq", "fold_vertical.svg", "Collapse Unchanged")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.with_pane(cx, |pane, cx| pane.collapse_unchanged(cx));
+                        })),
+                )
+                .child(
+                    IconButton::new("ignore-ws", "pilcrow.svg", "Ignore Whitespace")
+                        .pressed(view.view_options.ignore_whitespace)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_ignore_whitespace(cx))),
+                )
+                .child(toolbar_divider())
+                .child(font_size_group(view.pane.read(cx).font_px(), cx))
+                .child(toolbar_divider())
+                .child(
+                    IconButton::new("find", "search.svg", "Find")
+                        .shortcut("/")
+                        .pressed(view.searching)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.searching {
+                                this.searching = false;
+                                cx.notify();
+                            } else {
+                                this.searching = true;
+                                this.set_drafting(None, cx);
+                                cx.notify();
+                            }
+                        })),
+                )
+                .child(toolbar_divider())
+                .child(
+                    IconButton::new("export", "export.svg", "Copy Review to Clipboard")
+                        .on_click(cx.listener(|this, _, _, cx| this.export_to_clipboard(cx))),
+                )
                 .children(view.export_status.as_ref().map(|status| {
                     div()
                         .flex_none()
@@ -714,16 +771,6 @@ fn render_titlebar(
                         .text_color(theme::accent())
                         .child(status.clone())
                 }))
-                .child(
-                    div()
-                        .id("diff-titlebar-drag")
-                        .h_full()
-                        .flex_1()
-                        // Crowded toolbar: the drag strip yields before the buttons do.
-                        .min_w(px(0.))
-                        .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
-                )
                 .child(
                     // Doubles as the trailing inset when no caption buttons follow.
                     div()
@@ -807,7 +854,7 @@ fn render_tree_pane(
                                     .justify_center()
                                     .child(
                                         svg()
-                                            .size(px(16.))
+                                            .size(theme::ICON_SIZE)
                                             .path(if collapsed {
                                                 "folder.svg"
                                             } else {
@@ -972,10 +1019,10 @@ fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
         return div().into_any_element();
     }
     let matches = view.current_matches();
-    let scope_label = match view.search_scope {
-        SearchScope::Old => "Old",
-        SearchScope::New => "New",
-        SearchScope::Both => "Both",
+    let (scope_icon, scope_label) = match view.search_scope {
+        SearchScope::Old => ("square_minus.svg", "Search Old Side"),
+        SearchScope::New => ("square_plus.svg", "Search New Side"),
+        SearchScope::Both => ("diff.svg", "Search Both Sides"),
     };
     let query_display = if view.searching {
         format!("{}▌", view.search_query)
@@ -1020,13 +1067,12 @@ fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
                         .text_color(theme::text())
                         .child(query_display),
                 )
-                .child(chrome_toggle(
-                    "search-scope",
-                    scope_label,
-                    true,
-                    cx,
-                    |this, cx| this.cycle_search_scope(cx),
-                ))
+                .child(
+                    IconButton::new("search-scope", scope_icon, scope_label)
+                        .shortcut("Tab")
+                        .pressed(true)
+                        .on_click(cx.listener(|this, _, _, cx| this.cycle_search_scope(cx))),
+                )
                 .child(
                     div()
                         .text_xs()
@@ -1193,95 +1239,54 @@ fn render_draft_bar(view: &DiffView) -> impl IntoElement {
         .into_any_element()
 }
 
-fn chrome_button(
-    id: &'static str,
-    label: &'static str,
-    cx: &mut Context<DiffView>,
-    on_click: impl Fn(&mut DiffView, &mut Context<DiffView>) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .h(theme::TOGGLE_SIZE)
-        .px_2()
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_md()
-        .cursor_pointer()
-        .text_xs()
-        .text_color(theme::muted())
-        .hover(|button| button.bg(theme::hover()))
-        .active(|button| button.bg(rgb(0xdfe3e9)))
-        .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
-        .child(label)
+/// Short rule between toolbar groups: hunk navigation, folding and whitespace,
+/// text size, find, export.
+fn toolbar_divider() -> impl IntoElement {
+    div().flex_none().w(px(1.)).h(px(14.)).bg(theme::line())
 }
 
-fn chrome_toggle(
-    id: &'static str,
-    label: &'static str,
-    pressed: bool,
-    cx: &mut Context<DiffView>,
-    on_click: impl Fn(&mut DiffView, &mut Context<DiffView>) + 'static,
-) -> impl IntoElement {
+/// `− 13 +`, like a browser's zoom control: the number is the current size and
+/// resets it, so no third glyph competes with the two signs.
+fn font_size_group(font_px: u32, cx: &mut Context<DiffView>) -> impl IntoElement {
     div()
-        .id(id)
-        .h(theme::TOGGLE_SIZE)
-        .px_2()
         .flex_none()
         .flex()
         .items_center()
-        .justify_center()
-        .rounded_md()
-        .cursor_pointer()
-        .text_xs()
-        .when(pressed, |d| d.bg(theme::range()).text_color(theme::accent()))
-        .when(!pressed, |d| d.text_color(theme::muted()))
-        .hover(|button| button.bg(theme::hover()))
-        .active(|button| button.bg(rgb(0xdfe3e9)))
-        .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
-        .child(label)
-}
-
-fn export_button(cx: &mut Context<DiffView>) -> impl IntoElement {
-    div()
-        .id("export")
-        .w(theme::TOGGLE_SIZE)
-        .h(theme::TOGGLE_SIZE)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_md()
-        .cursor_pointer()
-        .text_color(theme::muted())
-        .tooltip(|_, cx| cx.new(|_| ExportTooltip).into())
-        .hover(|button| button.bg(theme::hover()))
-        .active(|button| button.bg(rgb(0xdfe3e9)))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.export_to_clipboard(cx);
-        }))
         .child(
-            svg()
-                .size_4()
-                .path("export.svg")
-                .text_color(theme::muted()),
+            IconButton::new("font-dec", "minus.svg", "Smaller Text")
+                .shortcut(tooltip::cmd("-"))
+                .disabled(font_px <= DiffFontSize::MIN)
+                .on_click(cx.listener(|this, _, _, cx| this.font_size(FontOp::Dec, cx))),
         )
-}
-
-struct ExportTooltip;
-
-impl Render for ExportTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(rgb(0x273142))
-            .text_xs()
-            .text_color(theme::white())
-            .child("Export")
-    }
+        .child(
+            div()
+                .id("font-reset")
+                .h(theme::TOGGLE_SIZE)
+                .min_w(px(24.))
+                .px_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .cursor_pointer()
+                .text_xs()
+                .text_color(if font_px == DiffFontSize::DEFAULT {
+                    theme::muted()
+                } else {
+                    theme::accent()
+                })
+                .tooltip(Tooltip::text("Reset Text Size", Some(tooltip::cmd("0"))))
+                .hover(|button| button.bg(theme::hover()))
+                .active(|button| button.bg(theme::element_active()))
+                .on_click(cx.listener(|this, _, _, cx| this.font_size(FontOp::Reset, cx)))
+                .child(font_px.to_string()),
+        )
+        .child(
+            IconButton::new("font-inc", "plus.svg", "Larger Text")
+                .shortcut(tooltip::cmd("="))
+                .disabled(font_px >= DiffFontSize::MAX)
+                .on_click(cx.listener(|this, _, _, cx| this.font_size(FontOp::Inc, cx))),
+        )
 }
 
 fn toggle_button(
@@ -1289,29 +1294,13 @@ fn toggle_button(
     collapsed: bool,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
-    div()
-        .id(id)
-        .w(theme::TOGGLE_SIZE)
-        .h(theme::TOGGLE_SIZE)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_md()
-        .when(collapsed, |button| button.bg(theme::range()))
-        .cursor_pointer()
-        .hover(|button| button.bg(theme::hover()))
-        .active(|button| button.bg(rgb(0xdfe3e9)))
+    let label = if collapsed { "Show Files" } else { "Hide Files" };
+    IconButton::new(id, "sidebar_title.svg", label)
+        .pressed(collapsed)
         .on_click(cx.listener(|this, _, _, cx| {
             this.tree_collapsed = !this.tree_collapsed;
             cx.notify();
         }))
-        .child(
-            svg()
-                .size_4()
-                .path("sidebar_title.svg")
-                .text_color(theme::muted()),
-        )
 }
 
 #[cfg(target_os = "macos")]

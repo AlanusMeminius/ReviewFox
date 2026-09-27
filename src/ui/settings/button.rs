@@ -1,9 +1,10 @@
 use gpui::{
-    App, ClickEvent, Context, ElementId, Hsla, Pixels, Render, SharedString, Window, div,
-    prelude::*, px, rgb, svg, transparent_black,
+    App, ClickEvent, ElementId, Hsla, Pixels, SharedString, Window, div,
+    prelude::*, px, svg, transparent_black,
 };
 
 use crate::ui::theme;
+use crate::ui::tooltip::Tooltip;
 
 /// Zed `ButtonStyle`, cut down to what Settings uses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -223,7 +224,7 @@ impl RenderOnce for Button {
                     .focus(|button| button.border_color(theme::border_focused()))
             })
             .when_some(self.tooltip, |button, text| {
-                button.tooltip(move |_, cx| cx.new(|_| Tooltip(text.clone())).into())
+                button.tooltip(Tooltip::text(text, None))
             })
             .when_some(self.on_click, |button, handler| {
                 button
@@ -233,29 +234,12 @@ impl RenderOnce for Button {
             .when_some(self.icon, |button, icon| {
                 button.child(
                     svg()
-                        .size(px(14.))
+                        .size(theme::ICON_SIZE_SM)
                         .flex_none()
                         .path(icon)
                         .text_color(icon_color),
                 )
             })
             .when_some(self.label, |button, label| button.child(label))
-    }
-}
-
-/// Plain-text tooltip, same look as the main window's Settings gear tooltip.
-struct Tooltip(SharedString);
-
-impl Render for Tooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(rgb(0x273142))
-            .font_family(theme::UI_FONT)
-            .text_xs()
-            .text_color(theme::white())
-            .child(self.0.clone())
     }
 }

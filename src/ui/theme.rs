@@ -12,6 +12,10 @@ pub const DIFF_TREE_WIDTH: Pixels = gpui::px(200.);
 /// is one the islands below it gain.
 pub const TITLEBAR_HEIGHT: Pixels = gpui::px(32.);
 pub const TOGGLE_SIZE: Pixels = gpui::px(26.);
+/// Every chrome icon; drawn inside a [`TOGGLE_SIZE`] button box.
+pub const ICON_SIZE: Pixels = gpui::px(16.);
+/// Icons riding inside text-sized controls, such as the settings buttons.
+pub const ICON_SIZE_SM: Pixels = gpui::px(14.);
 /// Prototype A fonts; OS falls back if not installed.
 pub const UI_FONT: &str = "IBM Plex Sans";
 pub const MONO_FONT: &str = "IBM Plex Mono";
