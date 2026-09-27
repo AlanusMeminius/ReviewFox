@@ -426,7 +426,7 @@ impl DiffView {
     }
 
     /// Everything but the pane, rendered by the cached `DiffShell`.
-    fn render_shell(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.sync_collapsed_dirs();
         // Cleared here, set by the body's canvas if this file shows the pane.
         self.pane_bounds.set(None);
@@ -451,7 +451,7 @@ impl DiffView {
                     self.tree_resize_state.clone(),
                 ))
             })
-            .child(render_dual_pane(self, cx))
+            .child(render_dual_pane(self, window, cx))
             .into_any_element()
     }
 }
@@ -467,6 +467,8 @@ impl Render for DiffView {
         if self.bounds_sub.is_none() {
             self.bounds_sub = Some(cx.observe_window_bounds(window, |_, window, cx| {
                 window_geometry_store::set_diff_bounds(window_geometry::stored_from_window(window));
+                // Outside the debounced flush: the maximize glyph must flip on every bounds change.
+                cx.notify();
                 window_geometry::debounce_flush(cx);
             }));
         }
@@ -549,7 +551,8 @@ fn render_tree_pane(
                         .id("diff-drag-tree")
                         .h_full()
                         .flex_1()
-                        .window_control_area(WindowControlArea::Drag),
+                        .window_control_area(WindowControlArea::Drag)
+                        .occlude(),
                 ),
         )
         .child({
@@ -701,7 +704,11 @@ fn render_tree_pane(
         })
 }
 
-fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
+fn render_dual_pane(
+    view: &DiffView,
+    window: &Window,
+    cx: &mut Context<DiffView>,
+) -> impl IntoElement {
     let (path, subtitle) = match &view.snapshot {
         Some(s) => {
             let n = view
@@ -748,91 +755,104 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                 .flex_none()
                 .flex()
                 .items_center()
-                .gap_2()
-                .when(view.tree_collapsed, |row| {
-                    row.pl(px(12.))
-                        .pr_3()
-                        .children(traffic_lights_space())
-                        .child(toggle_button("diff-tree-toggle-collapsed", true, cx))
-                })
-                .when(!view.tree_collapsed, |row| row.px_3())
                 .child(
                     div()
                         .flex_1()
                         .min_w(px(0.))
-                        .font_family(theme::MONO_FONT)
-                        .text_xs()
-                        .text_color(theme::muted())
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(path),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme::muted())
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(subtitle),
-                )
-                .child(chrome_button("prev-hunk", "↑", cx, |this, cx| {
-                    this.jump_hunk(-1, cx);
-                }))
-                .child(chrome_button("next-hunk", "↓", cx, |this, cx| {
-                    this.jump_hunk(1, cx);
-                }))
-                .child(chrome_button("expand-all", "Expand", cx, |this, cx| {
-                    this.with_pane(cx, |pane, cx| pane.expand_all(cx));
-                }))
-                .child(chrome_button("collapse-eq", "Collapse", cx, |this, cx| {
-                    this.with_pane(cx, |pane, cx| pane.collapse_unchanged(cx));
-                }))
-                .child(chrome_toggle(
-                    "ignore-ws",
-                    "Ignore WS",
-                    view.view_options.ignore_whitespace,
-                    cx,
-                    |this, cx| this.toggle_ignore_whitespace(cx),
-                ))
-                .child(chrome_button("font-dec", "A−", cx, |this, cx| {
-                    this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Dec, cx));
-                }))
-                .child(chrome_button("font-reset", "A", cx, |this, cx| {
-                    this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Reset, cx));
-                }))
-                .child(chrome_button("font-inc", "A+", cx, |this, cx| {
-                    this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Inc, cx));
-                }))
-                .child(chrome_toggle(
-                    "find",
-                    "Find",
-                    view.searching,
-                    cx,
-                    |this, cx| {
-                        if this.searching {
-                            this.searching = false;
-                            cx.notify();
-                        } else {
-                            this.searching = true;
-                            this.set_drafting(None, cx);
-                            cx.notify();
-                        }
-                    },
-                ))
-                .child(export_button(cx))
-                .children(view.export_status.as_ref().map(|status| {
-                    div()
-                        .text_xs()
-                        .text_color(theme::accent())
-                        .child(status.clone())
-                }))
-                .child(
-                    div()
-                        .id("diff-drag-main")
-                        .w(px(40.))
                         .h_full()
-                        .window_control_area(WindowControlArea::Drag),
-                ),
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .when(view.tree_collapsed, |row| {
+                            row.pl(px(12.))
+                                .pr_3()
+                                .children(traffic_lights_space())
+                                .child(toggle_button("diff-tree-toggle-collapsed", true, cx))
+                        })
+                        .when(!view.tree_collapsed, |row| row.px_3())
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .font_family(theme::MONO_FONT)
+                                .text_xs()
+                                .text_color(theme::muted())
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(path),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::muted())
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(subtitle),
+                        )
+                        .child(chrome_button("prev-hunk", "↑", cx, |this, cx| {
+                            this.jump_hunk(-1, cx);
+                        }))
+                        .child(chrome_button("next-hunk", "↓", cx, |this, cx| {
+                            this.jump_hunk(1, cx);
+                        }))
+                        .child(chrome_button("expand-all", "Expand", cx, |this, cx| {
+                            this.with_pane(cx, |pane, cx| pane.expand_all(cx));
+                        }))
+                        .child(chrome_button("collapse-eq", "Collapse", cx, |this, cx| {
+                            this.with_pane(cx, |pane, cx| pane.collapse_unchanged(cx));
+                        }))
+                        .child(chrome_toggle(
+                            "ignore-ws",
+                            "Ignore WS",
+                            view.view_options.ignore_whitespace,
+                            cx,
+                            |this, cx| this.toggle_ignore_whitespace(cx),
+                        ))
+                        .child(chrome_button("font-dec", "A−", cx, |this, cx| {
+                            this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Dec, cx));
+                        }))
+                        .child(chrome_button("font-reset", "A", cx, |this, cx| {
+                            this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Reset, cx));
+                        }))
+                        .child(chrome_button("font-inc", "A+", cx, |this, cx| {
+                            this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Inc, cx));
+                        }))
+                        .child(chrome_toggle(
+                            "find",
+                            "Find",
+                            view.searching,
+                            cx,
+                            |this, cx| {
+                                if this.searching {
+                                    this.searching = false;
+                                    cx.notify();
+                                } else {
+                                    this.searching = true;
+                                    this.set_drafting(None, cx);
+                                    cx.notify();
+                                }
+                            },
+                        ))
+                        .child(export_button(cx))
+                        .children(view.export_status.as_ref().map(|status| {
+                            div()
+                                .text_xs()
+                                .text_color(theme::accent())
+                                .child(status.clone())
+                        }))
+                        .child(
+                            div()
+                                .id("diff-drag-main")
+                                .flex_1()
+                                // Crowded toolbar: the drag strip yields before the controls do.
+                                .min_w(px(0.))
+                                .h_full()
+                                .window_control_area(WindowControlArea::Drag)
+                                .occlude(),
+                        ),
+                )
+                // Outside the toolbar's padding: close must land in the physical corner.
+                .children(super::window_controls::window_controls(window)),
         )
         .child(render_search_bar(view, cx))
         .child(render_body(view, cx))

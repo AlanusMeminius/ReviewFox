@@ -31,7 +31,9 @@ use super::scrollbar;
 use super::splitter::{self, Axis, ResizeState};
 use super::current_repo;
 use super::theme;
+use super::window_controls::window_controls;
 use super::window_geometry;
+use super::OpenSettings;
 
 pub struct AppView {
     focus: FocusHandle,
@@ -380,7 +382,7 @@ impl AppView {
             MainState::Ready(loaded) => loaded.comparison.repository.path().to_path_buf(),
             MainState::Empty | MainState::Error(_) => {
                 self.mr_picker = Some(MrPicker::failed(
-                    "Open a repository to list merge requests.",
+                    ErrorNote::plain("Open a repository to list merge requests."),
                     bounds,
                 ));
                 cx.notify();
@@ -414,7 +416,7 @@ impl AppView {
 
             let picker = match project {
                 ResolveProjectResult::Err(e) => {
-                    MrPicker::failed(gitlab::format_resolve_project_error(&e), Bounds::default())
+                    MrPicker::failed(ErrorNote::resolve_project(&e), Bounds::default())
                 }
                 ResolveProjectResult::Ok(identity) => {
                     let list_result = cx
@@ -434,7 +436,10 @@ impl AppView {
                             MrPicker::ready(mrs, selected_iid, Bounds::default())
                         }
                         ListMergeRequestsResult::Err(e) => MrPicker::failed(
-                            gitlab::format_list_merge_requests_error(&e),
+                            ErrorNote::new(
+                                gitlab::format_list_merge_requests_error(&e),
+                                e.fixable_in_settings(),
+                            ),
                             Bounds::default(),
                         ),
                     }
@@ -494,7 +499,7 @@ impl AppView {
             let identity = match project {
                 ResolveProjectResult::Ok(id) => id,
                 ResolveProjectResult::Err(e) => {
-                    let msg = gitlab::format_resolve_project_error(&e);
+                    let msg = ErrorNote::resolve_project(&e);
                     let _ = this.update(cx, |view, cx| {
                         finish_mr_activate(view, iid, Err(msg));
                         cx.notify();
@@ -506,7 +511,7 @@ impl AppView {
             let remote_url = match gitlab::matching_remote_for_settings(&repo_path, &base) {
                 Ok((_, url)) => url,
                 Err(e) => {
-                    let msg = gitlab::format_resolve_project_error(&e);
+                    let msg = ErrorNote::resolve_project(&e);
                     let _ = this.update(cx, |view, cx| {
                         finish_mr_activate(view, iid, Err(msg));
                         cx.notify();
@@ -529,7 +534,10 @@ impl AppView {
             {
                 FetchMergeRequestResult::Ok(d) => d,
                 FetchMergeRequestResult::Err(e) => {
-                    let msg = gitlab::format_fetch_merge_request_error(&e);
+                    let msg = ErrorNote::new(
+                        gitlab::format_fetch_merge_request_error(&e),
+                        e.fixable_in_settings(),
+                    );
                     let _ = this.update(cx, |view, cx| {
                         finish_mr_activate(view, iid, Err(msg));
                         cx.notify();
@@ -553,7 +561,10 @@ impl AppView {
             {
                 ListMergeRequestCommitsResult::Ok(c) => c,
                 ListMergeRequestCommitsResult::Err(e) => {
-                    let msg = gitlab::format_list_merge_request_commits_error(&e);
+                    let msg = ErrorNote::new(
+                        gitlab::format_list_merge_request_commits_error(&e),
+                        e.fixable_in_settings(),
+                    );
                     let _ = this.update(cx, |view, cx| {
                         finish_mr_activate(view, iid, Err(msg));
                         cx.notify();
@@ -580,7 +591,7 @@ impl AppView {
                 .await
             {
                 let _ = this.update(cx, |view, cx| {
-                    finish_mr_activate(view, iid, Err(e.0));
+                    finish_mr_activate(view, iid, Err(ErrorNote::plain(e.0)));
                     cx.notify();
                 });
                 return;
@@ -609,7 +620,7 @@ impl AppView {
                 Ok(infos) => infos,
                 Err(e) => {
                     let _ = this.update(cx, |view, cx| {
-                        finish_mr_activate(view, iid, Err(e.0));
+                        finish_mr_activate(view, iid, Err(ErrorNote::plain(e.0)));
                         cx.notify();
                     });
                     return;
@@ -992,6 +1003,8 @@ impl Render for AppView {
         if self.bounds_sub.is_none() {
             self.bounds_sub = Some(cx.observe_window_bounds(window, |_, window, cx| {
                 window_geometry_store::set_main_bounds(window_geometry::stored_from_window(window));
+                // Outside the debounced flush: the maximize glyph must flip on every bounds change.
+                cx.notify();
                 window_geometry::debounce_flush(cx);
             }));
         }
@@ -1013,32 +1026,44 @@ impl Render for AppView {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.handle_branch_key(event, cx)))
             .size_full()
             .flex()
+            .flex_col()
             .overflow_hidden()
             .when(cfg!(not(target_os = "macos")), |d| d.bg(theme::sidebar()))
             .font_family(theme::UI_FONT)
             .track_focus(&self.focus)
-            .child(render_sidebar(self, sidebar_w, cx))
-            .when(show_sidebar_split, |d| {
-                d.child(splitter::handle(
-                    "sidebar-resize-handle",
-                    Axis::HorizontalLeading,
-                    self.sidebar_resize_handler(cx),
-                    self.sidebar_resize_state.clone(),
-                ))
-            })
-            // Frosted desk: chrome + floating capsules (Commit / MR / Changes).
-            // Stage stays clear so window vibrancy shows between islands.
+            // The only band that reaches both window edges, so it can own the whole drag
+            // surface and seat the caption buttons in the corner.
+            .child(render_titlebar(self, window, cx))
             .child(
                 div()
-                    .id("stage")
-                    .relative()
-                    .h_full()
+                    .id("body")
                     .flex_1()
-                    .min_w(px(splitter::MIN_COMMITS_WIDTH))
+                    .min_h(px(0.))
+                    .flex()
                     .overflow_hidden()
-                    .bg(theme::sidebar())
-                    .child(render_commits(self, cx))
-                    .child(render_files(self, cx)),
+                    .child(render_sidebar(self, sidebar_w, cx))
+                    .when(show_sidebar_split, |d| {
+                        d.child(splitter::handle(
+                            "sidebar-resize-handle",
+                            Axis::HorizontalLeading,
+                            self.sidebar_resize_handler(cx),
+                            self.sidebar_resize_state.clone(),
+                        ))
+                    })
+                    // Frosted desk: floating capsules (Commit / MR / Changes). Stage stays
+                    // clear so window vibrancy shows between islands.
+                    .child(
+                        div()
+                            .id("stage")
+                            .relative()
+                            .h_full()
+                            .flex_1()
+                            .min_w(px(splitter::MIN_COMMITS_WIDTH))
+                            .overflow_hidden()
+                            .bg(theme::sidebar())
+                            .child(render_commits(self, cx))
+                            .child(render_files(self, cx)),
+                    ),
             )
             .when(self.repo_menu.is_some(), |d| d.child(render_repo_menu(self, cx)))
             // Outside `#stage` so overflow_hidden there cannot clip picker shadows.
@@ -1082,26 +1107,6 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
         .flex_col()
         .overflow_hidden()
         .bg(theme::sidebar())
-        .child(
-            div()
-                .h(theme::CHROME_HEIGHT)
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_2()
-                .pl(px(12.))
-                .pr_2()
-                .children(traffic_lights_space())
-                .child(toggle_button("main-sidebar-toggle", false, cx))
-                .child(open_repo_button("open-repo", cx))
-                .child(
-                    div()
-                        .id("main-drag")
-                        .h_full()
-                        .flex_1()
-                        .window_control_area(WindowControlArea::Drag),
-                ),
-        )
         .child({
             let (scroll, sb) = scrollbar::vertical("sidebar-repos-sb", cx);
             scrollbar::overlay_flex(
@@ -1163,6 +1168,15 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
                 sb,
             )
         })
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .px_3()
+                .py_2()
+                .child(settings_button(cx)),
+        )
 }
 
 fn sidebar_repo_row(
@@ -1294,7 +1308,9 @@ fn render_repo_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
     .into_any_element()
 }
 
-fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+/// The window's one full-width band. Every gap in it drags, and on Windows the caption
+/// buttons close it out flush against the right edge — no floating overlay, no dead strip.
+fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -> impl IntoElement {
     let (branch, label) = match &view.state {
         MainState::Ready(loaded) => (loaded.branch.clone(), loaded.comparison.label()),
         MainState::Empty | MainState::Error(_) => ("—".into(), "—".into()),
@@ -1305,10 +1321,6 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
         .map(|e| format!("!{}", e.summary.iid))
         .unwrap_or_else(|| "Merge requests".into());
     let show_gitlab = gitlab_chrome_visible(view);
-    // Clear Changes. Pills + islands share one padded column so left edges match.
-    let float_gap = px(theme::changes_float_clearance(view.files_width));
-    let inset = px(theme::CHANGES_INSET);
-    let show_mr = show_gitlab && view.mr_entry.is_some();
 
     let branch_pill = {
         let track = view.branch_toggle_bounds.clone();
@@ -1415,25 +1427,103 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
             })
     });
 
-    let chrome_pills_row = div()
+    // Leading zone spans exactly what sits left of the stage, so the pills after it start on
+    // the stage's left edge and share a left edge with the islands below.
+    let leading_w = if view.repos_collapsed {
+        px(collapsed_leading_width())
+    } else {
+        px(view.sidebar_width + splitter::HANDLE_WIDTH)
+    };
+
+    div()
+        .id("titlebar")
         .h(theme::CHROME_HEIGHT)
         .flex_none()
         .flex()
         .items_center()
-        .gap(px(theme::CHROME_GAP))
-        .pl(inset)
-        .pr(inset)
-        .child(branch_pill)
-        .children(mr_pill)
-        .child(div().flex_1())
         .child(
             div()
+                .id("titlebar-leading")
+                .w(leading_w)
                 .flex_none()
-                .font_family(theme::MONO_FONT)
-                .text_xs()
-                .text_color(theme::muted())
-                .child(label),
-        );
+                .h_full()
+                .flex()
+                .items_center()
+                .gap(px(theme::CHROME_GAP))
+                .pl(px(12.))
+                .overflow_hidden()
+                .children(traffic_lights_space())
+                .child(toggle_button("main-sidebar-toggle", view.repos_collapsed, cx))
+                .child(open_repo_button("open-repo", cx))
+                .child(
+                    div()
+                        .id("titlebar-drag-leading")
+                        .h_full()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .window_control_area(WindowControlArea::Drag)
+                        .occlude(),
+                ),
+        )
+        .child(
+            div()
+                .id("titlebar-main")
+                .flex_1()
+                .min_w(px(0.))
+                .h_full()
+                .flex()
+                .items_center()
+                .gap(px(theme::CHROME_GAP))
+                // Same inset the islands use, measured from the stage's left edge.
+                .pl(px(theme::CHANGES_INSET))
+                .child(branch_pill)
+                .children(mr_pill)
+                .child(
+                    div()
+                        .id("titlebar-drag")
+                        .h_full()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .window_control_area(WindowControlArea::Drag)
+                        .occlude(),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family(theme::MONO_FONT)
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .child(label),
+                )
+                .child(
+                    // Doubles as the trailing inset when no caption buttons follow.
+                    div()
+                        .id("titlebar-drag-trailing")
+                        .h_full()
+                        .w(px(theme::CHANGES_INSET))
+                        .flex_none()
+                        .window_control_area(WindowControlArea::Drag)
+                        .occlude(),
+                ),
+        )
+        .children(window_controls(window))
+}
+
+/// Width the leading chrome reserves when the sidebar is collapsed. The islands indent by the
+/// same amount, which is what keeps them left-aligned with the titlebar pills.
+fn collapsed_leading_width() -> f32 {
+    let controls = 12. + f32::from(theme::TOGGLE_SIZE) * 2. + theme::CHROME_GAP;
+    #[cfg(target_os = "macos")]
+    let controls = controls + theme::TRAFFIC_LIGHTS_WIDTH;
+    controls
+}
+
+fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+    let show_gitlab = gitlab_chrome_visible(view);
+    // Clear Changes. Pills + islands share one padded column so left edges match.
+    let float_gap = px(theme::changes_float_clearance(view.files_width));
+    let inset = px(theme::CHANGES_INSET);
+    let show_mr = show_gitlab && view.mr_entry.is_some();
 
     let islands = div()
         .id("commit-islands")
@@ -1479,7 +1569,6 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
             .absolute()
             .size_full(),
         )
-        .child(chrome_pills_row)
         .child(islands);
 
     div()
@@ -1495,19 +1584,8 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                 .flex()
                 .items_start()
                 .when(view.repos_collapsed, |row| {
-                    // Leading chrome controls beside the shared column.
-                    row.child(
-                        div()
-                            .h(theme::CHROME_HEIGHT)
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(theme::CHROME_GAP))
-                            .pl(px(12.))
-                            .children(traffic_lights_space())
-                            .child(toggle_button("main-sidebar-toggle-collapsed", true, cx))
-                            .child(open_repo_button("open-repo-collapsed", cx)),
-                    )
+                    // Mirrors the titlebar's leading zone so pills and islands stay aligned.
+                    row.child(div().w(px(collapsed_leading_width())).flex_none())
                 })
                 .child(shared_column),
         )
@@ -1630,7 +1708,7 @@ struct MrActivateReady {
 fn finish_mr_activate(
     view: &mut AppView,
     iid: u64,
-    result: Result<MrActivateReady, String>,
+    result: Result<MrActivateReady, ErrorNote>,
 ) {
     let Some(entry) = view.mr_entry.as_mut() else {
         return;
@@ -1652,7 +1730,7 @@ fn finish_mr_activate(
                 if let Err(e) =
                     bb.apply_mr_commits(ready.commit_infos)
                 {
-                    entry.detail = MrDetailState::Failed(e.0);
+                    entry.detail = MrDetailState::Failed(ErrorNote::plain(e.0));
                 }
             }
             view.remember_current();
@@ -1675,7 +1753,68 @@ fn gitlab_chrome_visible(view: &AppView) -> bool {
 enum MrDetailState {
     Loading,
     Ready(MergeRequestDetail),
-    Failed(String),
+    Failed(ErrorNote),
+}
+
+/// Failure text plus whether to offer "Open Settings" (token / Base URL fixes only).
+struct ErrorNote {
+    message: String,
+    open_settings: bool,
+}
+
+impl ErrorNote {
+    fn new(message: impl Into<String>, open_settings: bool) -> Self {
+        Self {
+            message: message.into(),
+            open_settings,
+        }
+    }
+
+    fn plain(message: impl Into<String>) -> Self {
+        Self::new(message, false)
+    }
+
+    fn resolve_project(e: &gitlab::ResolveProjectError) -> Self {
+        Self::new(gitlab::format_resolve_project_error(e), e.fixable_in_settings())
+    }
+}
+
+/// Red failure text, with an "Open Settings" link when the fix lives there.
+/// `close_mr_picker`: the MR picker is a transient overlay, so leave it on click.
+fn render_error_note(
+    id: &'static str,
+    note: &ErrorNote,
+    close_mr_picker: bool,
+    cx: &mut Context<AppView>,
+) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_color(rgb(0xb42318))
+                .child(note.message.clone()),
+        )
+        .when(note.open_settings, |d| {
+            d.child(
+                div()
+                    .id(id)
+                    .cursor_pointer()
+                    .text_color(theme::accent())
+                    .hover(|d| d.underline())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if close_mr_picker {
+                            this.mr_picker = None;
+                            cx.notify();
+                        }
+                        // Deferred: `cx.dispatch_action` can't re-enter this window mid-update.
+                        window.dispatch_action(Box::new(OpenSettings), cx);
+                    }))
+                    .child("Open Settings"),
+            )
+        })
+        .into_any_element()
 }
 
 fn render_mr_entry_detail(
@@ -1710,10 +1849,9 @@ fn render_mr_entry_detail(
                     MrDetailState::Loading => {
                         vec![div().child("Loading MR detail…").into_any_element()]
                     }
-                    MrDetailState::Failed(msg) => vec![div()
-                        .text_color(rgb(0xb42318))
-                        .child(msg.clone())
-                        .into_any_element()],
+                    MrDetailState::Failed(note) => {
+                        vec![render_error_note("mr-detail-open-settings", note, false, cx)]
+                    }
                     MrDetailState::Ready(detail) => mr_entry_ready_lines(detail),
                 }),
             sb,
@@ -1807,13 +1945,12 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
             .text_color(theme::muted())
             .child("Loading open merge requests…")
             .into_any_element(),
-        MrPickerBody::Failed(msg) => div()
+        MrPickerBody::Failed(note) => div()
             .size_full()
             .px_2()
             .py_3()
             .text_sm()
-            .text_color(rgb(0xb42318))
-            .child(msg.clone())
+            .child(render_error_note("mr-picker-open-settings", note, true, cx))
             .into_any_element(),
         MrPickerBody::Ready {
             query,
@@ -2396,7 +2533,7 @@ enum MrPickerAction {
 
 enum MrPickerBody {
     Loading,
-    Failed(String),
+    Failed(ErrorNote),
     Ready {
         all: Vec<MergeRequestSummary>,
         matches: Vec<MergeRequestSummary>,
@@ -2419,9 +2556,9 @@ impl MrPicker {
         }
     }
 
-    fn failed(message: impl Into<String>, bounds: Bounds<Pixels>) -> Self {
+    fn failed(note: ErrorNote, bounds: Bounds<Pixels>) -> Self {
         Self {
-            body: MrPickerBody::Failed(message.into()),
+            body: MrPickerBody::Failed(note),
             bounds,
         }
     }
@@ -2645,6 +2782,49 @@ fn open_repo_button(id: &'static str, cx: &mut Context<AppView>) -> impl IntoEle
             svg()
                 .size_4()
                 .path("folder.svg")
+                .text_color(theme::muted()),
+        )
+}
+
+struct SettingsTooltip;
+
+impl Render for SettingsTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let shortcut = if cfg!(target_os = "macos") { "⌘," } else { "Ctrl+," };
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(0x273142))
+            .text_xs()
+            .text_color(theme::white())
+            .child(format!("Settings ({shortcut})"))
+    }
+}
+
+fn settings_button(cx: &mut Context<AppView>) -> impl IntoElement {
+    div()
+        .id("open-settings")
+        .w(theme::TOGGLE_SIZE)
+        .h(theme::TOGGLE_SIZE)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .cursor_pointer()
+        .text_color(theme::muted())
+        .tooltip(|_, cx| cx.new(|_| SettingsTooltip).into())
+        .hover(|button| button.bg(theme::hover()))
+        .active(|button| button.bg(rgb(0xdfe3e9)))
+        .on_click(cx.listener(|_, _, window, cx| {
+            // Deferred: `cx.dispatch_action` can't re-enter this window mid-update.
+            window.dispatch_action(Box::new(OpenSettings), cx);
+        }))
+        .child(
+            svg()
+                .size_4()
+                .path("gear.svg")
                 .text_color(theme::muted()),
         )
 }
