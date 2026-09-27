@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::domain::{
     Alignment, AlignmentOp, Anchor, EQUAL_CONTEXT, FoldState, HunkJumpTarget, LineSpan, Side,
-    TokenPart, replace_marks,
+    TokenPart, changed_runs, replace_marks,
 };
 
 /// What a line row shows. Omission separators are not a kind; see [`OmitRow`].
@@ -513,6 +513,12 @@ impl Layout {
         parts
             .get(line.row.checked_sub(from)? as usize)
             .map(Vec::as_slice)
+    }
+
+    /// Highlight runs of a Replace line as byte ranges into its text: one
+    /// continuous span per run of change (see `domain::changed_runs`).
+    pub fn mark_runs(&self, side: Side, line: &LineRow) -> Option<Vec<(usize, usize)>> {
+        self.marks(side, line).map(changed_runs)
     }
 
     fn block_texts(&self, side: Side, from: u32, to: u32) -> Vec<&str> {
@@ -1047,6 +1053,8 @@ c
         assert_eq!(changed(Side::Old), ["10"]);
         assert_eq!(changed(Side::New), ["40"]);
         assert!(layout.marks[0].get().is_some());
+        let old_line = &layout.old.lines()[0];
+        assert_eq!(layout.mark_runs(Side::Old, old_line), Some(vec![(16, 18)]));
         // Equal lines have no marks.
         assert!(layout.marks(Side::Old, &layout.old.lines()[1]).is_none());
     }

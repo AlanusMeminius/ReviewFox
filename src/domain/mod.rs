@@ -547,6 +547,34 @@ pub fn replace_marks(olds: &[&str], news: &[&str]) -> (Vec<Vec<TokenPart>>, Vec<
     }
 }
 
+/// Byte ranges of the highlighted runs in one line's marks. Adjacent changed
+/// tokens merge, and so do changed tokens separated only by whitespace; an
+/// unchanged non-whitespace token breaks the run. Runs never start or end on
+/// whitespace. `parts` concatenate to the line text.
+pub fn changed_runs(parts: &[TokenPart]) -> Vec<(usize, usize)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    // Whether the last run may still grow (only whitespace since its end).
+    let mut open = false;
+    let mut at = 0usize;
+    for part in parts {
+        let end = at + part.text.len();
+        if part.text.is_empty() {
+            continue;
+        }
+        if part.changed {
+            match runs.last_mut() {
+                Some(last) if open => last.1 = end,
+                _ => runs.push((at, end)),
+            }
+            open = true;
+        } else if !part.text.trim().is_empty() {
+            open = false;
+        }
+        at = end;
+    }
+    runs
+}
+
 fn tokenize(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0;
@@ -741,6 +769,59 @@ mod tests {
                 ln: 2,
             }
         );
+    }
+
+    fn parts(spec: &[(&str, bool)]) -> Vec<TokenPart> {
+        spec.iter()
+            .map(|&(t, c)| TokenPart {
+                text: t.to_string(),
+                changed: c,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn changed_runs_bridge_whitespace_between_changed_words() {
+        // "old content 10" vs "completely different 10".
+        let (old, new) = replace_marks(&["old content 10"], &["completely different 10"]);
+        assert_eq!(changed_runs(&old[0]), vec![(0, 11)]);
+        assert_eq!(changed_runs(&new[0]), vec![(0, 20)]);
+    }
+
+    #[test]
+    fn changed_runs_break_on_unchanged_token_and_skip_edge_whitespace() {
+        let p = parts(&[
+            ("  ", false),
+            ("a", true),
+            (" ", false),
+            ("b", true),
+            (" ", false),
+            ("keep", false),
+            (" ", false),
+            ("c", true),
+            ("d", true),
+            ("  ", false),
+        ]);
+        assert_eq!(changed_runs(&p), vec![(2, 5), (11, 13)]);
+    }
+
+    #[test]
+    fn changed_runs_cover_an_all_changed_line_once() {
+        let p = parts(&[("x", true), (" ", false), ("=", true), (" ", false), ("1", true)]);
+        assert_eq!(changed_runs(&p), vec![(0, 5)]);
+        assert!(changed_runs(&parts(&[("same", false)])).is_empty());
+    }
+
+    #[test]
+    fn changed_runs_use_byte_offsets_for_cjk() {
+        // Many-to-many block: "行" appears on the other side and breaks the run.
+        let olds = ["第21行：代码评审 レビュー length"];
+        let news = ["新插入的中文行一", "新插入的中文行二"];
+        let (old, _) = replace_marks(&olds, &news);
+        let line = olds[0];
+        let runs = changed_runs(&old[0]);
+        let texts: Vec<&str> = runs.iter().map(|&(a, b)| &line[a..b]).collect();
+        assert_eq!(texts, vec!["第21", "：代码评审 レビュー length"]);
     }
 
     #[test]

@@ -173,7 +173,7 @@ struct RowPaint {
     bg: Rgba,
     commented: bool,
     text: Option<ShapedLine>,
-    /// Changed-token spans, x relative to the text origin.
+    /// Word-mark runs, x relative to the text origin; one rect per run.
     marks: Vec<(f32, f32)>,
     label: Option<ShapedLine>,
 }
@@ -286,8 +286,8 @@ pub(super) fn build_frame(
                 });
             let (kind, commented, drafting_here, marks) = match row {
                 Row::Line(l) => {
-                    let marks = match (layout.marks(side, l), &shape.text) {
-                        (Some(parts), Some(text)) => mark_spans(parts, text),
+                    let marks = match (layout.mark_runs(side, l), &shape.text) {
+                        (Some(runs), Some(text)) => mark_spans(&runs, text),
                         _ => Vec::new(),
                     };
                     (
@@ -433,18 +433,13 @@ fn shape(window: &mut Window, text: SharedString, family: &'static str, font_px:
         .shape_line(text, px(font_px), &[run], None)
 }
 
-/// x spans of changed tokens; parts concatenate to the line text.
-fn mark_spans(parts: &[crate::domain::TokenPart], text: &ShapedLine) -> Vec<(f32, f32)> {
-    let mut at = 0usize;
-    let mut out = Vec::new();
-    for part in parts {
-        let end = (at + part.text.len()).min(text.len());
-        if part.changed && end > at {
-            out.push((f32::from(text.x_for_index(at)), f32::from(text.x_for_index(end))));
-        }
-        at = end;
-    }
-    out
+/// x spans of highlight runs (byte ranges into the line text).
+fn mark_spans(runs: &[(usize, usize)], text: &ShapedLine) -> Vec<(f32, f32)> {
+    runs.iter()
+        .map(|&(a, b)| (a.min(text.len()), b.min(text.len())))
+        .filter(|(a, b)| b > a)
+        .map(|(a, b)| (f32::from(text.x_for_index(a)), f32::from(text.x_for_index(b))))
+        .collect()
 }
 
 fn side_ix(side: Side) -> usize {
