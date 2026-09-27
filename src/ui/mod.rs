@@ -11,6 +11,7 @@ mod text_field;
 mod mac_column_vibrancy;
 mod metadata;
 mod scrollbar;
+mod settings;
 mod splitter;
 mod theme;
 mod window_controls;
@@ -68,6 +69,21 @@ impl AssetSource for Assets {
             )),
             "gear.svg" => Some(Cow::Borrowed(
                 include_bytes!("../../assets/gear.svg") as &'static [u8],
+            )),
+            "check.svg" => Some(Cow::Borrowed(
+                include_bytes!("../../assets/check.svg") as &'static [u8],
+            )),
+            "warning.svg" => Some(Cow::Borrowed(
+                include_bytes!("../../assets/warning.svg") as &'static [u8],
+            )),
+            "undo.svg" => Some(Cow::Borrowed(
+                include_bytes!("../../assets/undo.svg") as &'static [u8],
+            )),
+            "chevron_right.svg" => Some(Cow::Borrowed(
+                include_bytes!("../../assets/chevron_right.svg") as &'static [u8],
+            )),
+            "chevron_down.svg" => Some(Cow::Borrowed(
+                include_bytes!("../../assets/chevron_down.svg") as &'static [u8],
             )),
             _ => None,
         })

@@ -30,8 +30,19 @@ actions!(
     ]
 );
 
+/// Visual variant. `Default` is the original full-width field; `Settings`
+/// follows Zed's settings input (min 256px wide, focused border).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextFieldStyle {
+    #[default]
+    Default,
+    #[allow(dead_code)] // Used by the Settings redesign (issues 02/03).
+    Settings,
+}
+
 pub struct TextField {
     focus_handle: FocusHandle,
+    style: TextFieldStyle,
     content: SharedString,
     placeholder: SharedString,
     masked: bool,
@@ -47,6 +58,7 @@ impl TextField {
     pub fn new(placeholder: impl Into<SharedString>, masked: bool, cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
+            style: TextFieldStyle::Default,
             content: "".into(),
             placeholder: placeholder.into(),
             masked,
@@ -57,6 +69,12 @@ impl TextField {
             last_bounds: None,
             is_selecting: false,
         }
+    }
+
+    #[allow(dead_code)] // Used by the Settings redesign (issues 02/03).
+    pub fn with_style(mut self, style: TextFieldStyle) -> Self {
+        self.style = style;
+        self
     }
 
     pub fn content(&self) -> &str {
@@ -623,7 +641,12 @@ impl Render for TextField {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .h(px(32.))
-            .w_full()
+            .map(|field| match self.style {
+                TextFieldStyle::Default => field.w_full(),
+                TextFieldStyle::Settings => field
+                    .min_w(px(256.))
+                    .focus(|field| field.border_color(theme::border_focused())),
+            })
             .px_2()
             .bg(theme::white())
             .border_1()
