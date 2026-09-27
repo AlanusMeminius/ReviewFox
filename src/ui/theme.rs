@@ -58,7 +58,7 @@ pub const CHANGES_INSET: f32 = 12.;
 /// rather than as separation — the two add up to the height the user perceives as
 /// chrome. Still non-zero, so the island reads as floating on the desk instead of
 /// growing out of the titlebar.
-pub const CHANGES_TOP_INSET: f32 = 4.;
+pub const CHANGES_TOP_INSET: f32 = 6.;
 /// Gap between neighboring floating capsules — same as the edge inset.
 pub const CHANGES_SHADOW_GAP: f32 = CHANGES_INSET;
 /// Corner radius of floating capsules.
