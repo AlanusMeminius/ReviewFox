@@ -1,26 +1,28 @@
-//! The dual pane (old | gutter | new) as its own Entity, so wheel, native
-//! scroll and hover notify only this view. Still div-based; the custom Element
-//! is issue 03. See docs/diffview-architecture.md §5.
+//! The dual pane (old | gutter | new) as its own Entity, so wheel, scrollbar
+//! drag and hover notify only this view. Its body is one `DualPaneElement`
+//! (element.rs); this file holds the state and the input handling. See
+//! docs/diffview-architecture.md §4–§5.
 
 use gpui::{
-    AnyElement, AnyView, App, Bounds, ContentMask, Context, Div, Element, ElementId, Entity,
-    EventEmitter, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseMoveEvent,
-    ParentElement, PathBuilder, Pixels, Position, Render, ScrollHandle, ScrollWheelEvent,
-    SharedString, Stateful, StatefulInteractiveElement, Style, StyleRefinement, Styled, Window,
-    canvas, div, fill, point, prelude::*, px, rgb, size,
+    AnyElement, AnyView, App, Bounds, Context, Element, ElementId, Entity, EventEmitter,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Position,
+    Render, Style, StyleRefinement, Styled, Task, Timer, Window, div,
 };
 use std::cell::Cell;
-use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::domain::{
-    Alignment, AlignmentOp, Anchor, DiffFontSize, FoldState, Side, TokenPart, hunk_jump_target,
+    Alignment, AlignmentOp, Anchor, DiffFontSize, FoldState, Side, hunk_jump_target,
     match_jump_plan,
 };
 use crate::git::FileDiff;
-use crate::ui::theme;
-use super::layout::{HunkLand, Layout, LineKind, Row, SideLayout};
+use crate::ui::{scrollbar, theme};
+use super::element::{
+    self, BarState, Decorations, FrameInput, Geom, ShapeCache, build_frame, insert_hitboxes,
+    line_number_digits, ln_col_width, thumb_for, top_at,
+};
+use super::layout::{HunkLand, Layout, Row};
 use super::viewport::{self, Viewport};
 
 /// What the shell (DiffView) hears from the pane. Hunk index and hover copy
@@ -46,31 +48,25 @@ pub struct DualPane {
     /// View projection of `file` under `fold`. Rebuilt on file / fold /
     /// Alignment change, never per frame.
     layout: Option<Layout>,
-    /// Per-side row text for the div panes, indexed by visual row.
-    row_text: [Vec<SharedString>; 2],
+    /// Shaped text per (side, visual row), visible ± one screen.
+    shapes: ShapeCache,
     /// Anchors of the selected path's DraftComments (comment index).
     comments: Vec<Anchor>,
     /// Line being drafted, highlighted in its pane.
     drafting: Option<(Side, u32)>,
-    old_scroll: ScrollHandle,
-    new_scroll: ScrollHandle,
-    /// Shared scroll parameter, in pixels. See docs/dual-pane-diff.md §3.1.
-    /// Kept inside `viewport::s_range` from the first measured frame on.
+    /// Shared scroll parameter, in pixels, and the only vertical scroll
+    /// source. See docs/dual-pane-diff.md §3.1. Kept inside
+    /// `viewport::s_range` from the first measured frame on.
     scroll_s: f32,
-    scroll_nudge: f32,
-    applied_old: f32,
-    applied_new: f32,
-    /// Pane viewport height from the previous frame. 0 until the first layout.
+    /// Element height, set in prepaint. 0 until the first frame.
     view_h: f32,
-    /// Window y of the code panes' top edge (hover hit tests).
-    pane_top_w: f32,
-    /// Rows that get word marks this frame: visible ± one screen.
-    marked_rows: [Range<usize>; 2],
+    /// Device pixels per logical pixel, from the last prepaint.
+    scale: f32,
     hover_copy: Option<String>,
-    placed: Vec<PlacedBridge>,
-    omit_links: Vec<(f32, f32, f32, f32)>,
-    old_gaps: Vec<(f32, f32)>,
-    new_gaps: Vec<(f32, f32)>,
+    /// Row under a left press, for click-on-release: (side, visual row).
+    press: Option<(Side, u32)>,
+    bars: BarState,
+    bar_hide: Option<Task<()>>,
     /// 0-based index of the Hunk at / nearest the viewport; drives chrome.
     hunk_index: Option<usize>,
     /// Hunk-navigation position (row units) set by a jump or file open, before
@@ -89,23 +85,16 @@ impl DualPane {
             file: None,
             fold: FoldState::collapsed(),
             layout: None,
-            row_text: [Vec::new(), Vec::new()],
+            shapes: ShapeCache::default(),
             comments: Vec::new(),
             drafting: None,
-            old_scroll: ScrollHandle::new(),
-            new_scroll: ScrollHandle::new(),
             scroll_s: 0.,
-            scroll_nudge: 0.,
-            applied_old: 0.,
-            applied_new: 0.,
             view_h: 0.,
-            pane_top_w: 0.,
-            marked_rows: [0..0, 0..0],
+            scale: 1.,
             hover_copy: None,
-            placed: Vec::new(),
-            omit_links: Vec::new(),
-            old_gaps: Vec::new(),
-            new_gaps: Vec::new(),
+            press: None,
+            bars: BarState::default(),
+            bar_hide: None,
             hunk_index: None,
             hunk_s: Some(0.),
             font_size: DiffFontSize::default(),
@@ -132,6 +121,7 @@ impl DualPane {
         self.hunk_s = Some(0.);
         self.reset_scroll(cx);
         self.rebuild_layout();
+        self.reveal_bars(cx);
         cx.notify();
     }
 
@@ -187,7 +177,7 @@ impl DualPane {
     /// Rebuild the Layout from the file, `fold` and the comment index.
     fn rebuild_layout(&mut self) {
         self.layout = None;
-        self.row_text = [Vec::new(), Vec::new()];
+        self.shapes.clear();
         let Some(file) = self.file.as_ref() else {
             return;
         };
@@ -198,7 +188,6 @@ impl DualPane {
             Some(&self.fold),
         );
         layout.set_comments(self.comments.iter());
-        self.row_text = [row_texts(&layout.old), row_texts(&layout.new)];
         self.layout = Some(layout);
     }
 
@@ -206,16 +195,9 @@ impl DualPane {
     /// to the lower end of `s_range`.
     fn reset_scroll(&mut self, cx: &mut Context<Self>) {
         self.scroll_s = 0.;
-        self.scroll_nudge = 0.;
-        self.applied_old = 0.;
-        self.applied_new = 0.;
+        self.press = None;
+        self.bars.drag = None;
         self.set_hover_copy(None, cx);
-        self.placed.clear();
-        self.omit_links.clear();
-        self.old_gaps.clear();
-        self.new_gaps.clear();
-        self.old_scroll.set_offset(point(px(0.), px(0.)));
-        self.new_scroll.set_offset(point(px(0.), px(0.)));
     }
 
     fn with_anchor(&mut self, mutate: impl FnOnce(&mut Self)) {
@@ -226,9 +208,10 @@ impl DualPane {
         self.hunk_s = None;
     }
 
+    /// This frame's Viewport, tops snapped as painted.
     fn viewport(&self) -> Option<Viewport<'_>> {
         let layout = self.layout.as_ref()?;
-        Some(Viewport::new(layout, self.scroll_s, self.view_h, self.row_h()))
+        Some(Viewport::new(layout, self.scroll_s, self.view_h, self.row_h()).snapped(self.scale))
     }
 
     fn capture_anchor(&self) -> Option<viewport::AnchorCap> {
@@ -317,6 +300,7 @@ impl DualPane {
         self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
         self.hunk_s = Some(s / row_h);
         self.set_hunk_index(Some(i), cx);
+        self.reveal_bars(cx);
         cx.notify();
     }
 
@@ -337,6 +321,8 @@ impl DualPane {
             .unwrap_or(self.scroll_s);
         self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
         self.hunk_s = Some(s / row_h);
+        self.sync_hunk_index(cx);
+        self.reveal_bars(cx);
         cx.notify();
     }
 
@@ -351,139 +337,239 @@ impl DualPane {
         if prev > 0. {
             self.scroll_s *= next / prev;
         }
+        self.shapes.clear();
         cx.notify();
     }
 
-    fn on_wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let delta = event.delta.pixel_delta(window.line_height());
-        // AppKit scrollingDeltaY is negative when the user scrolls down.
-        self.scroll_nudge -= f32::from(delta.y);
+    fn sync_hunk_index(&mut self, cx: &mut Context<Self>) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let s_rows = self.hunk_s.unwrap_or(self.scroll_s / self.row_h());
+        let index = nearest_hunk_index(s_rows, &layout.hunk_lands);
+        self.set_hunk_index(index, cx);
+    }
+
+    /// Wheel / trackpad (momentum included): write `scroll_s` only.
+    pub(super) fn scroll_by(&mut self, dy: f32, cx: &mut Context<Self>) {
+        let row_h = self.row_h();
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let s = viewport::clamp_s(layout, self.scroll_s + dy, self.view_h, row_h);
+        if s == self.scroll_s && self.hunk_s.is_none() {
+            return;
+        }
+        self.scroll_s = s;
         self.hunk_s = None;
+        self.sync_hunk_index(cx);
+        self.reveal_bars(cx);
         cx.notify();
     }
 
-    /// Hover copy only reaches the shell's chrome; the pane does not redraw.
-    fn on_gutter_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let y = f32::from(event.position.y) - self.pane_top_w;
-        let copy = self.viewport().and_then(|vp| {
-            let i = vp.bridge_at(y)?;
-            self.layout
-                .as_ref()
-                .map(|layout| layout.bridges[i].position_copy())
-        });
-        self.set_hover_copy(copy, cx);
+    /// Show both scrollbars and (re)arm the idle hide timer.
+    fn reveal_bars(&mut self, cx: &mut Context<Self>) {
+        self.bars.visible = true;
+        self.arm_bar_hide(cx);
     }
 
-    fn sync_scroll(&mut self, cx: &mut Context<Self>) {
+    fn arm_bar_hide(&mut self, cx: &mut Context<Self>) {
+        self.bar_hide = Some(cx.spawn(async move |this, cx| {
+            Timer::after(scrollbar::HIDE_DELAY).await;
+            this.update(cx, |this, cx| {
+                this.bar_hide.take();
+                if this.bars.hovered.iter().any(|&h| h) || this.bars.drag.is_some() {
+                    return;
+                }
+                if this.bars.visible {
+                    this.bars.visible = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Put `side`'s thumb top at `thumb_top` (track y); map that side's
+    /// content position back to `scroll_s`. The other side follows §3.1.
+    fn drag_thumb(&mut self, side: Side, thumb_top: f32) {
+        let Some(vp) = self.viewport() else {
+            return;
+        };
+        let Some(geom) = thumb_for(self.view_h, vp.max_top(side), vp.top(side)) else {
+            return;
+        };
         let Some(layout) = self.layout.as_ref() else {
             return;
         };
         let row_h = self.row_h();
-        if self.view_h < 1. {
+        let top = top_at(&geom, thumb_top);
+        let n = layout.side(side).rows();
+        let content = viewport::content_from_top(top, n, self.view_h, row_h);
+        let s = viewport::s_for_content(layout, side, content, row_h, self.scroll_s);
+        self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
+        self.hunk_s = None;
+    }
+
+    /// Left press in `side`'s track at track y `y`: grab the thumb, or jump
+    /// so the thumb centers on the press and grab it there.
+    pub(super) fn press_track(&mut self, side: Side, y: f32, cx: &mut Context<Self>) {
+        let Some(vp) = self.viewport() else {
+            return;
+        };
+        let Some(geom) = thumb_for(self.view_h, vp.max_top(side), vp.top(side)) else {
+            return;
+        };
+        let (top, h) = (f32::from(geom.thumb_top), f32::from(geom.thumb_height));
+        let grab = if y >= top && y <= top + h {
+            y - top
+        } else {
+            self.drag_thumb(side, y - h / 2.);
+            h / 2.
+        };
+        self.bars.drag = Some((side, grab));
+        self.bars.visible = true;
+        self.bar_hide = None;
+        self.press = None;
+        self.sync_hunk_index(cx);
+        cx.notify();
+    }
+
+    /// Visual row of `side` at pane y `y`.
+    fn row_index_at(&self, side: Side, y: f32) -> Option<u32> {
+        match self.viewport()?.hit(side, y)? {
+            Row::Line(l) => Some(l.row),
+            Row::Omit(o) => Some(o.row),
+        }
+    }
+
+    pub(super) fn press_row(&mut self, side: Side, y: f32) {
+        self.press = self.row_index_at(side, y).map(|row| (side, row));
+    }
+
+    /// Left release. Ends a thumb drag, or completes a click on the pressed
+    /// row: a line begins a draft, an omission separator expands its span.
+    pub(super) fn release(&mut self, side: Option<Side>, y: f32, cx: &mut Context<Self>) {
+        if self.bars.drag.take().is_some() {
+            if !self.bars.hovered.iter().any(|&h| h) {
+                self.arm_bar_hide(cx);
+            }
+            cx.notify();
             return;
         }
-        let mut s = self.scroll_s;
-        if self.scroll_nudge != 0. {
-            s += self.scroll_nudge;
-            self.scroll_nudge = 0.;
-        } else {
-            let old_top = -f32::from(self.old_scroll.offset().y);
-            let new_top = -f32::from(self.new_scroll.offset().y);
-            let old_delta = (old_top - self.applied_old).abs();
-            let new_delta = (new_top - self.applied_new).abs();
-            if old_delta > 0.5 || new_delta > 0.5 {
-                let (side, top) = if old_delta >= new_delta {
-                    (Side::Old, old_top)
-                } else {
-                    (Side::New, new_top)
-                };
-                let n = layout.side(side).rows();
-                let content = viewport::content_from_top(top, n, self.view_h, row_h);
-                s = viewport::s_for_content(layout, side, content, row_h, s);
-                self.hunk_s = None;
-            }
+        let (Some(pressed), Some(side)) = (self.press.take(), side) else {
+            return;
+        };
+        if pressed.0 != side {
+            return;
         }
-        let vp = Viewport::new(layout, s, self.view_h, row_h);
-        self.scroll_s = vp.s();
-        let old_top = vp.top(Side::Old);
-        let new_top = vp.top(Side::New);
-        self.applied_old = old_top;
-        self.applied_new = new_top;
-        self.old_scroll.set_offset(point(px(0.), px(-old_top)));
-        self.new_scroll.set_offset(point(px(0.), px(-new_top)));
-        let hunk_index = nearest_hunk_index(
-            self.hunk_s.unwrap_or(self.scroll_s / row_h),
-            &layout.hunk_lands,
-        );
-        let screen = (self.view_h / row_h).ceil() as usize;
-        self.marked_rows = [Side::Old, Side::New].map(|side| {
-            let rows = vp.visible_rows(side);
-            rows.start.saturating_sub(screen)..rows.end + screen
+        enum Click {
+            Line(u32),
+            Omit(usize),
+        }
+        let click = self.viewport().and_then(|vp| match vp.hit(side, y)? {
+            Row::Line(l) if l.row == pressed.1 => Some(Click::Line(l.ln)),
+            Row::Omit(o) if o.row == pressed.1 => Some(Click::Omit(o.id)),
+            _ => None,
         });
-
-        let old_pane = self.old_scroll.bounds();
-        let new_pane = self.new_scroll.bounds();
-        // Ribbon spans the whole gutter, from the left code edge to the right code edge,
-        // so the pinch meets the row background on one side and the hairline on the other.
-        let x_l = f32::from(old_pane.right());
-        let x_r = f32::from(new_pane.left());
-        let old_top_w = f32::from(old_pane.top());
-        let new_top_w = f32::from(new_pane.top());
-        self.pane_top_w = old_top_w;
-        self.old_gaps = vp.gaps(Side::Old);
-        self.new_gaps = vp.gaps(Side::New);
-        self.placed.clear();
-        self.omit_links.clear();
-        if x_r - x_l >= 4. {
-            self.placed.extend(vp.bridges().into_iter().map(|p| PlacedBridge {
-                kind: p.kind,
-                x_l,
-                x_r,
-                y_l0: old_top_w + p.y_l0,
-                y_l1: old_top_w + p.y_l1,
-                y_r0: new_top_w + p.y_r0,
-                y_r1: new_top_w + p.y_r1,
-            }));
-            self.omit_links.extend(
-                vp.omit_links()
-                    .into_iter()
-                    .map(|(y_l, y_r)| (x_l, old_top_w + y_l, x_r, new_top_w + y_r)),
-            );
+        match click {
+            Some(Click::Line(ln)) => cx.emit(PaneEvent::BeginDraft { side, ln }),
+            Some(Click::Omit(id)) => self.expand_omit(id, cx),
+            None => {}
         }
-        self.set_hunk_index(hunk_index, cx);
+    }
+
+    /// Track hover per side, an active thumb drag (`track_y` is the pointer in
+    /// each track), and gutter hover copy (`gutter_y` is pane y over the gutter).
+    pub(super) fn mouse_moved(
+        &mut self,
+        hovered: [bool; 2],
+        gutter_y: Option<f32>,
+        track_y: [f32; 2],
+        cx: &mut Context<Self>,
+    ) {
+        let mut dirty = false;
+        if self.bars.hovered != hovered {
+            self.bars.hovered = hovered;
+            if hovered.iter().any(|&h| h) {
+                self.bars.visible = true;
+                self.bar_hide = None;
+            } else if self.bars.drag.is_none() {
+                self.arm_bar_hide(cx);
+            }
+            dirty = true;
+        }
+        if let Some((side, grab)) = self.bars.drag {
+            self.drag_thumb(side, track_y[side_ix(side)] - grab);
+            self.sync_hunk_index(cx);
+            dirty = true;
+        }
+        // Hover copy only reaches the shell's chrome; the pane does not redraw.
+        let copy = gutter_y.and_then(|y| {
+            let i = self.viewport()?.bridge_at(y)?;
+            self.layout.as_ref().map(|l| l.bridges[i].position_copy())
+        });
+        self.set_hover_copy(copy, cx);
+        if dirty {
+            cx.notify();
+        }
+    }
+
+    /// Prepaint of the element: this frame's `view_h` → Viewport → paint list.
+    pub(super) fn prepaint_frame(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<element::Frame> {
+        self.scale = window.scale_factor();
+        self.view_h = f32::from(bounds.size.height);
+        let row_h = self.row_h();
+        let font_px = self.font_size.px() as f32;
+        let layout = self.layout.as_ref()?;
+        let vp = Viewport::new(layout, self.scroll_s, self.view_h, row_h).snapped(self.scale);
+        let s = vp.s();
+        let geom = Geom::new(bounds, ln_col_width(line_number_digits(layout)), self.scale);
+        let tracks = [Side::Old, Side::New]
+            .map(|side| thumb_for(self.view_h, vp.max_top(side), vp.top(side)).is_some());
+        let hitboxes = insert_hitboxes(&geom, tracks, window);
+        let frame = build_frame(
+            FrameInput {
+                layout,
+                vp: &vp,
+                geom,
+                row_h,
+                font_px,
+                scale: self.scale,
+                decorations: Decorations {
+                    drafting: self.drafting,
+                },
+                bars: &self.bars,
+            },
+            &mut self.shapes,
+            hitboxes,
+            window,
+        );
+        let index = nearest_hunk_index(self.hunk_s.unwrap_or(s / row_h), &layout.hunk_lands);
+        // A new view_h can re-clamp `scroll_s`.
+        self.scroll_s = s;
+        if index != self.hunk_index {
+            // Emitting mid-draw would not schedule the shell's redraw.
+            let this = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                this.update(cx, |pane, cx| pane.set_hunk_index(index, cx)).ok();
+            });
+        }
+        Some(frame)
     }
 }
 
 impl Render for DualPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_scroll(cx);
-        let Some(layout) = self.layout.as_ref() else {
+        if self.layout.is_none() {
             return placeholder("No Layout");
-        };
-        let vp = Viewport::new(layout, self.scroll_s, self.view_h, self.row_h());
-        let waves = self.omit_links.clone();
-        let ln_w = ln_col_width(line_number_digits(layout));
-        div()
-            .id("diff-panes")
-            .relative()
-            .size_full()
-            .flex()
-            .overflow_hidden()
-            .bg(theme::white())
-            .child(code_pane(true, layout, &vp, self, cx))
-            .child(center_gutter(layout, self, cx))
-            .child(code_pane(false, layout, &vp, self, cx))
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |bounds, _, window, _| {
-                        paint_omit_waves(window, bounds, &waves, ln_w);
-                    },
-                )
-                .absolute()
-                .size_full(),
-            )
-            .into_any_element()
+        }
+        element::dual_pane(cx.entity()).into_any_element()
     }
 }
 
@@ -578,50 +664,10 @@ impl Element for PaneSlot {
     }
 }
 
-const LN_FONT_PX: f32 = 10.;
-/// Wider than Menlo/Consolas at 10px (~6px) so a digit is never clipped.
-const LN_DIGIT_PX: f32 = 8.;
-/// `pr_1` / `pl_1` on the column.
-const LN_PAD: f32 = 4.;
-const BRIDGE_COL: f32 = 24.;
-
-fn line_number_digits(layout: &Layout) -> u32 {
-    let mut digits = 0u32;
-    let mut n = layout.max_line_number().max(1);
-    while n > 0 {
-        digits += 1;
-        n /= 10;
-    }
-    digits.max(2)
-}
-
-fn ln_col_width(digits: u32) -> f32 {
-    digits as f32 * LN_DIGIT_PX + LN_PAD
-}
-
 pub enum FontOp {
     Inc,
     Dec,
     Reset,
-}
-
-/// A visible bridge in window coordinates.
-#[derive(Clone)]
-struct PlacedBridge {
-    kind: LineKind,
-    x_l: f32,
-    x_r: f32,
-    y_l0: f32,
-    y_l1: f32,
-    y_r0: f32,
-    y_r1: f32,
-}
-
-fn side_ix(side: Side) -> usize {
-    match side {
-        Side::Old => 0,
-        Side::New => 1,
-    }
 }
 
 pub fn placeholder(msg: &str) -> gpui::AnyElement {
@@ -636,242 +682,11 @@ pub fn placeholder(msg: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn code_pane(
-    left: bool,
-    layout: &Layout,
-    vp: &Viewport<'_>,
-    view: &DualPane,
-    cx: &mut Context<DualPane>,
-) -> Div {
-    let id = if left { "code-left" } else { "code-right" };
-    let side = if left { Side::Old } else { Side::New };
-    let rows = layout.side(side);
-    let texts = &view.row_text[side_ix(side)];
-    let marked_rows = view.marked_rows[side_ix(side)].clone();
-    let empty = rows.is_empty();
-    let gaps = if left {
-        view.old_gaps.clone()
-    } else {
-        view.new_gaps.clone()
-    };
-    let seam_rows = vp.visible_seams(side).to_vec();
-    let seam_color = if left { theme::add_bg() } else { theme::del_bg() };
-    let seam_scroll = if left { view.applied_old } else { view.applied_new };
-    let seam = vp.empty_seam(side);
-    let handle = if left {
-        view.old_scroll.clone()
-    } else {
-        view.new_scroll.clone()
-    };
-    let drafting_line = view
-        .drafting
-        .and_then(|(s, line)| (s == side).then_some(line));
-    let row_h = view.row_h();
-    let font_px = view.font_size.px() as f32;
-    let pad = vp.content_pad(side);
-    let measure = left.then(|| cx.entity().downgrade());
-
-    div()
-        .relative()
-        .flex_1()
-        .min_w(px(0.))
-        .h_full()
-        .child(
-            div()
-                .id(id)
-                .size_full()
-                .overflow_y_scroll()
-                // ponytail: GPUI draws the thumb on the trailing edge. The old pane's
-                // outer-left bar would be a custom thumb; wheel coupling is what the bridges use.
-                .track_scroll(&handle)
-                .on_scroll_wheel(cx.listener(DualPane::on_wheel))
-                .font_family(theme::MONO_FONT)
-                .text_size(px(font_px))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .w_full()
-                        .children(rows.iter_rows().enumerate().map(|(i, row)| {
-                            let (line, omit_id) = match row {
-                                Row::Line(l) => (Some(l), None),
-                                Row::Omit(o) => (None, Some(o.id)),
-                            };
-                            let ln = line.map(|l| l.ln).unwrap_or(0);
-                            let marked = line.is_some_and(|l| rows.has_comment(l.ln));
-                            let drafting_here = line.is_some() && drafting_line == Some(ln);
-                            let bg = if drafting_here {
-                                rgb(0xdbe4ff)
-                            } else {
-                                kind_bg(row_kind(row))
-                            };
-                            let row_id = if left { ("row-l", i) } else { ("row-r", i) };
-                            // Word marks only near the viewport; the LCS is memoized per block.
-                            let parts = line
-                                .filter(|_| marked_rows.contains(&i))
-                                .and_then(|l| layout.marks(side, l));
-                            let text = texts.get(i).cloned().unwrap_or_default();
-                            div()
-                                .id(row_id)
-                                .relative()
-                                .h(px(row_h))
-                                .px_3()
-                                .bg(bg)
-                                .text_color(theme::text())
-                                .overflow_hidden()
-                                .when(marked, |d| {
-                                    d.border_l_2().border_color(theme::accent())
-                                })
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(id) = omit_id {
-                                        this.expand_omit(id, cx);
-                                    } else {
-                                        cx.emit(PaneEvent::BeginDraft { side, ln });
-                                    }
-                                }))
-                                .child(render_row_text(text, parts))
-                                .when(rows.is_seam(i), |row| {
-                                    row.child(seam_hairline(seam_color))
-                                })
-                        }))
-                        .when(pad > 0., |col| col.child(div().h(px(pad)).w_full())),
-                ),
-        )
-        .child(
-            canvas(
-                move |bounds, _, cx| {
-                    if let Some(measure) = &measure {
-                        let h = f32::from(bounds.size.height);
-                        measure
-                            .update(cx, |this, cx| {
-                                if (this.view_h - h).abs() > 0.5 {
-                                    this.view_h = h;
-                                    cx.notify();
-                                }
-                            })
-                            .ok();
-                    }
-                },
-                move |bounds, _, window, _| {
-                    paint_gaps(window, bounds, &gaps, empty, seam);
-                    for idx in &seam_rows {
-                        let y = *idx as f32 * row_h - seam_scroll;
-                        let rect = Bounds {
-                            origin: point(bounds.left(), bounds.top() + px(y)),
-                            size: size(bounds.size.width, px(2.)),
-                        };
-                        window.paint_quad(fill(rect, seam_color));
-                    }
-                },
-            )
-            .absolute()
-            .size_full(),
-        )
-}
-
-fn center_gutter(layout: &Layout, view: &DualPane, cx: &mut Context<DualPane>) -> Stateful<Div> {
-    let placed = view.placed.clone();
-    let ln_w = ln_col_width(line_number_digits(layout));
-    let row_h = view.row_h();
-    div()
-        .id("gutter")
-        .relative()
-        .overflow_hidden()
-        .w(px(ln_w * 2. + BRIDGE_COL))
-        .h_full()
-        .flex_none()
-        .bg(theme::white())
-        .on_scroll_wheel(cx.listener(DualPane::on_wheel))
-        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-            if !hovered {
-                this.set_hover_copy(None, cx);
-            }
-        }))
-        .on_mouse_move(cx.listener(DualPane::on_gutter_move))
-        .child(ln_col(true, &layout.old, view.applied_old, row_h, ln_w, false))
-        .child(ln_col(false, &layout.new, view.applied_new, row_h, ln_w, false))
-        .child(
-            canvas(
-                |_, _, _| (),
-                move |bounds, _, window, _| {
-                    window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                        paint_bridges(window, &placed, ln_w);
-                    });
-                },
-            )
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full(),
-        )
-        .child(ln_col(true, &layout.old, view.applied_old, row_h, ln_w, true))
-        .child(ln_col(false, &layout.new, view.applied_new, row_h, ln_w, true))
-}
-
-fn ln_col(
-    left: bool,
-    rows: &SideLayout,
-    scroll_top: f32,
-    row_h: f32,
-    col_w: f32,
-    labels_only: bool,
-) -> Stateful<Div> {
-    let id = if labels_only {
-        if left { "ln-left-text" } else { "ln-right-text" }
-    } else if left {
-        "ln-left"
-    } else {
-        "ln-right"
-    };
-    let seam_color = if left { theme::add_bg() } else { theme::del_bg() };
-    div()
-        .id(id)
-        .absolute()
-        .top(px(-scroll_top))
-        .w(px(col_w))
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .when(left, |col| col.left(px(0.)))
-        .when(!left, |col| col.right(px(0.)))
-        .font_family(theme::line_number_font())
-        .text_size(px(LN_FONT_PX))
-        .text_color(theme::faint())
-        .when(left, |col| col.text_right().pr_1())
-        .when(!left, |col| col.pl_1())
-        .children(rows.iter_rows().enumerate().map(|(i, row)| {
-            let ln_id = if left {
-                (if labels_only { "ln-lt" } else { "ln-l" }, i)
-            } else {
-                (if labels_only { "ln-rt" } else { "ln-r" }, i)
-            };
-            let label = match row {
-                Row::Line(line) => line.ln.to_string(),
-                Row::Omit(_) => String::new(),
-            };
-            let is_seam = !labels_only && rows.is_seam(i);
-            div()
-                .id(ln_id)
-                .relative()
-                .w_full()
-                .h(px(row_h))
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .when(!labels_only, |cell| cell.bg(kind_bg(row_kind(row))))
-                .child(label)
-                .when(is_seam, |cell| cell.child(seam_hairline(seam_color)))
-        }))
-}
-
-
-fn seam_hairline(color: gpui::Rgba) -> gpui::Div {
-    div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .right_0()
-        .h(px(2.))
-        .bg(color)
+fn side_ix(side: Side) -> usize {
+    match side {
+        Side::Old => 0,
+        Side::New => 1,
+    }
 }
 
 fn nearest_hunk_index(s_rows: f32, lands: &[HunkLand]) -> Option<usize> {
@@ -887,294 +702,4 @@ fn nearest_hunk_index(s_rows: f32, lands: &[HunkLand]) -> Option<usize> {
         }
     }
     Some(idx)
-}
-
-/// Row text per visual row, shared so a frame clones a pointer, not the line.
-fn row_texts(side: &SideLayout) -> Vec<SharedString> {
-    side.iter_rows()
-        .map(|row| match row {
-            Row::Line(line) => SharedString::from(side.text(line).to_string()),
-            Row::Omit(_) => SharedString::default(),
-        })
-        .collect()
-}
-
-fn render_row_text(text: SharedString, parts: Option<&[TokenPart]>) -> gpui::AnyElement {
-    match parts {
-        Some(parts) if parts.iter().any(|p| p.changed) => div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .overflow_hidden()
-            .children(parts.iter().map(|p| {
-                if p.changed {
-                    div()
-                        .bg(theme::mod_chg())
-                        .rounded(px(2.))
-                        .child(p.text.clone())
-                        .into_any_element()
-                } else {
-                    div().child(p.text.clone()).into_any_element()
-                }
-            }))
-            .into_any_element(),
-        _ => div().child(text).into_any_element(),
-    }
-}
-
-fn kind_bg(kind: Option<LineKind>) -> gpui::Rgba {
-    match kind {
-        Some(LineKind::Replace) => theme::mod_bg(),
-        Some(LineKind::Insert) => theme::add_bg(),
-        Some(LineKind::Delete) => theme::del_bg(),
-        Some(LineKind::Equal) | None => theme::white(),
-    }
-}
-
-fn row_kind(row: Row<'_>) -> Option<LineKind> {
-    match row {
-        Row::Line(line) => Some(line.kind),
-        Row::Omit(_) => None,
-    }
-}
-
-fn paint_bridges(window: &mut Window, placed: &[PlacedBridge], ln_w: f32) {
-    for bridge in placed {
-        let parallel = (bridge.y_l0 - bridge.y_r0).abs() < 1. && (bridge.y_l1 - bridge.y_r1).abs() < 1.;
-        let mut path = PathBuilder::fill();
-        if parallel {
-            path.move_to(point(px(bridge.x_l), px(bridge.y_l0)));
-            path.line_to(point(px(bridge.x_r), px(bridge.y_r0)));
-            path.line_to(point(px(bridge.x_r), px(bridge.y_r1)));
-            path.line_to(point(px(bridge.x_l), px(bridge.y_l1)));
-        } else {
-            pinch_bezier(&mut path, bridge, ln_w);
-        }
-        path.close();
-        if let Ok(path) = path.build() {
-            window.paint_path(path, kind_bg(Some(bridge.kind)));
-        }
-    }
-}
-
-/// Full row on the long side, cubic Bézier through the center gutter, then a 2px
-/// hairline across the short side's line-number column so it meets the code hairline.
-fn pinch_bezier(path: &mut PathBuilder, bridge: &PlacedBridge, ln_w: f32) {
-    let x_l = bridge.x_l;
-    let x_r = bridge.x_r;
-    let mid_l = x_l + ln_w;
-    let mid_r = x_r - ln_w;
-    let mw = (mid_r - mid_l).max(8.);
-    match bridge.kind {
-        LineKind::Delete => {
-            let y0 = bridge.y_l0;
-            let y1 = bridge.y_l1;
-            let top = bridge.y_r0;
-            let bot = bridge.y_r0 + 2.;
-            path.move_to(point(px(x_l), px(y0)));
-            path.line_to(point(px(mid_l), px(y0)));
-            path.cubic_bezier_to(
-                point(px(mid_r), px(top)),
-                point(px(mid_l + mw * 0.45), px(y0)),
-                point(px(mid_r - mw * 0.45), px(top)),
-            );
-            path.line_to(point(px(x_r), px(top)));
-            path.line_to(point(px(x_r), px(bot)));
-            path.line_to(point(px(mid_r), px(bot)));
-            path.cubic_bezier_to(
-                point(px(mid_l), px(y1)),
-                point(px(mid_r - mw * 0.45), px(bot)),
-                point(px(mid_l + mw * 0.45), px(y1)),
-            );
-            path.line_to(point(px(x_l), px(y1)));
-        }
-        LineKind::Insert => {
-            let top = bridge.y_l0;
-            let bot = bridge.y_l0 + 2.;
-            let y0 = bridge.y_r0;
-            let y1 = bridge.y_r1;
-            path.move_to(point(px(x_l), px(top)));
-            path.line_to(point(px(mid_l), px(top)));
-            path.cubic_bezier_to(
-                point(px(mid_r), px(y0)),
-                point(px(mid_l + mw * 0.45), px(top)),
-                point(px(mid_r - mw * 0.45), px(y0)),
-            );
-            path.line_to(point(px(x_r), px(y0)));
-            path.line_to(point(px(x_r), px(y1)));
-            path.line_to(point(px(mid_r), px(y1)));
-            path.cubic_bezier_to(
-                point(px(mid_l), px(bot)),
-                point(px(mid_r - mw * 0.45), px(y1)),
-                point(px(mid_l + mw * 0.45), px(bot)),
-            );
-            path.line_to(point(px(x_l), px(bot)));
-        }
-        _ => {
-            // Hold the full block through each line-number column. The cubic
-            // only runs between the columns, from the top of the left block
-            // to the top of the right block (and bottom to bottom).
-            path.move_to(point(px(x_l), px(bridge.y_l0)));
-            path.line_to(point(px(mid_l), px(bridge.y_l0)));
-            path.cubic_bezier_to(
-                point(px(mid_r), px(bridge.y_r0)),
-                point(px(mid_l + mw * 0.45), px(bridge.y_l0)),
-                point(px(mid_r - mw * 0.45), px(bridge.y_r0)),
-            );
-            path.line_to(point(px(x_r), px(bridge.y_r0)));
-            path.line_to(point(px(x_r), px(bridge.y_r1)));
-            path.line_to(point(px(mid_r), px(bridge.y_r1)));
-            path.cubic_bezier_to(
-                point(px(mid_l), px(bridge.y_l1)),
-                point(px(mid_r - mw * 0.45), px(bridge.y_r1)),
-                point(px(mid_l + mw * 0.45), px(bridge.y_l1)),
-            );
-            path.line_to(point(px(x_l), px(bridge.y_l1)));
-        }
-    }
-}
-
-fn paint_omit_waves(
-    window: &mut Window,
-    bounds: Bounds<gpui::Pixels>,
-    folds: &[(f32, f32, f32, f32)],
-    ln_w: f32,
-) {
-    if folds.is_empty() {
-        return;
-    }
-    let x0 = f32::from(bounds.left());
-    let x1 = f32::from(bounds.right());
-    window.with_content_mask(Some(ContentMask { bounds }), |window| {
-        for &(gutter_l, y_l, gutter_r, y_r) in folds {
-            // Bend only in the gap between the line-number columns. A slope
-            // across the digits cuts through them when the folds are far apart.
-            let path = joined_wave(
-                x0,
-                x1,
-                y_l,
-                gutter_l + ln_w,
-                gutter_r - ln_w,
-                y_r,
-            );
-            if let Ok(path) = path.build() {
-                window.paint_path(path, rgb(0xb5b5b5));
-            }
-        }
-    });
-}
-
-const WAVE_PERIOD: f32 = 16.;
-const WAVE_AMP: f32 = 3.5;
-const WAVE_STEP: f32 = 2.;
-
-fn wave_y(x: f32, base: f32, crest_at: Option<f32>) -> f32 {
-    let phase = match crest_at {
-        Some(lock) => (x - lock) / WAVE_PERIOD * std::f32::consts::TAU + std::f32::consts::FRAC_PI_2,
-        None => x / WAVE_PERIOD * std::f32::consts::TAU,
-    };
-    base + phase.sin() * WAVE_AMP
-}
-
-fn trace_wave(
-    path: &mut PathBuilder,
-    x0: f32,
-    x1: f32,
-    base: f32,
-    crest_at: Option<f32>,
-    first_move: bool,
-) {
-    if x1 < x0 {
-        return;
-    }
-    let mut x = x0;
-    let mut moved = !first_move;
-    loop {
-        let xx = x.min(x1);
-        let p = point(px(xx), px(wave_y(xx, base, crest_at)));
-        if moved {
-            path.line_to(p);
-        } else {
-            path.move_to(p);
-            moved = true;
-        }
-        if xx >= x1 - 0.01 {
-            break;
-        }
-        x += WAVE_STEP;
-    }
-}
-
-/// One stroke. Each side is a horizontal sine through its code and line numbers.
-/// A height change is a cubic Bézier in the gap between the line-number columns.
-/// Each sine meets that curve at a crest, so both tangents are horizontal, the
-/// same way the change ribbons leave a flat edge.
-fn joined_wave(x0: f32, x1: f32, y_l: f32, gap_l: f32, gap_r: f32, y_r: f32) -> PathBuilder {
-    let mut path = PathBuilder::stroke(px(1.25));
-    if x1 - x0 < 2. {
-        return path;
-    }
-    let gap_l = gap_l.clamp(x0, x1);
-    let gap_r = (gap_l + 8.).max(gap_r).min(x1);
-    if (y_r - y_l).abs() < 0.5 {
-        trace_wave(&mut path, x0, x1, y_l, None, true);
-        return path;
-    }
-    trace_wave(&mut path, x0, gap_l, y_l, Some(gap_l), true);
-    let y0 = y_l + WAVE_AMP;
-    let y1 = y_r + WAVE_AMP;
-    let dx = (gap_r - gap_l) * 0.45;
-    path.cubic_bezier_to(
-        point(px(gap_r), px(y1)),
-        point(px(gap_l + dx), px(y0)),
-        point(px(gap_r - dx), px(y1)),
-    );
-    if gap_r < x1 {
-        trace_wave(&mut path, gap_r, x1, y_r, Some(gap_r), false);
-    }
-    path
-}
-
-fn paint_gaps(
-    window: &mut Window,
-    bounds: Bounds<gpui::Pixels>,
-    gaps: &[(f32, f32)],
-    empty: bool,
-    seam: f32,
-) {
-    for &(y0, y1) in gaps {
-        if y1 - y0 < 0.5 {
-            continue;
-        }
-        let rect = Bounds {
-            origin: point(bounds.left(), bounds.top() + px(y0)),
-            size: size(bounds.size.width, px(y1 - y0)),
-        };
-        window.paint_quad(fill(rect, theme::gap_bg()));
-        window.with_content_mask(Some(ContentMask { bounds: rect }), |window| {
-            let width = f32::from(rect.size.width);
-            let left = f32::from(rect.left());
-            let top = f32::from(rect.top());
-            let bottom = f32::from(rect.bottom());
-            let mut y = top - width;
-            while y < bottom {
-                let mut stroke = PathBuilder::stroke(px(1.));
-                stroke.move_to(point(px(left), px(y)));
-                stroke.line_to(point(px(left + width), px(y + width)));
-                if let Ok(path) = stroke.build() {
-                    window.paint_path(path, theme::faint());
-                }
-                y += 7.;
-            }
-        });
-    }
-    if empty {
-        let y = bounds.top() + px(seam);
-        let mut stroke = PathBuilder::stroke(px(2.));
-        stroke.move_to(point(bounds.left() + px(8.), y));
-        stroke.line_to(point(bounds.right() - px(8.), y));
-        if let Ok(path) = stroke.build() {
-            window.paint_path(path, rgb(0x8aa0b8));
-        }
-    }
 }

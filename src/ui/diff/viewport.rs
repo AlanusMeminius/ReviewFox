@@ -56,8 +56,22 @@ impl<'a> Viewport<'a> {
         }
     }
 
+    /// Snap both tops to the device pixel grid at `scale` (device px per
+    /// logical px). Everything derived from the tops (rows, bridges, gaps,
+    /// links, hit tests) follows.
+    pub fn snapped(mut self, scale: f32) -> Self {
+        self.old_top = snap(self.old_top, scale);
+        self.new_top = snap(self.new_top, scale);
+        self
+    }
+
     pub fn s(&self) -> f32 {
         self.s
+    }
+
+    /// Largest top `side` can reach (its scrollbar travel).
+    pub fn max_top(&self, side: Side) -> f32 {
+        max_scroll(self.layout.side(side).rows(), self.anchor, self.row_h)
     }
 
     /// Scroll offset of `side`'s content (content y at the pane top).
@@ -78,11 +92,6 @@ impl<'a> Viewport<'a> {
         let first = (top / self.row_h).floor().max(0.) as usize;
         let last = ((top + self.view_h) / self.row_h).ceil().max(0.) as usize;
         first.min(n)..last.min(n)
-    }
-
-    /// Blank space below the last row so it can reach the anchor line.
-    pub fn content_pad(&self, side: Side) -> f32 {
-        content_pad(self.layout.side(side).rows(), self.view_h, self.row_h)
     }
 
     /// Pane y of an empty side's only seam.
@@ -183,7 +192,6 @@ impl<'a> Viewport<'a> {
     }
 
     /// What `side` shows at pane y `y`.
-    #[allow(dead_code)] // Mouse hit testing for the dual-pane Element (issue 03).
     pub fn hit(&self, side: Side, y: f32) -> Option<Row<'a>> {
         if self.row_h <= 0. {
             return None;
@@ -452,7 +460,7 @@ pub fn clamp_s(layout: &Layout, s: f32, view_h: f32, row_h: f32) -> f32 {
     s.clamp(lo, hi)
 }
 
-/// Content y on the anchor line for a pane scrolled natively to `scroll_top`.
+/// Content y on the anchor line for a side whose top is `scroll_top` (scrollbar drag).
 pub fn content_from_top(scroll_top: f32, n: usize, view_h: f32, row_h: f32) -> f32 {
     let anchor = anchor_of(view_h);
     if n == 0 || scroll_top <= 0. {
@@ -484,12 +492,13 @@ fn empty_seam(other_n: usize, view_h: f32, row_h: f32) -> f32 {
     ((other_n as f32 - 1.) * row_h).min(anchor)
 }
 
-fn content_pad(n: usize, view_h: f32, row_h: f32) -> f32 {
-    if n == 0 || view_h < 1. {
-        return 0.;
+/// Round logical pixel `v` to the device pixel grid at `scale`.
+pub fn snap(v: f32, scale: f32) -> f32 {
+    if scale <= 0. {
+        v
+    } else {
+        (v * scale).round() / scale
     }
-    let anchor = view_h / 3.;
-    (view_h - anchor - row_h).max(0.)
 }
 
 fn max_scroll(n: usize, anchor: f32, row_h: f32) -> f32 {
@@ -625,6 +634,39 @@ mod tests {
                 }],
             ),
         ]
+    }
+
+    #[test]
+    fn snap_rounds_to_device_pixels() {
+        assert_eq!(snap(10.3, 1.), 10.);
+        assert_eq!(snap(10.3, 2.), 10.5);
+        assert_eq!(snap(10.2, 2.), 10.);
+        assert_eq!(snap(10.4, 1.5), 32. / 3.);
+        assert_eq!(snap(7.25, 0.), 7.25);
+    }
+
+    #[test]
+    fn snapped_tops_follow_into_hit_tests_and_bridges() {
+        let (_, old, new, ops) = cases().remove(0);
+        let layout = build(&old, &new, ops, None);
+        let (lo, _) = s_range(&layout, VIEW_H, ROW_H);
+        let raw = Viewport::new(&layout, lo + 60.3, VIEW_H, ROW_H);
+        let vp = Viewport::new(&layout, lo + 60.3, VIEW_H, ROW_H).snapped(2.);
+        assert_eq!(vp.top(Side::New), snap(raw.top(Side::New), 2.));
+        assert!((vp.top(Side::New) * 2.).fract() == 0.);
+        for p in vp.bridges() {
+            assert!((p.y_r0 * 2.).fract() == 0. && (p.y_r1 * 2.).fract() == 0.);
+        }
+    }
+
+    #[test]
+    fn max_top_is_scrollbar_travel() {
+        let (_, old, new, ops) = cases().remove(1);
+        let layout = build(&old, &new, ops, None);
+        let (_, hi) = s_range(&layout, VIEW_H, ROW_H);
+        let vp = Viewport::new(&layout, hi, VIEW_H, ROW_H);
+        assert_eq!(vp.top(Side::Old), vp.max_top(Side::Old));
+        assert_eq!(vp.top(Side::New), vp.max_top(Side::New));
     }
 
     #[test]

@@ -170,8 +170,6 @@ pub struct SideLayout {
     omits: Vec<OmitRow>,
     /// Rows whose top edge is a pinch (Insert on old, Delete on new); sorted.
     seams: Vec<u32>,
-    /// `seam_mask[row]` for O(1) lookup; one past the last row.
-    seam_mask: Vec<bool>,
     /// Line numbers with a DraftComment on this side.
     commented: HashSet<u32>,
 }
@@ -183,7 +181,6 @@ impl SideLayout {
             lines: Vec::new(),
             omits: Vec::new(),
             seams: Vec::new(),
-            seam_mask: Vec::new(),
             commented: HashSet::new(),
         }
     }
@@ -223,6 +220,7 @@ impl SideLayout {
     }
 
     /// Rows in order, O(1) per step.
+    #[cfg(test)]
     pub fn iter_rows(&self) -> impl Iterator<Item = Row<'_>> + '_ {
         let mut lines = self.lines.iter().peekable();
         let mut omits = self.omits.iter().peekable();
@@ -250,8 +248,9 @@ impl SideLayout {
         &self.seams
     }
 
+    #[cfg(test)]
     pub fn is_seam(&self, row: usize) -> bool {
-        self.seam_mask.get(row).copied().unwrap_or(false)
+        self.seams.binary_search(&(row as u32)).is_ok()
     }
 
     pub fn has_comment(&self, ln: u32) -> bool {
@@ -284,12 +283,6 @@ impl SideLayout {
     fn finish_seams(&mut self) {
         self.seams.sort_unstable();
         self.seams.dedup();
-        self.seam_mask = vec![false; self.rows() + 1];
-        for &s in &self.seams {
-            if let Some(m) = self.seam_mask.get_mut(s as usize) {
-                *m = true;
-            }
-        }
     }
 }
 
