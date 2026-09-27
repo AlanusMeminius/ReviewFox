@@ -64,6 +64,7 @@ DualPaneElement (one Element: old pane | gutter | new pane)
 ```
 
 - Scroll notifies `DualPane` only; the tree, chrome and comments do not re-render.
+- GPUI re-renders every ancestor of a notified view, so `DualPane` is not nested in the shell. `DiffView` renders a cached `DiffShell` view (tree, chrome, search, comments, draft bar) that leaves a slot, and mounts the cached `DualPane` over that slot (`pane::slot`). A pane frame re-renders only `DiffView`'s thin root and the pane; a shell change reuses the pane.
 - `git::FileDiff::Text` carries text + `Alignment` only (no `display`, no `hunk_count`). `DisplayRows`, `ScrollKnot`, `Bridge`, `RowKind` move out of `domain` into `ui/diff/layout.rs`; `domain` keeps Alignment, Hunk, FoldState, Search, DraftComment.
 
 ## 6. Caches and invalidation

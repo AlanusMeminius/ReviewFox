@@ -1,43 +1,21 @@
 use gpui::{
-    App, Bounds, ClipboardItem, ContentMask, Context, Div, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseMoveEvent, ParentElement, PathBuilder,
-    Render, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, StatefulInteractiveElement,
-    Styled, Window, WindowControlArea, canvas, div, fill, point, prelude::*, px, rgb, size, svg,
+    AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, StatefulInteractiveElement,
+    StyleRefinement, Styled, Subscription, WeakEntity, Window, WindowControlArea, canvas, div,
+    prelude::*, px, rgb, svg,
 };
 use std::collections::HashSet;
-use std::ops::Range;
 use std::rc::Rc;
 
 use crate::domain::{
-    ChangedPath, Comparison, DiffFontSize, FoldState, PathStatus, Review, SearchMatch,
-    SearchScope, Side, TokenPart, ViewOptions, hunk_jump_target, match_jump_plan, search_file,
+    Anchor, ChangedPath, Comparison, PathStatus, Review, SearchMatch, SearchScope, Side,
+    ViewOptions, search_file,
 };
 
-const LN_FONT_PX: f32 = 10.;
-/// Wider than Menlo/Consolas at 10px (~6px) so a digit is never clipped.
-const LN_DIGIT_PX: f32 = 8.;
-/// `pr_1` / `pl_1` on the column.
-const LN_PAD: f32 = 4.;
-const BRIDGE_COL: f32 = 24.;
-
-fn line_number_digits(layout: &Layout) -> u32 {
-    let mut digits = 0u32;
-    let mut n = layout.max_line_number().max(1);
-    while n > 0 {
-        digits += 1;
-        n /= 10;
-    }
-    digits.max(2)
-}
-
-fn ln_col_width(digits: u32) -> f32 {
-    digits as f32 * LN_DIGIT_PX + LN_PAD
-}
 use crate::export;
 use crate::git::{self, FileDiff};
 use crate::window_geometry_store;
-use super::diff::layout::{HunkLand, Layout, LineKind, Row, SideLayout};
-use super::diff::viewport::{self, Viewport};
+use super::diff::pane::{self, DualPane, FontOp, PaneEvent, SlotBounds, placeholder};
 use super::file_tree::{self, TreeRow};
 #[cfg(target_os = "macos")]
 use super::mac_column_vibrancy::ColumnVibrancy;
@@ -61,6 +39,9 @@ struct Drafting {
     body: String,
 }
 
+/// The Diff window shell: tree, chrome, search bar, comments, draft bar and
+/// Review. The dual pane is its own Entity (`DualPane`), driven by methods
+/// and heard through `PaneEvent`s, so scrolling notifies only the pane.
 pub struct DiffView {
     focus: FocusHandle,
     tree_collapsed: bool,
@@ -74,44 +55,20 @@ pub struct DiffView {
     collapsed_dirs: HashSet<String>,
     /// Reset collapsed_dirs when this no longer matches current ChangedPath list.
     tree_path_fingerprint: Vec<String>,
-    /// View projection of the selected text file under `fold`. Rebuilt on
-    /// file / fold / ViewOptions change, never per frame.
-    layout: Option<Layout>,
-    /// Per-side row text for the div panes, indexed by visual row.
-    row_text: [Vec<SharedString>; 2],
-    old_scroll: ScrollHandle,
-    new_scroll: ScrollHandle,
-    /// Shared scroll parameter, in pixels. See docs/dual-pane-diff.md §3.1.
-    /// Kept inside `viewport::s_range` from the first measured frame on.
-    scroll_s: f32,
-    scroll_nudge: f32,
-    applied_old: f32,
-    applied_new: f32,
-    /// Pane viewport height from the previous frame. 0 until the first layout.
-    view_h: f32,
-    /// Window y of the code panes' top edge (hover hit tests).
-    pane_top_w: f32,
-    /// Rows that get word marks this frame: visible ± one screen.
-    marked_rows: [Range<usize>; 2],
+    pane: Entity<DualPane>,
+    _pane_events: Subscription,
+    /// Cached view that renders the shell; created on the first render.
+    shell: Option<Entity<DiffShell>>,
+    /// Where the shell leaves room for the pane this frame.
+    pane_bounds: SlotBounds,
+    /// Last `PaneEvent::HunkIndexChanged`; drives chrome.
+    hunk_index: Option<usize>,
+    /// Last `PaneEvent::HoverCopy`; shown in chrome.
     hover_copy: Option<String>,
-    placed: Vec<PlacedBridge>,
-    omit_links: Vec<(f32, f32, f32, f32)>,
-    old_gaps: Vec<(f32, f32)>,
-    new_gaps: Vec<(f32, f32)>,
     #[cfg(target_os = "macos")]
     tree_vibrancy: Option<ColumnVibrancy>,
-    /// Per-file Equal fold. Reset when the selected path changes.
-    fold: FoldState,
-    /// 0-based index of the Hunk at / nearest the viewport; drives chrome.
-    hunk_index: Option<usize>,
-    /// Hunk-navigation position (row units) set by a jump or file open, before
-    /// `s_range` clamping. Jumps near the file ends move no pixels, so chrome
-    /// and the next jump follow this until the user scrolls.
-    hunk_s: Option<f32>,
     /// Diff-computation knobs; does not change Comparison identity.
     view_options: ViewOptions,
-    /// Session-level mono size for both panes and ribbons (§3.5).
-    font_size: DiffFontSize,
     /// In-file search query; empty = no hits.
     search_query: String,
     search_scope: SearchScope,
@@ -120,34 +77,37 @@ pub struct DiffView {
     bounds_sub: Option<gpui::Subscription>,
 }
 
-enum FontOp {
-    Inc,
-    Dec,
-    Reset,
+/// Renders DiffView's shell as a cached view. A pane scroll dirties DiffView
+/// (the pane's ancestor), whose render is then only the root, this cached
+/// shell and the pane slot. The shell re-renders when DiffView notifies.
+struct DiffShell {
+    view: WeakEntity<DiffView>,
+    _observe: Subscription,
 }
 
-/// A visible bridge in window coordinates.
-#[derive(Clone)]
-struct PlacedBridge {
-    kind: LineKind,
-    x_l: f32,
-    x_r: f32,
-    y_l0: f32,
-    y_l1: f32,
-    y_r0: f32,
-    y_r1: f32,
-}
-
-fn side_ix(side: Side) -> usize {
-    match side {
-        Side::Old => 0,
-        Side::New => 1,
+impl Render for DiffShell {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.view
+            .update(cx, |view, cx| view.render_shell(window, cx))
+            .unwrap_or_else(|_| div().into_any_element())
     }
 }
 
 impl DiffView {
-    pub fn with_snapshot(snapshot: DiffSnapshot, cx: &mut Context<Self>) -> Self {
+    pub fn with_snapshot(snapshot: DiffSnapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let review = Review::new(snapshot.comparison.clone());
+        let pane = cx.new(|_| DualPane::new());
+        let pane_events = cx.subscribe_in(&pane, window, |this, _, event, window, cx| match event {
+            PaneEvent::BeginDraft { side, ln } => this.begin_draft(*side, *ln, window, cx),
+            PaneEvent::HunkIndexChanged(index) => {
+                this.hunk_index = *index;
+                cx.notify();
+            }
+            PaneEvent::HoverCopy(copy) => {
+                this.hover_copy = copy.clone();
+                cx.notify();
+            }
+        });
         let mut this = Self {
             focus: cx.focus_handle(),
             tree_collapsed: false,
@@ -159,80 +119,65 @@ impl DiffView {
             export_status: None,
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
-            layout: None,
-            row_text: [Vec::new(), Vec::new()],
-            old_scroll: ScrollHandle::new(),
-            new_scroll: ScrollHandle::new(),
-            scroll_s: 0.,
-            scroll_nudge: 0.,
-            applied_old: 0.,
-            applied_new: 0.,
-            view_h: 0.,
-            pane_top_w: 0.,
-            marked_rows: [0..0, 0..0],
+            pane,
+            _pane_events: pane_events,
+            shell: None,
+            pane_bounds: SlotBounds::default(),
+            hunk_index: None,
             hover_copy: None,
-            placed: Vec::new(),
-            omit_links: Vec::new(),
-            old_gaps: Vec::new(),
-            new_gaps: Vec::new(),
             #[cfg(target_os = "macos")]
             tree_vibrancy: None,
-            fold: FoldState::collapsed(),
-            hunk_index: None,
-            hunk_s: Some(0.),
             view_options: ViewOptions::default(),
-            font_size: DiffFontSize::default(),
             search_query: String::new(),
             search_scope: SearchScope::Both,
             searching: false,
             bounds_sub: None,
         };
-        this.rebuild_layout();
+        this.open_in_pane(cx);
         this
     }
 
-    fn row_h(&self) -> f32 {
-        self.font_size.row_height()
+    fn with_pane<R>(
+        &self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut DualPane, &mut Context<DualPane>) -> R,
+    ) -> R {
+        self.pane.update(cx, f)
     }
 
-    /// Rebuild the Layout from the selected file, `fold` and the comment index.
-    fn rebuild_layout(&mut self) {
-        self.layout = None;
-        self.row_text = [Vec::new(), Vec::new()];
-        let Some(FileDiff::Text {
-            alignment,
-            old_text,
-            new_text,
-        }) = self.snapshot.as_ref().map(|s| &s.file)
-        else {
-            return;
-        };
-        let layout = Layout::build(
-            old_text.clone(),
-            new_text.clone(),
-            alignment,
-            Some(&self.fold),
-        );
-        self.row_text = [row_texts(&layout.old), row_texts(&layout.new)];
-        self.layout = Some(layout);
-        self.refresh_comments();
-    }
-
-    fn refresh_comments(&mut self) {
-        let (Some(layout), Some(snap)) = (self.layout.as_mut(), self.snapshot.as_ref()) else {
-            return;
-        };
-        match &self.review {
-            Some(review) => layout.set_comments(
-                review
-                    .comments_for_path(&snap.selected_path)
-                    .map(|c| &c.anchor),
-            ),
-            None => layout.set_comments(std::iter::empty()),
+    /// Anchors of the selected path's DraftComments, for the pane's comment index.
+    fn path_anchors(&self) -> Vec<Anchor> {
+        match (&self.review, &self.snapshot) {
+            (Some(review), Some(snap)) => review
+                .comments_for_path(&snap.selected_path)
+                .map(|c| c.anchor.clone())
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
-    /// Recompute Alignment under the current ViewOptions. Caller rebuilds the Layout.
+    /// Hand the selected file to the pane: file start, everything folded.
+    fn open_in_pane(&mut self, cx: &mut Context<Self>) {
+        let Some(snap) = self.snapshot.as_ref() else {
+            return;
+        };
+        let file = snap.file.clone();
+        let comments = self.path_anchors();
+        self.with_pane(cx, |pane, cx| pane.open(&file, comments, cx));
+    }
+
+    fn refresh_comments(&mut self, cx: &mut Context<Self>) {
+        let comments = self.path_anchors();
+        self.with_pane(cx, |pane, cx| pane.set_comments(comments, cx));
+    }
+
+    fn set_drafting(&mut self, drafting: Option<Drafting>, cx: &mut Context<Self>) {
+        let line = drafting.as_ref().map(|d| (d.side, d.line));
+        self.drafting = drafting;
+        self.with_pane(cx, |pane, cx| pane.set_drafting(line, cx));
+    }
+
+    /// Recompute Alignment under the current ViewOptions.
     fn recompute_alignment(&mut self) {
         let opts = self.view_options.clone();
         let Some(snap) = self.snapshot.as_mut() else {
@@ -247,182 +192,24 @@ impl DiffView {
             return;
         };
         *alignment = git::compute_alignment(old_text, new_text, &opts);
-        self.hunk_index = None;
-        self.hunk_s = None;
     }
 
     fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
         self.view_options.ignore_whitespace = !self.view_options.ignore_whitespace;
-        self.with_anchor(|this| {
-            this.fold = FoldState::collapsed();
-            this.recompute_alignment();
-        });
-        cx.notify();
-    }
-
-    /// Back to the file start. The first measured frame clamps `scroll_s` up
-    /// to the lower end of `s_range`.
-    fn reset_scroll(&mut self) {
-        self.scroll_s = 0.;
-        self.scroll_nudge = 0.;
-        self.applied_old = 0.;
-        self.applied_new = 0.;
-        self.hover_copy = None;
-        self.placed.clear();
-        self.omit_links.clear();
-        self.old_gaps.clear();
-        self.new_gaps.clear();
-        self.old_scroll.set_offset(point(px(0.), px(0.)));
-        self.new_scroll.set_offset(point(px(0.), px(0.)));
-    }
-
-    fn reset_fold(&mut self) {
-        self.fold = FoldState::collapsed();
-        self.hunk_index = None;
-        self.hunk_s = Some(0.);
-    }
-
-    fn with_anchor(&mut self, mutate: impl FnOnce(&mut Self)) {
-        let cap = self.capture_anchor();
-        mutate(self);
-        self.rebuild_layout();
-        self.restore_anchor(cap);
-        self.hunk_s = None;
-    }
-
-    fn viewport(&self) -> Option<Viewport<'_>> {
-        let layout = self.layout.as_ref()?;
-        Some(Viewport::new(layout, self.scroll_s, self.view_h, self.row_h()))
-    }
-
-    fn capture_anchor(&self) -> Option<viewport::AnchorCap> {
-        self.viewport()?.capture_anchor()
-    }
-
-    fn restore_anchor(&mut self, cap: Option<viewport::AnchorCap>) {
-        let (Some(cap), Some(layout)) = (cap, self.layout.as_ref()) else {
-            return;
-        };
-        if let Some(s) = viewport::s_for_anchor(layout, cap, self.view_h, self.row_h(), self.scroll_s) {
-            self.scroll_s = s;
+        self.recompute_alignment();
+        if let Some(FileDiff::Text { alignment, .. }) = self.snapshot.as_ref().map(|s| &s.file) {
+            let alignment = alignment.clone();
+            self.with_pane(cx, |pane, cx| pane.set_alignment(alignment, cx));
         }
-    }
-
-    fn expand_omit(&mut self, omit_id: usize, cx: &mut Context<Self>) {
-        self.with_anchor(|this| {
-            this.fold.expand(omit_id);
-        });
-        cx.notify();
-    }
-
-    fn expand_all(&mut self, cx: &mut Context<Self>) {
-        self.with_anchor(|this| {
-            let ids: Vec<usize> = this
-                .snapshot
-                .as_ref()
-                .and_then(|s| match &s.file {
-                    FileDiff::Text { alignment, .. } => Some(
-                        alignment
-                            .ops
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, op)| {
-                                matches!(op, crate::domain::AlignmentOp::Equal { .. }).then_some(i)
-                            })
-                            .collect(),
-                    ),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            for i in ids {
-                this.fold.expand(i);
-            }
-        });
-        cx.notify();
-    }
-
-    fn collapse_unchanged(&mut self, cx: &mut Context<Self>) {
-        self.with_anchor(|this| {
-            this.fold = FoldState::collapsed();
-        });
         cx.notify();
     }
 
     fn jump_hunk(&mut self, dir: i32, cx: &mut Context<Self>) {
-        let (Some(FileDiff::Text { alignment, .. }), Some(layout)) =
-            (self.snapshot.as_ref().map(|s| &s.file), self.layout.as_ref())
-        else {
-            return;
-        };
-        let hunk_count = layout.hunk_count;
-        if hunk_count == 0 {
-            return;
-        }
-        let lands = &layout.hunk_lands;
-        let row_h = self.row_h();
-        let s_rows = self.hunk_s.unwrap_or(self.scroll_s / row_h);
-        let next = if dir > 0 {
-            (0..hunk_count).find(|&i| {
-                lands
-                    .get(i)
-                    .map(|h| h.s as f32 > s_rows + 0.5)
-                    .unwrap_or(false)
-            })
-        } else {
-            (0..hunk_count)
-                .rev()
-                .find(|&i| {
-                    lands
-                        .get(i)
-                        .map(|h| (h.s as f32) < s_rows - 0.5)
-                        .unwrap_or(false)
-                })
-        };
-        let Some(i) = next else {
-            return;
-        };
-        let Some(target) = hunk_jump_target(alignment, i) else {
-            return;
-        };
-        let s = viewport::s_for_target(layout, target, row_h, self.scroll_s).unwrap_or(self.scroll_s);
-        self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
-        self.hunk_s = Some(s / row_h);
-        self.hunk_index = Some(i);
-        cx.notify();
+        self.with_pane(cx, |pane, cx| pane.jump_hunk(dir, cx));
     }
 
     fn jump_match(&mut self, side: Side, ln: u32, cx: &mut Context<Self>) {
-        let Some(FileDiff::Text { alignment, .. }) = self.snapshot.as_ref().map(|s| &s.file) else {
-            return;
-        };
-        let plan = match_jump_plan(alignment, &self.fold, side, ln);
-        if let Some(id) = plan.expand {
-            self.fold.expand(id);
-            self.rebuild_layout();
-        }
-        let Some(layout) = self.layout.as_ref() else {
-            return;
-        };
-        let row_h = self.row_h();
-        let s = viewport::s_for_target(layout, plan.target, row_h, self.scroll_s)
-            .unwrap_or(self.scroll_s);
-        self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
-        self.hunk_s = Some(s / row_h);
-        cx.notify();
-    }
-
-    fn set_font_size(&mut self, op: FontOp, cx: &mut Context<Self>) {
-        let prev = self.row_h();
-        match op {
-            FontOp::Inc => self.font_size.increase(),
-            FontOp::Dec => self.font_size.decrease(),
-            FontOp::Reset => self.font_size.reset(),
-        }
-        let next = self.row_h();
-        if prev > 0. {
-            self.scroll_s *= next / prev;
-        }
-        cx.notify();
+        self.with_pane(cx, |pane, cx| pane.jump_match(side, ln, cx));
     }
 
     fn cycle_search_scope(&mut self, cx: &mut Context<Self>) {
@@ -472,7 +259,7 @@ impl DiffView {
     }
 
     /// If Comparison matches, retarget path (+ file content); else replace snapshot.
-    pub fn apply_snapshot(&mut self, incoming: DiffSnapshot) {
+    pub fn apply_snapshot(&mut self, incoming: DiffSnapshot, cx: &mut Context<Self>) {
         match &mut self.snapshot {
             Some(current) if current.comparison == incoming.comparison => {
                 current.selected_path = incoming.selected_path;
@@ -481,19 +268,16 @@ impl DiffView {
             }
             _ => {
                 self.review = Some(Review::new(incoming.comparison.clone()));
-                self.drafting = None;
+                self.set_drafting(None, cx);
                 self.export_status = None;
                 self.snapshot = Some(incoming);
             }
         }
-        self.reset_fold();
-        self.reset_scroll();
         self.recompute_alignment();
-        self.hunk_s = Some(0.);
-        self.rebuild_layout();
+        self.open_in_pane(cx);
     }
 
-    fn select_path(&mut self, path: String) {
+    fn select_path(&mut self, path: String, cx: &mut Context<Self>) {
         let opts = self.view_options.clone();
         let Some(snap) = &mut self.snapshot else {
             return;
@@ -510,20 +294,21 @@ impl DiffView {
         let file = git::file_diff(&snap.comparison, &path, status, &opts);
         snap.selected_path = path.clone();
         snap.file = file;
-        self.drafting = None;
-        self.reset_fold();
-        self.reset_scroll();
-        self.rebuild_layout();
+        self.set_drafting(None, cx);
+        self.open_in_pane(cx);
         window_geometry_store::note_diff_selected_path(path);
         window_geometry_store::flush();
     }
 
     fn begin_draft(&mut self, side: Side, line: u32, window: &mut Window, cx: &mut Context<Self>) {
-        self.drafting = Some(Drafting {
-            side,
-            line,
-            body: String::new(),
-        });
+        self.set_drafting(
+            Some(Drafting {
+                side,
+                line,
+                body: String::new(),
+            }),
+            cx,
+        );
         window.focus(&self.focus);
         cx.notify();
     }
@@ -532,6 +317,7 @@ impl DiffView {
         let Some(draft) = self.drafting.take() else {
             return;
         };
+        self.set_drafting(None, cx);
         let body = draft.body.trim().to_string();
         if body.is_empty() {
             cx.notify();
@@ -545,7 +331,7 @@ impl DiffView {
         if let Some(review) = &mut self.review {
             review.add_line_comment(path, draft.side, draft.line, body);
         }
-        self.refresh_comments();
+        self.refresh_comments(cx);
         cx.notify();
     }
 
@@ -586,7 +372,7 @@ impl DiffView {
                 "/" => {
                     // Focus is already on DiffView; open search mode.
                     self.searching = true;
-                    self.drafting = None;
+                    self.set_drafting(None, cx);
                     cx.notify();
                 }
                 _ => {}
@@ -596,7 +382,7 @@ impl DiffView {
         match event.keystroke.key.as_str() {
             "enter" => self.commit_draft(cx),
             "escape" => {
-                self.drafting = None;
+                self.set_drafting(None, cx);
                 cx.notify();
             }
             "backspace" => {
@@ -639,105 +425,34 @@ impl DiffView {
         cx.notify();
     }
 
-    fn on_wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let delta = event.delta.pixel_delta(window.line_height());
-        // AppKit scrollingDeltaY is negative when the user scrolls down.
-        self.scroll_nudge -= f32::from(delta.y);
-        self.hunk_s = None;
-        cx.notify();
-    }
-
-    fn on_gutter_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let y = f32::from(event.position.y) - self.pane_top_w;
-        let copy = self.viewport().and_then(|vp| {
-            let i = vp.bridge_at(y)?;
-            self.layout
-                .as_ref()
-                .map(|layout| layout.bridges[i].position_copy())
-        });
-        if self.hover_copy != copy {
-            self.hover_copy = copy;
-            cx.notify();
-        }
-    }
-
-    fn sync_scroll(&mut self) {
-        let Some(layout) = self.layout.as_ref() else {
-            return;
-        };
-        let row_h = self.row_h();
-        if self.view_h < 1. {
-            return;
-        }
-        let mut s = self.scroll_s;
-        if self.scroll_nudge != 0. {
-            s += self.scroll_nudge;
-            self.scroll_nudge = 0.;
+    /// Everything but the pane, rendered by the cached `DiffShell`.
+    fn render_shell(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.sync_collapsed_dirs();
+        // Cleared here, set by the body's canvas if this file shows the pane.
+        self.pane_bounds.set(None);
+        let tree_w = if self.tree_collapsed {
+            px(0.)
         } else {
-            let old_top = -f32::from(self.old_scroll.offset().y);
-            let new_top = -f32::from(self.new_scroll.offset().y);
-            let old_delta = (old_top - self.applied_old).abs();
-            let new_delta = (new_top - self.applied_new).abs();
-            if old_delta > 0.5 || new_delta > 0.5 {
-                let (side, top) = if old_delta >= new_delta {
-                    (Side::Old, old_top)
-                } else {
-                    (Side::New, new_top)
-                };
-                let n = layout.side(side).rows();
-                let content = viewport::content_from_top(top, n, self.view_h, row_h);
-                s = viewport::s_for_content(layout, side, content, row_h, s);
-                self.hunk_s = None;
-            }
-        }
-        let vp = Viewport::new(layout, s, self.view_h, row_h);
-        self.scroll_s = vp.s();
-        let old_top = vp.top(Side::Old);
-        let new_top = vp.top(Side::New);
-        self.applied_old = old_top;
-        self.applied_new = new_top;
-        self.old_scroll.set_offset(point(px(0.), px(-old_top)));
-        self.new_scroll.set_offset(point(px(0.), px(-new_top)));
-        self.hunk_index = nearest_hunk_index(
-            self.hunk_s.unwrap_or(self.scroll_s / row_h),
-            &layout.hunk_lands,
-        );
-        let screen = (self.view_h / row_h).ceil() as usize;
-        self.marked_rows = [Side::Old, Side::New].map(|side| {
-            let rows = vp.visible_rows(side);
-            rows.start.saturating_sub(screen)..rows.end + screen
-        });
+            px(self.tree_width)
+        };
+        let show_tree_split = !self.tree_collapsed;
 
-        let old_pane = self.old_scroll.bounds();
-        let new_pane = self.new_scroll.bounds();
-        // Ribbon spans the whole gutter, from the left code edge to the right code edge,
-        // so the pinch meets the row background on one side and the hairline on the other.
-        let x_l = f32::from(old_pane.right());
-        let x_r = f32::from(new_pane.left());
-        let old_top_w = f32::from(old_pane.top());
-        let new_top_w = f32::from(new_pane.top());
-        self.pane_top_w = old_top_w;
-        self.old_gaps = vp.gaps(Side::Old);
-        self.new_gaps = vp.gaps(Side::New);
-        self.placed.clear();
-        self.omit_links.clear();
-        if x_r - x_l < 4. {
-            return;
-        }
-        self.placed.extend(vp.bridges().into_iter().map(|p| PlacedBridge {
-            kind: p.kind,
-            x_l,
-            x_r,
-            y_l0: old_top_w + p.y_l0,
-            y_l1: old_top_w + p.y_l1,
-            y_r0: new_top_w + p.y_r0,
-            y_r1: new_top_w + p.y_r1,
-        }));
-        self.omit_links.extend(
-            vp.omit_links()
-                .into_iter()
-                .map(|(y_l, y_r)| (x_l, old_top_w + y_l, x_r, new_top_w + y_r)),
-        );
+        div()
+            .id("diff-shell")
+            .size_full()
+            .flex()
+            .overflow_hidden()
+            .child(render_tree_pane(self, tree_w, cx))
+            .when(show_tree_split, |d| {
+                d.child(splitter::handle(
+                    "diff-tree-resize-handle",
+                    Axis::HorizontalLeading,
+                    self.tree_resize_handler(cx),
+                    self.tree_resize_state.clone(),
+                ))
+            })
+            .child(render_dual_pane(self, cx))
+            .into_any_element()
     }
 }
 
@@ -755,14 +470,16 @@ impl Render for DiffView {
                 window_geometry::debounce_flush(cx);
             }));
         }
-        self.sync_collapsed_dirs();
-        self.sync_scroll();
-        let tree_w = if self.tree_collapsed {
-            px(0.)
-        } else {
-            px(self.tree_width)
-        };
-        let show_tree_split = !self.tree_collapsed;
+        let shell = self
+            .shell
+            .get_or_insert_with(|| {
+                let view = cx.entity();
+                cx.new(|cx| DiffShell {
+                    view: view.downgrade(),
+                    _observe: cx.observe(&view, |_, _, cx| cx.notify()),
+                })
+            })
+            .clone();
 
         #[cfg(target_os = "macos")]
         {
@@ -776,8 +493,8 @@ impl Render for DiffView {
 
         div()
             .id("diff")
+            .relative()
             .size_full()
-            .flex()
             .overflow_hidden()
             .when(cfg!(not(target_os = "macos")), |d| d.bg(theme::white()))
             .font_family(theme::UI_FONT)
@@ -785,16 +502,8 @@ impl Render for DiffView {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 this.handle_key(event, cx);
             }))
-            .child(render_tree_pane(self, tree_w, cx))
-            .when(show_tree_split, |d| {
-                d.child(splitter::handle(
-                    "diff-tree-resize-handle",
-                    Axis::HorizontalLeading,
-                    self.tree_resize_handler(cx),
-                    self.tree_resize_state.clone(),
-                ))
-            })
-            .child(render_dual_pane(self, cx))
+            .child(AnyView::from(shell).cached(StyleRefinement::default().size_full()))
+            .child(pane::slot(&self.pane, self.pane_bounds.clone()))
     }
 }
 
@@ -930,7 +639,7 @@ fn render_tree_pane(
                                 }
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.select_path(path_click.clone());
+                                this.select_path(path_click.clone(), cx);
                                 cx.notify();
                             }))
                             .child(
@@ -1002,7 +711,7 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                 .unwrap_or(0);
             let mut sub = match &s.file {
                 FileDiff::Text { .. } => {
-                    let hunk_count = view.layout.as_ref().map(|l| l.hunk_count).unwrap_or(0);
+                    let hunk_count = view.pane.read(cx).hunk_count().unwrap_or(0);
                     let hunk_part = if hunk_count == 0 {
                         "0 differences".into()
                     } else {
@@ -1073,10 +782,10 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                     this.jump_hunk(1, cx);
                 }))
                 .child(chrome_button("expand-all", "Expand", cx, |this, cx| {
-                    this.expand_all(cx);
+                    this.with_pane(cx, |pane, cx| pane.expand_all(cx));
                 }))
                 .child(chrome_button("collapse-eq", "Collapse", cx, |this, cx| {
-                    this.collapse_unchanged(cx);
+                    this.with_pane(cx, |pane, cx| pane.collapse_unchanged(cx));
                 }))
                 .child(chrome_toggle(
                     "ignore-ws",
@@ -1086,13 +795,13 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                     |this, cx| this.toggle_ignore_whitespace(cx),
                 ))
                 .child(chrome_button("font-dec", "A−", cx, |this, cx| {
-                    this.set_font_size(FontOp::Dec, cx);
+                    this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Dec, cx));
                 }))
                 .child(chrome_button("font-reset", "A", cx, |this, cx| {
-                    this.set_font_size(FontOp::Reset, cx);
+                    this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Reset, cx));
                 }))
                 .child(chrome_button("font-inc", "A+", cx, |this, cx| {
-                    this.set_font_size(FontOp::Inc, cx);
+                    this.with_pane(cx, |pane, cx| pane.set_font_size(FontOp::Inc, cx));
                 }))
                 .child(chrome_toggle(
                     "find",
@@ -1105,7 +814,7 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                             cx.notify();
                         } else {
                             this.searching = true;
-                            this.drafting = None;
+                            this.set_drafting(None, cx);
                             cx.notify();
                         }
                     },
@@ -1230,38 +939,27 @@ fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
         .into_any_element()
 }
 
-fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
-    match (view.snapshot.as_ref().map(|s| &s.file), view.layout.as_ref()) {
-        (Some(FileDiff::Text { .. }), Some(layout)) => {
-            let vp = Viewport::new(layout, view.scroll_s, view.view_h, view.row_h());
-            let waves = view.omit_links.clone();
-            let ln_w = ln_col_width(line_number_digits(layout));
+/// The pane's place in the shell. The pane itself is mounted over it by
+/// `pane::slot`, so a pane frame never re-renders the shell.
+fn render_body(view: &DiffView, _: &mut Context<DiffView>) -> impl IntoElement {
+    match view.snapshot.as_ref().map(|s| &s.file) {
+        Some(FileDiff::Text { .. }) => {
+            let slot = view.pane_bounds.clone();
             div()
-                .id("diff-panes")
+                .id("diff-pane-slot")
                 .relative()
                 .flex_1()
                 .min_h(px(0.))
-                .flex()
-                .overflow_hidden()
-                .child(code_pane(true, layout, &vp, view, cx))
-                .child(center_gutter(layout, view, cx))
-                .child(code_pane(false, layout, &vp, view, cx))
                 .child(
-                    canvas(
-                        |_, _, _| (),
-                        move |bounds, _, window, _| {
-                            paint_omit_waves(window, bounds, &waves, ln_w);
-                        },
-                    )
-                    .absolute()
-                    .size_full(),
+                    canvas(move |bounds, _, _| slot.set(Some(bounds)), |_, _, _, _| {})
+                        .absolute()
+                        .size_full(),
                 )
                 .into_any_element()
         }
-        (Some(FileDiff::Text { .. }), None) => placeholder("No Layout"),
-        (Some(FileDiff::Binary), _) => placeholder("Binary file — no Alignment"),
-        (Some(FileDiff::Error(msg)), _) => placeholder(msg),
-        (None, _) => placeholder("Open Diff from the main window"),
+        Some(FileDiff::Binary) => placeholder("Binary file — no Alignment"),
+        Some(FileDiff::Error(msg)) => placeholder(msg),
+        None => placeholder("Open Diff from the main window"),
     }
 }
 
@@ -1357,257 +1055,6 @@ fn render_draft_bar(view: &DiffView) -> impl IntoElement {
                 .child(format!("{}▌", draft.body)),
         )
         .into_any_element()
-}
-
-fn placeholder(msg: &str) -> gpui::AnyElement {
-    div()
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_sm()
-        .text_color(theme::muted())
-        .child(msg.to_string())
-        .into_any_element()
-}
-
-fn code_pane(
-    left: bool,
-    layout: &Layout,
-    vp: &Viewport<'_>,
-    view: &DiffView,
-    cx: &mut Context<DiffView>,
-) -> Div {
-    let id = if left { "code-left" } else { "code-right" };
-    let side = if left { Side::Old } else { Side::New };
-    let rows = layout.side(side);
-    let texts = &view.row_text[side_ix(side)];
-    let marked_rows = view.marked_rows[side_ix(side)].clone();
-    let empty = rows.is_empty();
-    let gaps = if left {
-        view.old_gaps.clone()
-    } else {
-        view.new_gaps.clone()
-    };
-    let seam_rows = vp.visible_seams(side).to_vec();
-    let seam_color = if left { theme::add_bg() } else { theme::del_bg() };
-    let seam_scroll = if left { view.applied_old } else { view.applied_new };
-    let seam = vp.empty_seam(side);
-    let handle = if left {
-        view.old_scroll.clone()
-    } else {
-        view.new_scroll.clone()
-    };
-    let drafting_line = view
-        .drafting
-        .as_ref()
-        .and_then(|d| (d.side == side).then_some(d.line));
-    let row_h = view.row_h();
-    let font_px = view.font_size.px() as f32;
-    let pad = vp.content_pad(side);
-    let measure = left.then(|| cx.entity().downgrade());
-
-    div()
-        .relative()
-        .flex_1()
-        .min_w(px(0.))
-        .h_full()
-        .child(
-            div()
-                .id(id)
-                .size_full()
-                .overflow_y_scroll()
-                // ponytail: GPUI draws the thumb on the trailing edge. The old pane's
-                // outer-left bar would be a custom thumb; wheel coupling is what the bridges use.
-                .track_scroll(&handle)
-                .on_scroll_wheel(cx.listener(DiffView::on_wheel))
-                .font_family(theme::MONO_FONT)
-                .text_size(px(font_px))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .w_full()
-                        .children(rows.iter_rows().enumerate().map(|(i, row)| {
-                            let (line, omit_id) = match row {
-                                Row::Line(l) => (Some(l), None),
-                                Row::Omit(o) => (None, Some(o.id)),
-                            };
-                            let ln = line.map(|l| l.ln).unwrap_or(0);
-                            let marked = line.is_some_and(|l| rows.has_comment(l.ln));
-                            let drafting_here = line.is_some() && drafting_line == Some(ln);
-                            let bg = if drafting_here {
-                                rgb(0xdbe4ff)
-                            } else {
-                                kind_bg(row_kind(row))
-                            };
-                            let row_id = if left { ("row-l", i) } else { ("row-r", i) };
-                            // Word marks only near the viewport; the LCS is memoized per block.
-                            let parts = line
-                                .filter(|_| marked_rows.contains(&i))
-                                .and_then(|l| layout.marks(side, l));
-                            let text = texts.get(i).cloned().unwrap_or_default();
-                            div()
-                                .id(row_id)
-                                .relative()
-                                .h(px(row_h))
-                                .px_3()
-                                .bg(bg)
-                                .text_color(theme::text())
-                                .overflow_hidden()
-                                .when(marked, |d| {
-                                    d.border_l_2().border_color(theme::accent())
-                                })
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if let Some(id) = omit_id {
-                                        this.expand_omit(id, cx);
-                                    } else {
-                                        this.begin_draft(side, ln, window, cx);
-                                    }
-                                }))
-                                .child(render_row_text(text, parts))
-                                .when(rows.is_seam(i), |row| {
-                                    row.child(seam_hairline(seam_color))
-                                })
-                        }))
-                        .when(pad > 0., |col| col.child(div().h(px(pad)).w_full())),
-                ),
-        )
-        .child(
-            canvas(
-                move |bounds, _, cx| {
-                    if let Some(measure) = &measure {
-                        let h = f32::from(bounds.size.height);
-                        measure
-                            .update(cx, |this, cx| {
-                                if (this.view_h - h).abs() > 0.5 {
-                                    this.view_h = h;
-                                    cx.notify();
-                                }
-                            })
-                            .ok();
-                    }
-                },
-                move |bounds, _, window, _| {
-                    paint_gaps(window, bounds, &gaps, empty, seam);
-                    for idx in &seam_rows {
-                        let y = *idx as f32 * row_h - seam_scroll;
-                        let rect = Bounds {
-                            origin: point(bounds.left(), bounds.top() + px(y)),
-                            size: size(bounds.size.width, px(2.)),
-                        };
-                        window.paint_quad(fill(rect, seam_color));
-                    }
-                },
-            )
-            .absolute()
-            .size_full(),
-        )
-}
-
-fn center_gutter(layout: &Layout, view: &DiffView, cx: &mut Context<DiffView>) -> Stateful<Div> {
-    let placed = view.placed.clone();
-    let ln_w = ln_col_width(line_number_digits(layout));
-    let row_h = view.row_h();
-    div()
-        .id("gutter")
-        .relative()
-        .overflow_hidden()
-        .w(px(ln_w * 2. + BRIDGE_COL))
-        .h_full()
-        .flex_none()
-        .bg(theme::white())
-        .on_scroll_wheel(cx.listener(DiffView::on_wheel))
-        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-            if !hovered && this.hover_copy.take().is_some() {
-                cx.notify();
-            }
-        }))
-        .on_mouse_move(cx.listener(DiffView::on_gutter_move))
-        .child(ln_col(true, &layout.old, view.applied_old, row_h, ln_w, false))
-        .child(ln_col(false, &layout.new, view.applied_new, row_h, ln_w, false))
-        .child(
-            canvas(
-                |_, _, _| (),
-                move |bounds, _, window, _| {
-                    window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                        paint_bridges(window, &placed, ln_w);
-                    });
-                },
-            )
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full(),
-        )
-        .child(ln_col(true, &layout.old, view.applied_old, row_h, ln_w, true))
-        .child(ln_col(false, &layout.new, view.applied_new, row_h, ln_w, true))
-}
-
-fn ln_col(
-    left: bool,
-    rows: &SideLayout,
-    scroll_top: f32,
-    row_h: f32,
-    col_w: f32,
-    labels_only: bool,
-) -> Stateful<Div> {
-    let id = if labels_only {
-        if left { "ln-left-text" } else { "ln-right-text" }
-    } else if left {
-        "ln-left"
-    } else {
-        "ln-right"
-    };
-    let seam_color = if left { theme::add_bg() } else { theme::del_bg() };
-    div()
-        .id(id)
-        .absolute()
-        .top(px(-scroll_top))
-        .w(px(col_w))
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .when(left, |col| col.left(px(0.)))
-        .when(!left, |col| col.right(px(0.)))
-        .font_family(theme::line_number_font())
-        .text_size(px(LN_FONT_PX))
-        .text_color(theme::faint())
-        .when(left, |col| col.text_right().pr_1())
-        .when(!left, |col| col.pl_1())
-        .children(rows.iter_rows().enumerate().map(|(i, row)| {
-            let ln_id = if left {
-                (if labels_only { "ln-lt" } else { "ln-l" }, i)
-            } else {
-                (if labels_only { "ln-rt" } else { "ln-r" }, i)
-            };
-            let label = match row {
-                Row::Line(line) => line.ln.to_string(),
-                Row::Omit(_) => String::new(),
-            };
-            let is_seam = !labels_only && rows.is_seam(i);
-            div()
-                .id(ln_id)
-                .relative()
-                .w_full()
-                .h(px(row_h))
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .when(!labels_only, |cell| cell.bg(kind_bg(row_kind(row))))
-                .child(label)
-                .when(is_seam, |cell| cell.child(seam_hairline(seam_color)))
-        }))
-}
-
-
-fn seam_hairline(color: gpui::Rgba) -> gpui::Div {
-    div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .right_0()
-        .h(px(2.))
-        .bg(color)
 }
 
 fn chrome_button(
@@ -1744,309 +1191,4 @@ fn traffic_lights_space() -> Option<Div> {
 #[cfg(not(target_os = "macos"))]
 fn traffic_lights_space() -> Option<Div> {
     None
-}
-
-fn nearest_hunk_index(s_rows: f32, lands: &[HunkLand]) -> Option<usize> {
-    if lands.is_empty() {
-        return None;
-    }
-    let mut idx = 0;
-    for (i, land) in lands.iter().enumerate() {
-        if land.s as f32 <= s_rows + 0.5 {
-            idx = i;
-        } else {
-            break;
-        }
-    }
-    Some(idx)
-}
-
-/// Row text per visual row, shared so a frame clones a pointer, not the line.
-fn row_texts(side: &SideLayout) -> Vec<SharedString> {
-    side.iter_rows()
-        .map(|row| match row {
-            Row::Line(line) => SharedString::from(side.text(line).to_string()),
-            Row::Omit(_) => SharedString::default(),
-        })
-        .collect()
-}
-
-fn render_row_text(text: SharedString, parts: Option<&[TokenPart]>) -> gpui::AnyElement {
-    match parts {
-        Some(parts) if parts.iter().any(|p| p.changed) => div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .overflow_hidden()
-            .children(parts.iter().map(|p| {
-                if p.changed {
-                    div()
-                        .bg(theme::mod_chg())
-                        .rounded(px(2.))
-                        .child(p.text.clone())
-                        .into_any_element()
-                } else {
-                    div().child(p.text.clone()).into_any_element()
-                }
-            }))
-            .into_any_element(),
-        _ => div().child(text).into_any_element(),
-    }
-}
-
-fn kind_bg(kind: Option<LineKind>) -> gpui::Rgba {
-    match kind {
-        Some(LineKind::Replace) => theme::mod_bg(),
-        Some(LineKind::Insert) => theme::add_bg(),
-        Some(LineKind::Delete) => theme::del_bg(),
-        Some(LineKind::Equal) | None => theme::white(),
-    }
-}
-
-fn row_kind(row: Row<'_>) -> Option<LineKind> {
-    match row {
-        Row::Line(line) => Some(line.kind),
-        Row::Omit(_) => None,
-    }
-}
-
-fn paint_bridges(window: &mut Window, placed: &[PlacedBridge], ln_w: f32) {
-    for bridge in placed {
-        let parallel = (bridge.y_l0 - bridge.y_r0).abs() < 1. && (bridge.y_l1 - bridge.y_r1).abs() < 1.;
-        let mut path = PathBuilder::fill();
-        if parallel {
-            path.move_to(point(px(bridge.x_l), px(bridge.y_l0)));
-            path.line_to(point(px(bridge.x_r), px(bridge.y_r0)));
-            path.line_to(point(px(bridge.x_r), px(bridge.y_r1)));
-            path.line_to(point(px(bridge.x_l), px(bridge.y_l1)));
-        } else {
-            pinch_bezier(&mut path, bridge, ln_w);
-        }
-        path.close();
-        if let Ok(path) = path.build() {
-            window.paint_path(path, kind_bg(Some(bridge.kind)));
-        }
-    }
-}
-
-/// Full row on the long side, cubic Bézier through the center gutter, then a 2px
-/// hairline across the short side's line-number column so it meets the code hairline.
-fn pinch_bezier(path: &mut PathBuilder, bridge: &PlacedBridge, ln_w: f32) {
-    let x_l = bridge.x_l;
-    let x_r = bridge.x_r;
-    let mid_l = x_l + ln_w;
-    let mid_r = x_r - ln_w;
-    let mw = (mid_r - mid_l).max(8.);
-    match bridge.kind {
-        LineKind::Delete => {
-            let y0 = bridge.y_l0;
-            let y1 = bridge.y_l1;
-            let top = bridge.y_r0;
-            let bot = bridge.y_r0 + 2.;
-            path.move_to(point(px(x_l), px(y0)));
-            path.line_to(point(px(mid_l), px(y0)));
-            path.cubic_bezier_to(
-                point(px(mid_r), px(top)),
-                point(px(mid_l + mw * 0.45), px(y0)),
-                point(px(mid_r - mw * 0.45), px(top)),
-            );
-            path.line_to(point(px(x_r), px(top)));
-            path.line_to(point(px(x_r), px(bot)));
-            path.line_to(point(px(mid_r), px(bot)));
-            path.cubic_bezier_to(
-                point(px(mid_l), px(y1)),
-                point(px(mid_r - mw * 0.45), px(bot)),
-                point(px(mid_l + mw * 0.45), px(y1)),
-            );
-            path.line_to(point(px(x_l), px(y1)));
-        }
-        LineKind::Insert => {
-            let top = bridge.y_l0;
-            let bot = bridge.y_l0 + 2.;
-            let y0 = bridge.y_r0;
-            let y1 = bridge.y_r1;
-            path.move_to(point(px(x_l), px(top)));
-            path.line_to(point(px(mid_l), px(top)));
-            path.cubic_bezier_to(
-                point(px(mid_r), px(y0)),
-                point(px(mid_l + mw * 0.45), px(top)),
-                point(px(mid_r - mw * 0.45), px(y0)),
-            );
-            path.line_to(point(px(x_r), px(y0)));
-            path.line_to(point(px(x_r), px(y1)));
-            path.line_to(point(px(mid_r), px(y1)));
-            path.cubic_bezier_to(
-                point(px(mid_l), px(bot)),
-                point(px(mid_r - mw * 0.45), px(y1)),
-                point(px(mid_l + mw * 0.45), px(bot)),
-            );
-            path.line_to(point(px(x_l), px(bot)));
-        }
-        _ => {
-            // Hold the full block through each line-number column. The cubic
-            // only runs between the columns, from the top of the left block
-            // to the top of the right block (and bottom to bottom).
-            path.move_to(point(px(x_l), px(bridge.y_l0)));
-            path.line_to(point(px(mid_l), px(bridge.y_l0)));
-            path.cubic_bezier_to(
-                point(px(mid_r), px(bridge.y_r0)),
-                point(px(mid_l + mw * 0.45), px(bridge.y_l0)),
-                point(px(mid_r - mw * 0.45), px(bridge.y_r0)),
-            );
-            path.line_to(point(px(x_r), px(bridge.y_r0)));
-            path.line_to(point(px(x_r), px(bridge.y_r1)));
-            path.line_to(point(px(mid_r), px(bridge.y_r1)));
-            path.cubic_bezier_to(
-                point(px(mid_l), px(bridge.y_l1)),
-                point(px(mid_r - mw * 0.45), px(bridge.y_r1)),
-                point(px(mid_l + mw * 0.45), px(bridge.y_l1)),
-            );
-            path.line_to(point(px(x_l), px(bridge.y_l1)));
-        }
-    }
-}
-
-fn paint_omit_waves(
-    window: &mut Window,
-    bounds: Bounds<gpui::Pixels>,
-    folds: &[(f32, f32, f32, f32)],
-    ln_w: f32,
-) {
-    if folds.is_empty() {
-        return;
-    }
-    let x0 = f32::from(bounds.left());
-    let x1 = f32::from(bounds.right());
-    window.with_content_mask(Some(ContentMask { bounds }), |window| {
-        for &(gutter_l, y_l, gutter_r, y_r) in folds {
-            // Bend only in the gap between the line-number columns. A slope
-            // across the digits cuts through them when the folds are far apart.
-            let path = joined_wave(
-                x0,
-                x1,
-                y_l,
-                gutter_l + ln_w,
-                gutter_r - ln_w,
-                y_r,
-            );
-            if let Ok(path) = path.build() {
-                window.paint_path(path, rgb(0xb5b5b5));
-            }
-        }
-    });
-}
-
-const WAVE_PERIOD: f32 = 16.;
-const WAVE_AMP: f32 = 3.5;
-const WAVE_STEP: f32 = 2.;
-
-fn wave_y(x: f32, base: f32, crest_at: Option<f32>) -> f32 {
-    let phase = match crest_at {
-        Some(lock) => (x - lock) / WAVE_PERIOD * std::f32::consts::TAU + std::f32::consts::FRAC_PI_2,
-        None => x / WAVE_PERIOD * std::f32::consts::TAU,
-    };
-    base + phase.sin() * WAVE_AMP
-}
-
-fn trace_wave(
-    path: &mut PathBuilder,
-    x0: f32,
-    x1: f32,
-    base: f32,
-    crest_at: Option<f32>,
-    first_move: bool,
-) {
-    if x1 < x0 {
-        return;
-    }
-    let mut x = x0;
-    let mut moved = !first_move;
-    loop {
-        let xx = x.min(x1);
-        let p = point(px(xx), px(wave_y(xx, base, crest_at)));
-        if moved {
-            path.line_to(p);
-        } else {
-            path.move_to(p);
-            moved = true;
-        }
-        if xx >= x1 - 0.01 {
-            break;
-        }
-        x += WAVE_STEP;
-    }
-}
-
-/// One stroke. Each side is a horizontal sine through its code and line numbers.
-/// A height change is a cubic Bézier in the gap between the line-number columns.
-/// Each sine meets that curve at a crest, so both tangents are horizontal, the
-/// same way the change ribbons leave a flat edge.
-fn joined_wave(x0: f32, x1: f32, y_l: f32, gap_l: f32, gap_r: f32, y_r: f32) -> PathBuilder {
-    let mut path = PathBuilder::stroke(px(1.25));
-    if x1 - x0 < 2. {
-        return path;
-    }
-    let gap_l = gap_l.clamp(x0, x1);
-    let gap_r = (gap_l + 8.).max(gap_r).min(x1);
-    if (y_r - y_l).abs() < 0.5 {
-        trace_wave(&mut path, x0, x1, y_l, None, true);
-        return path;
-    }
-    trace_wave(&mut path, x0, gap_l, y_l, Some(gap_l), true);
-    let y0 = y_l + WAVE_AMP;
-    let y1 = y_r + WAVE_AMP;
-    let dx = (gap_r - gap_l) * 0.45;
-    path.cubic_bezier_to(
-        point(px(gap_r), px(y1)),
-        point(px(gap_l + dx), px(y0)),
-        point(px(gap_r - dx), px(y1)),
-    );
-    if gap_r < x1 {
-        trace_wave(&mut path, gap_r, x1, y_r, Some(gap_r), false);
-    }
-    path
-}
-
-fn paint_gaps(
-    window: &mut Window,
-    bounds: Bounds<gpui::Pixels>,
-    gaps: &[(f32, f32)],
-    empty: bool,
-    seam: f32,
-) {
-    for &(y0, y1) in gaps {
-        if y1 - y0 < 0.5 {
-            continue;
-        }
-        let rect = Bounds {
-            origin: point(bounds.left(), bounds.top() + px(y0)),
-            size: size(bounds.size.width, px(y1 - y0)),
-        };
-        window.paint_quad(fill(rect, theme::gap_bg()));
-        window.with_content_mask(Some(ContentMask { bounds: rect }), |window| {
-            let width = f32::from(rect.size.width);
-            let left = f32::from(rect.left());
-            let top = f32::from(rect.top());
-            let bottom = f32::from(rect.bottom());
-            let mut y = top - width;
-            while y < bottom {
-                let mut stroke = PathBuilder::stroke(px(1.));
-                stroke.move_to(point(px(left), px(y)));
-                stroke.line_to(point(px(left + width), px(y + width)));
-                if let Ok(path) = stroke.build() {
-                    window.paint_path(path, theme::faint());
-                }
-                y += 7.;
-            }
-        });
-    }
-    if empty {
-        let y = bounds.top() + px(seam);
-        let mut stroke = PathBuilder::stroke(px(2.));
-        stroke.move_to(point(bounds.left() + px(8.), y));
-        stroke.line_to(point(bounds.right() - px(8.), y));
-        if let Ok(path) = stroke.build() {
-            window.paint_path(path, rgb(0x8aa0b8));
-        }
-    }
 }

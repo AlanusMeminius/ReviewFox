@@ -867,7 +867,7 @@ fn open_or_update_diff(
     if let Some(h) = *handle {
         let snap = snapshot.clone();
         if h.update(cx, |view, window, cx| {
-            view.apply_snapshot(snap);
+            view.apply_snapshot(snap, cx);
             window.activate_window();
             cx.notify();
         })
@@ -898,7 +898,7 @@ fn open_or_update_diff(
             window_background: super::window_background_appearance(),
             ..Default::default()
         },
-        move |_, cx| cx.new(|cx| DiffView::with_snapshot(snap, cx)),
+        move |window, cx| cx.new(|cx| DiffView::with_snapshot(snap, window, cx)),
     ) {
         Ok(h) => *handle = Some(h),
         Err(e) => eprintln!("failed to open diff window: {e}"),
