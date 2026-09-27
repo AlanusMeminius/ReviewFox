@@ -27,8 +27,15 @@ actions!(
         Paste,
         Cut,
         Copy,
+        Confirm,
     ]
 );
+
+/// Emitted on Enter (`Confirm`); the owner decides what committing means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextFieldEvent {
+    Confirm,
+}
 
 /// Visual variant. `Default` is the original full-width field; `Settings`
 /// follows Zed's settings input (min 256px wide, focused border).
@@ -36,7 +43,6 @@ actions!(
 pub enum TextFieldStyle {
     #[default]
     Default,
-    #[allow(dead_code)] // Used by the Settings redesign (issues 02/03).
     Settings,
 }
 
@@ -71,7 +77,6 @@ impl TextField {
         }
     }
 
-    #[allow(dead_code)] // Used by the Settings redesign (issues 02/03).
     pub fn with_style(mut self, style: TextFieldStyle) -> Self {
         self.style = style;
         self
@@ -642,6 +647,7 @@ impl Render for TextField {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(|_, _: &Confirm, _, cx| cx.emit(TextFieldEvent::Confirm)))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -663,6 +669,8 @@ impl Render for TextField {
             .child(TextElement { input: cx.entity() })
     }
 }
+
+impl gpui::EventEmitter<TextFieldEvent> for TextField {}
 
 impl Focusable for TextField {
     fn focus_handle(&self, _: &App) -> FocusHandle {

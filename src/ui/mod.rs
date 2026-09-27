@@ -1,7 +1,6 @@
 #[cfg(target_os = "macos")]
 mod app_icon;
 mod app_view;
-mod current_repo;
 mod gitlab_connection;
 mod diff_window;
 mod file_tree;
@@ -34,7 +33,7 @@ use crate::workspace_store;
 use gitlab_connection::GitLabConnection;
 use settings::SettingsView;
 use text_field::{
-    Backspace, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, SelectLeft,
+    Backspace, Confirm, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, SelectLeft,
     SelectRight, ShowCharacterPalette,
 };
 
@@ -77,6 +76,9 @@ impl AssetSource for Assets {
             )),
             "undo.svg" => Some(Cow::Borrowed(
                 include_bytes!("../../assets/undo.svg") as &'static [u8],
+            )),
+            "refresh.svg" => Some(Cow::Borrowed(
+                include_bytes!("../../assets/refresh.svg") as &'static [u8],
             )),
             "chevron_right.svg" => Some(Cow::Borrowed(
                 include_bytes!("../../assets/chevron_right.svg") as &'static [u8],
@@ -138,6 +140,7 @@ pub fn run() {
             KeyBinding::new("ctrl-comma", OpenSettings, None),
             KeyBinding::new("backspace", Backspace, Some("TextField")),
             KeyBinding::new("delete", Delete, Some("TextField")),
+            KeyBinding::new("enter", Confirm, Some("TextField")),
             KeyBinding::new("left", Left, Some("TextField")),
             KeyBinding::new("right", Right, Some("TextField")),
             KeyBinding::new("shift-left", SelectLeft, Some("TextField")),

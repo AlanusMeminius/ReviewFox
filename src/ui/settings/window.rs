@@ -1,32 +1,26 @@
 use gpui::{
     AnyElement, App, Context, ElementId, Entity, FocusHandle, Focusable, KeyBinding, Render,
-    ScrollHandle, SharedString, Window, WindowBackgroundAppearance, WindowHandle, actions, div,
-    point, prelude::*, px, size,
+    ScrollHandle, Subscription, Window, WindowBackgroundAppearance, WindowHandle,
+    actions, div, point, prelude::*, px, size,
 };
 
-use std::path::PathBuf;
-
-use crate::gitlab::{self, ResolveProjectResult, VerifyError, VerifyResult};
-use crate::settings_store::{self, SettingsFile};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::SectionHeader;
+use crate::settings_store::{self, DEFAULT_BASE_URL};
+
 use super::nav::{NavItem, SettingsNav};
 use super::nav_tree::{NavEntry, NavPage, NavState};
-use crate::ui::current_repo;
+use super::token_row::{self, CardStatus, KeychainError, TokenRow};
+use super::{Button, ButtonSize, ButtonStyle, ConfiguredCard, SectionHeader, SettingRow};
 use crate::ui::gitlab_connection::{self, GitLabConnection};
 use crate::ui::scrollbar;
-use crate::ui::text_field::TextField;
+use crate::ui::text_field::{TextField, TextFieldEvent, TextFieldStyle};
 use crate::ui::theme;
 
 actions!(
     settings,
     [
-        SaveSettings,
-        VerifyGitLab,
-        ClearPat,
-        RefreshGitLabProject,
         CloseSettings,
         FocusNextControl,
         FocusPrevControl,
@@ -47,6 +41,16 @@ const CONTENT_SCROLL_ID: &str = "settings-content-sb";
 const CLOSE_KEY: &str = "cmd-w";
 #[cfg(not(target_os = "macos"))]
 const CLOSE_KEY: &str = "ctrl-w";
+
+/// Tab order: nav, GitLab URL, then the token input or the token card's buttons.
+const TAB_NAV: isize = 0;
+const TAB_URL: isize = 1;
+const TAB_TOKEN: isize = 2;
+
+const URL_TITLE: &str = "GitLab URL";
+const URL_DESCRIPTION: &str = "Your self-hosted GitLab address. Leave empty for gitlab.com.";
+const URL_PLACEHOLDER: &str = "https://gitlab.com";
+const RESET_TO_DEFAULT: &str = "Reset to Default";
 
 /// Settings-window bindings, scoped to [`CONTEXT`] / [`NAV_CONTEXT`].
 pub fn key_bindings() -> Vec<KeyBinding> {
@@ -83,209 +87,160 @@ const PAGES: &[NavPage<Section>] = &[NavPage {
     expanded: true,
 }];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum VerifyStatus {
-    Idle,
-    Running,
-    Ok(String),
-    Network(String),
-    Unauthorized,
-    Other(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum GitLabProjectLine {
-    Idle,
-    NoRepo,
-    Resolving,
-    Ok { path: String, verified: bool },
-    Err(String),
-}
-
 pub struct SettingsView {
     focus: FocusHandle,
     base_url: Entity<TextField>,
+    /// Normalized base URL as saved in `settings.json` (the default when unset).
+    saved_base_url: String,
     pat: Entity<TextField>,
-    status: SharedString,
-    verify: VerifyStatus,
-    gitlab_project: GitLabProjectLine,
+    /// A token is stored in the keychain (cached; the keychain is only read on open).
+    has_saved_token: bool,
+    keychain_error: Option<KeychainError>,
     gitlab_connection: Rc<RefCell<GitLabConnection>>,
     nav_focus: FocusHandle,
     nav: NavState,
     /// Last nav interaction came from the keyboard: show the focus border.
     nav_keyboard: bool,
     content_scroll: ScrollHandle,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl SettingsView {
-    pub fn new(gitlab_connection: Rc<RefCell<GitLabConnection>>, cx: &mut Context<Self>) -> Self {
-        let file = settings_store::load_file();
-        let base = settings_store::effective_base_url(&file);
-        let base_url = cx.new(|cx| TextField::new("https://gitlab.com", false, cx).tab_index(1));
-        base_url.update(cx, |field, cx| field.set_content(base, cx));
+    pub fn new(
+        gitlab_connection: Rc<RefCell<GitLabConnection>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let saved_base_url = settings_store::effective_base_url(&settings_store::load_file());
+        let base_url = cx.new(|cx| {
+            TextField::new(URL_PLACEHOLDER, false, cx)
+                .with_style(TextFieldStyle::Settings)
+                .tab_index(TAB_URL)
+        });
+        base_url.update(cx, |field, cx| field.set_content(saved_base_url.clone(), cx));
 
-        let pat =
-            cx.new(|cx| TextField::new("Personal access token (read_api)", true, cx).tab_index(2));
-        if let Some(stored) = settings_store::load_pat() {
-            pat.update(cx, |field, cx| field.set_content(stored, cx));
-        }
+        let pat = cx.new(|cx| {
+            TextField::new(token_row::PLACEHOLDER, true, cx)
+                .with_style(TextFieldStyle::Settings)
+                .tab_index(TAB_TOKEN)
+        });
+        let has_saved_token = settings_store::load_pat().is_some_and(|p| !p.trim().is_empty());
+
+        let base_url_focus = base_url.read(cx).focus_handle(cx);
+        let subscriptions = vec![
+            cx.subscribe(&base_url, |view, _, event: &TextFieldEvent, cx| match event {
+                TextFieldEvent::Confirm => view.commit_base_url(cx),
+            }),
+            cx.on_blur(&base_url_focus, window, |view, _, cx| view.commit_base_url(cx)),
+            // The token commits on Enter only, never on blur.
+            cx.subscribe(&pat, |view, _, event: &TextFieldEvent, cx| match event {
+                TextFieldEvent::Confirm => view.commit_token(cx),
+            }),
+        ];
 
         // The scroll handle lives in a global registry and outlives the window.
         let (content_scroll, _) = scrollbar::vertical(CONTENT_SCROLL_ID, cx);
         content_scroll.set_offset(point(px(0.), px(0.)));
 
-        let mut view = Self {
+        let view = Self {
             focus: cx.focus_handle(),
             base_url,
+            saved_base_url,
             pat,
-            status: "Save does not contact GitLab; use Verify to test credentials.".into(),
-            verify: VerifyStatus::Idle,
-            gitlab_project: GitLabProjectLine::Idle,
+            has_saved_token,
+            keychain_error: None,
             gitlab_connection,
-            nav_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+            nav_focus: cx.focus_handle().tab_index(TAB_NAV).tab_stop(true),
             nav: NavState::new(PAGES),
             nav_keyboard: false,
             content_scroll,
+            _subscriptions: subscriptions,
         };
-        view.refresh_gitlab_project(current_repo::current_repo_path(), cx);
-        gitlab_connection::spawn_refresh_connection(
-            view.gitlab_connection.clone(),
-            cx.entity().downgrade(),
-            cx,
-        );
+        // Re-check on open (the token may have been revoked), unless a check
+        // is already in flight.
+        if !matches!(*view.gitlab_connection.borrow(), GitLabConnection::Checking) {
+            view.refresh_connection(cx);
+        }
         view
     }
 
-    pub fn refresh_gitlab_project(&mut self, repo_path: Option<PathBuf>, cx: &mut Context<Self>) {
-        let Some(repo_path) = repo_path else {
-            self.gitlab_project = GitLabProjectLine::NoRepo;
-            cx.notify();
-            return;
-        };
-        if matches!(self.gitlab_project, GitLabProjectLine::Resolving) {
-            return;
-        }
-        let base = settings_store::normalize_base_url(self.base_url.read(cx).content());
-        let pat = self.pat.read(cx).content().to_string();
-        self.gitlab_project = GitLabProjectLine::Resolving;
-        cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            let http = match cx.update(|app| app.http_client()) {
-                Ok(client) => client,
-                Err(_) => return,
-            };
-            let had_pat = !pat.trim().is_empty();
-            let result = cx
-                .background_executor()
-                .spawn(async move { gitlab::resolve_project(http, &base, &pat, &repo_path).await })
-                .await;
-
-            let _ = this.update(cx, |view, cx| {
-                view.gitlab_project = match result {
-                    ResolveProjectResult::Ok(identity) => GitLabProjectLine::Ok {
-                        path: identity.path_with_namespace,
-                        verified: had_pat,
-                    },
-                    ResolveProjectResult::Err(e) => {
-                        GitLabProjectLine::Err(gitlab::format_resolve_project_error(&e))
-                    }
-                };
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn save(&mut self, cx: &mut Context<Self>) {
-        let raw_base = self.base_url.read(cx).content().to_string();
-        let normalized = settings_store::normalize_base_url(&raw_base);
-        self.base_url
-            .update(cx, |field, cx| field.set_content(normalized.clone(), cx));
-
-        let pat = self.pat.read(cx).content().to_string();
-        settings_store::save_file(&SettingsFile {
-            gitlab_base_url: Some(normalized),
-        });
-
-        let pat_result = if pat.is_empty() {
-            settings_store::clear_pat()
-        } else {
-            settings_store::save_pat(&pat)
-        };
-
-        self.status = match pat_result {
-            Ok(()) => "Saved.".into(),
-            Err(e) => format!("Saved URL; keychain error: {e}").into(),
-        };
-        self.verify = VerifyStatus::Idle;
+    /// Re-verify the saved URL + token through the shared connection, so the
+    /// main window sees the same state.
+    fn refresh_connection(&self, cx: &mut Context<Self>) {
         gitlab_connection::spawn_refresh_connection(
             self.gitlab_connection.clone(),
             cx.entity().downgrade(),
             cx,
         );
-        cx.notify();
     }
 
-    fn clear_pat(&mut self, cx: &mut Context<Self>) {
-        self.pat.update(cx, |field, cx| field.set_content("", cx));
-        if let Err(e) = settings_store::clear_pat() {
-            self.status = format!("Could not clear keychain entry: {e}").into();
-        } else {
-            self.status = "Personal access token cleared.".into();
+    /// Blur / Enter on the URL field: normalize, save, show the normalized
+    /// value, and re-verify when a token exists and the URL changed.
+    fn commit_base_url(&mut self, cx: &mut Context<Self>) {
+        let raw = self.base_url.read(cx).content().to_string();
+        let normalized = settings_store::normalize_base_url(&raw);
+        if raw != normalized {
+            self.base_url
+                .update(cx, |field, cx| field.set_content(normalized.clone(), cx));
         }
-        self.verify = VerifyStatus::Idle;
-        *self.gitlab_connection.borrow_mut() = GitLabConnection::NoPat;
-        self.refresh_gitlab_project(current_repo::current_repo_path(), cx);
-        cx.notify();
-    }
-
-    fn verify(&mut self, _: &VerifyGitLab, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.verify, VerifyStatus::Running) {
+        if normalized == self.saved_base_url {
             return;
         }
-        let base = settings_store::normalize_base_url(self.base_url.read(cx).content());
-        let pat = self.pat.read(cx).content().to_string();
-        self.verify = VerifyStatus::Running;
-        self.status = "Verifying…".into();
+
+        let mut file = settings_store::load_file();
+        file.gitlab_base_url = (normalized != DEFAULT_BASE_URL).then(|| normalized.clone());
+        settings_store::save_file(&file);
+        self.saved_base_url = normalized;
+        if self.has_saved_token {
+            self.refresh_connection(cx);
+        }
         cx.notify();
+    }
 
-        cx.spawn(async move |this, cx| {
-            let http = match cx.update(|app| app.http_client()) {
-                Ok(client) => client,
-                Err(_) => return,
-            };
-            let result = cx
-                .background_executor()
-                .spawn(async move { gitlab::verify_pat(http, &base, &pat).await })
-                .await;
+    fn reset_base_url(&mut self, cx: &mut Context<Self>) {
+        self.base_url
+            .update(cx, |field, cx| field.set_content(DEFAULT_BASE_URL, cx));
+        self.commit_base_url(cx);
+    }
 
-            let _ = this.update(cx, |view, cx| {
-                gitlab_connection::apply_verify_result(&view.gitlab_connection, &result);
-                view.verify = match &result {
-                    VerifyResult::Ok { username } => VerifyStatus::Ok(username.clone()),
-                    VerifyResult::Err(VerifyError::Network(msg)) => {
-                        VerifyStatus::Network(msg.clone())
-                    }
-                    VerifyResult::Err(VerifyError::Unauthorized) => VerifyStatus::Unauthorized,
-                    VerifyResult::Err(VerifyError::Other { status, detail }) => {
-                        VerifyStatus::Other(format!("HTTP {status}: {detail}"))
-                    }
-                };
-                view.status = match &view.verify {
-                    VerifyStatus::Idle => SharedString::default(),
-                    VerifyStatus::Running => "Verifying…".into(),
-                    VerifyStatus::Ok(user) => format!("Verified as {user}.").into(),
-                    VerifyStatus::Network(msg) => format!("Network error: {msg}").into(),
-                    VerifyStatus::Unauthorized => {
-                        "Unauthorized (401). Check token and scopes.".into()
-                    }
-                    VerifyStatus::Other(msg) => msg.clone().into(),
-                };
-                cx.notify();
-            });
-        })
-        .detach();
+    /// Enter in the token field: store it (whatever verify later says), then verify.
+    fn commit_token(&mut self, cx: &mut Context<Self>) {
+        let token = self.pat.read(cx).content().trim().to_string();
+        if token.is_empty() {
+            return;
+        }
+        match settings_store::save_pat(&token) {
+            Ok(()) => {
+                self.has_saved_token = true;
+                self.keychain_error = None;
+                self.pat.update(cx, |field, cx| field.set_content("", cx));
+                self.refresh_connection(cx);
+            }
+            Err(e) => self.keychain_error = Some(KeychainError::Save(e.to_string())),
+        }
+        cx.notify();
+    }
+
+    /// `Reset Token`: delete the keychain entry now and go back to the input.
+    fn reset_token(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // After a failed save there is nothing stored; just dismiss the error.
+        if self.has_saved_token {
+            match settings_store::clear_pat() {
+                Ok(()) | Err(keyring::Error::NoEntry) => {}
+                Err(e) => {
+                    self.keychain_error = Some(KeychainError::Clear(e.to_string()));
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        self.has_saved_token = false;
+        self.keychain_error = None;
+        gitlab_connection::set_no_pat(&self.gitlab_connection);
+        self.pat.update(cx, |field, cx| field.set_content("", cx));
+        let pat_focus = self.pat.read(cx).focus_handle(cx);
+        window.focus(&pat_focus);
+        cx.notify();
     }
 }
 
@@ -438,77 +393,116 @@ impl SettingsView {
             ))
     }
 
-    /// The pre-redesign GitLab form, unchanged until settings-redesign issue 03.
+    /// Accounts › GitLab: the URL row, then the token row.
     fn render_gitlab_section(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex()
             .flex_col()
-            .gap_3()
-            .pt_3()
-            .pb(px(40.))
-            .child(field_label("GitLab Base URL"))
-            .child(self.base_url.clone())
-            .child(field_label("Personal Access Token"))
-            .child(self.pat.clone())
-            .child(field_label("GitLab project (open repo)"))
-            .child(gitlab_project_line(&self.gitlab_project))
-            .child(field_label("Connection"))
-            .child(connection_line(&self.gitlab_connection.borrow()))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .child(
-                        div()
-                            .id("settings-save")
-                            .px_3()
-                            .py_1()
-                            .rounded(px(6.))
-                            .bg(theme::line())
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .child("Save")
-                            .on_click(cx.listener(|view, _, _, cx| view.save(cx))),
-                    )
-                    .child(
-                        div()
-                            .id("settings-verify")
-                            .px_3()
-                            .py_1()
-                            .rounded(px(6.))
-                            .bg(theme::line())
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .when(matches!(self.verify, VerifyStatus::Running), |el| {
-                                el.opacity(0.6)
-                            })
-                            .child("Verify")
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.verify(&VerifyGitLab, window, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("settings-clear-pat")
-                            .px_3()
-                            .py_1()
-                            .rounded(px(6.))
-                            .bg(theme::line())
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .child("Clear token")
-                            .on_click(cx.listener(|view, _, _, cx| view.clear_pat(cx))),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(theme::muted())
-                    .child(self.status.clone()),
-            )
+            .child(self.render_url_row(cx))
+            .child(self.render_token_row(cx))
             .into_any_element()
     }
+
+    fn render_url_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let non_default = self.saved_base_url != DEFAULT_BASE_URL;
+        SettingRow::new("settings-gitlab-url", URL_TITLE)
+            .description(URL_DESCRIPTION)
+            .when(non_default, |row| {
+                row.title_action(
+                    Button::icon_only("settings-gitlab-url-reset", "undo.svg")
+                        .tooltip(RESET_TO_DEFAULT)
+                        .on_click(cx.listener(|view, _, _, cx| view.reset_base_url(cx))),
+                )
+            })
+            .control(self.base_url.clone())
+    }
+
+    fn render_token_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let row = token_row::token_row(
+            self.has_saved_token,
+            &self.gitlab_connection.borrow(),
+            self.keychain_error.as_ref(),
+        );
+        let (status, label, can_retry) = match row {
+            TokenRow::Input => {
+                return SettingRow::new("settings-gitlab-token", token_row::TITLE)
+                    .narrow()
+                    .last(true)
+                    .description(self.token_description())
+                    .control(self.pat.clone())
+                    .into_any_element();
+            }
+            TokenRow::Card {
+                status,
+                label,
+                can_retry,
+            } => (status, label, can_retry),
+        };
+
+        let mut card = ConfiguredCard::new(label);
+        match status {
+            CardStatus::Verifying => {}
+            CardStatus::Connected => card = card.icon("check.svg", theme::success()),
+            CardStatus::Failed => card = card.icon("warning.svg", theme::error()),
+        }
+        let mut tab_index = TAB_TOKEN;
+        if can_retry {
+            card = card.action(
+                card_button("settings-gitlab-token-retry", token_row::RETRY, "refresh.svg")
+                    .tab_index(tab_index)
+                    .on_click(cx.listener(|view, _, _, cx| view.refresh_connection(cx))),
+            );
+            tab_index += 1;
+        }
+        card = card.action(
+            card_button(
+                "settings-gitlab-token-reset",
+                token_row::RESET_TOKEN,
+                "undo.svg",
+            )
+            .tab_index(tab_index)
+            .on_click(cx.listener(|view, _, window, cx| view.reset_token(window, cx))),
+        );
+
+        // Like Zed's configured API key, the card stands in for the whole row
+        // (last row of the section: 40px bottom padding, no divider).
+        div()
+            .id("settings-gitlab-token")
+            .pt(px(16.))
+            .pb(px(40.))
+            .child(card)
+            .into_any_element()
+    }
+
+    /// `Create one with the read_api scope in GitLab access tokens.`, the link
+    /// opening `{base}/-/user_settings/personal_access_tokens` in the browser.
+    fn token_description(&self) -> impl IntoElement {
+        let url = token_row::access_tokens_url(&self.saved_base_url);
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .child(token_row::DESCRIPTION_BEFORE_LINK)
+            .child(
+                div()
+                    .id("settings-gitlab-token-link")
+                    .underline()
+                    .cursor_pointer()
+                    .hover(|link| link.text_color(theme::text()))
+                    .child(token_row::DESCRIPTION_LINK)
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
+            )
+            .child(token_row::DESCRIPTION_AFTER_LINK)
+    }
+}
+
+/// Zed `ConfiguredApiCard` button: Subtle, Default size, small label, muted icon.
+fn card_button(id: &'static str, label: &'static str, icon: &'static str) -> Button {
+    Button::new(id, label)
+        .style(ButtonStyle::Subtle)
+        .size(ButtonSize::Default)
+        .small_label()
+        .start_icon(icon)
 }
 
 impl Focusable for SettingsView {
@@ -531,64 +525,18 @@ impl Render for SettingsView {
             .text_color(theme::text())
             .child(self.render_nav(window, cx))
             .child(self.render_content(cx))
-            .on_action(cx.listener(|_, _: &CloseSettings, window, _| window.remove_window()))
+            .on_action(cx.listener(|view, _: &CloseSettings, window, cx| {
+                // Closing does not blur the field; keep an unsaved URL edit.
+                view.commit_base_url(cx);
+                window.remove_window();
+            }))
             .on_action(cx.listener(|view, _: &FocusNextControl, window, cx| {
                 view.focus_control(true, window, cx)
             }))
             .on_action(cx.listener(|view, _: &FocusPrevControl, window, cx| {
                 view.focus_control(false, window, cx)
             }))
-            .on_action(cx.listener(|view, _: &SaveSettings, _, cx| view.save(cx)))
-            .on_action(cx.listener(SettingsView::verify))
-            .on_action(cx.listener(|view, _: &ClearPat, _, cx| view.clear_pat(cx)))
-            .on_action(cx.listener(|view, _: &RefreshGitLabProject, _, cx| {
-                view.refresh_gitlab_project(current_repo::current_repo_path(), cx);
-            }))
     }
-}
-
-fn connection_line(state: &GitLabConnection) -> impl IntoElement {
-    let text = match state {
-        GitLabConnection::Idle => "Not checked yet.".into(),
-        GitLabConnection::NoPat => "No token saved. Add a PAT and Verify.".into(),
-        GitLabConnection::Checking => "Checking credentials…".into(),
-        GitLabConnection::Connected { username } => format!("Signed in as {username}."),
-        GitLabConnection::Failed(msg) => format!("Connection failed: {msg}"),
-    };
-    div()
-        .text_size(px(12.))
-        .text_color(theme::muted())
-        .child(text)
-}
-
-fn gitlab_project_line(line: &GitLabProjectLine) -> impl IntoElement {
-    let text = match line {
-        GitLabProjectLine::Idle => "Open a repository, then reopen Settings.".into(),
-        GitLabProjectLine::NoRepo => "No repository open.".into(),
-        GitLabProjectLine::Resolving => "Resolving…".into(),
-        GitLabProjectLine::Ok {
-            path,
-            verified: true,
-        } => format!("GitLab project: {path}"),
-        GitLabProjectLine::Ok {
-            path,
-            verified: false,
-        } => {
-            format!("GitLab project: {path} (add PAT and Save to verify via API)")
-        }
-        GitLabProjectLine::Err(msg) => msg.clone(),
-    };
-    div()
-        .text_size(px(12.))
-        .text_color(theme::muted())
-        .child(text)
-}
-
-fn field_label(text: &'static str) -> impl IntoElement {
-    div()
-        .text_size(px(12.))
-        .text_color(theme::muted())
-        .child(text)
 }
 
 pub fn open_or_focus_settings(
@@ -596,16 +544,10 @@ pub fn open_or_focus_settings(
     gitlab_connection: Rc<RefCell<GitLabConnection>>,
     cx: &mut App,
 ) {
-    if let Some(h) = *handle {
-        if h.update(cx, |view, window, cx| {
-            window.activate_window();
-            view.refresh_gitlab_project(current_repo::current_repo_path(), cx);
-            cx.notify();
-        })
-        .is_ok()
-        {
-            return;
-        }
+    if let Some(h) = *handle
+        && h.update(cx, |_, window, _| window.activate_window()).is_ok()
+    {
+        return;
     }
 
     let bounds = gpui::Bounds::centered(None, size(px(760.), px(520.)), cx);
@@ -624,18 +566,14 @@ pub fn open_or_focus_settings(
             ..Default::default()
         },
         |window, cx| {
-            let view = cx.new(|cx| SettingsView::new(gitlab_connection.clone(), cx));
+            let view = cx.new(|cx| SettingsView::new(gitlab_connection.clone(), window, cx));
             // Arrow keys work in the tree straight away; no focus border until used.
             let nav_focus = view.read(cx).nav_focus.clone();
             window.focus(&nav_focus);
             view
         },
     ) {
-        Ok(h) => {
-            *handle = Some(h);
-            let repo = current_repo::current_repo_path();
-            let _ = h.update(cx, |view, _, cx| view.refresh_gitlab_project(repo, cx));
-        }
+        Ok(h) => *handle = Some(h),
         Err(e) => eprintln!("failed to open settings: {e}"),
     }
 }

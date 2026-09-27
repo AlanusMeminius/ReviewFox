@@ -10,10 +10,13 @@ use crate::ui::theme;
 pub enum ButtonStyle {
     #[default]
     Subtle,
+    #[allow(dead_code)] // Part of the component set; no Settings page uses it yet.
     Outlined,
+    #[allow(dead_code)] // Part of the component set; no Settings page uses it yet.
     Tinted(TintColor),
 }
 
+#[allow(dead_code)] // Only reachable through ButtonStyle::Tinted, unused so far.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TintColor {
     Success,
@@ -23,6 +26,7 @@ pub enum TintColor {
 /// Zed `ButtonSize::Medium` (28px, 8px padding) / `Default` (22px, 4px).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ButtonSize {
+    #[allow(dead_code)] // Part of the component set; no Settings page uses it yet.
     Medium,
     #[default]
     Default,
@@ -148,6 +152,7 @@ impl Button {
     }
 
     /// Icon tint; muted by default.
+    #[allow(dead_code)] // Part of the component set; no Settings page uses it yet.
     pub fn icon_color(mut self, color: impl Into<Hsla>) -> Self {
         self.icon_color = Some(color.into());
         self

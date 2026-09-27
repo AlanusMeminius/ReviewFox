@@ -148,7 +148,6 @@ pub fn border_focused() -> Rgba {
 pub fn element_active() -> Rgba {
     rgb(0xdfe3e9)
 }
-#[allow(dead_code)] // Status icons on the GitLab account page (issue 03).
 pub fn success() -> Rgba {
     rgb(0x2f8f55)
 }
@@ -158,7 +157,6 @@ pub fn success_background() -> Rgba {
 pub fn success_border() -> Rgba {
     rgb(0xc3e5cf)
 }
-#[allow(dead_code)] // Status icons on the GitLab account page (issue 03).
 pub fn error() -> Rgba {
     rgb(0xcf4a3c)
 }

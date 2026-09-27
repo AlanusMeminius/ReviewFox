@@ -1,6 +1,7 @@
-//! Shared GitLab auth display state (verify via `/user`, cached for Settings).
+//! Shared GitLab auth display state (verify via `/user`), shared by the main
+//! window and Settings.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -9,53 +10,65 @@ use gpui::{Context, WeakEntity};
 use crate::gitlab::{VerifyError, VerifyResult, verify_pat};
 use crate::settings_store;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum GitLabConnection {
+    #[default]
     Idle,
     NoPat,
     Checking,
-    Connected { username: String },
-    Failed(String),
+    Connected {
+        username: String,
+    },
+    Failed(VerifyError),
 }
 
-impl Default for GitLabConnection {
-    fn default() -> Self {
-        GitLabConnection::Idle
-    }
+thread_local! {
+    /// Bumped by every refresh / reset; a verify result from an older
+    /// generation is dropped so a slow request cannot overwrite a newer state.
+    static GENERATION: Cell<u64> = const { Cell::new(0) };
 }
 
-pub fn apply_verify_result(connection: &Rc<RefCell<GitLabConnection>>, result: &VerifyResult) {
-    let mut slot = connection.borrow_mut();
-    *slot = match result {
+fn next_generation() -> u64 {
+    GENERATION.with(|g| {
+        let next = g.get().wrapping_add(1);
+        g.set(next);
+        next
+    })
+}
+
+fn is_current(generation: u64) -> bool {
+    GENERATION.with(|g| g.get() == generation)
+}
+
+fn apply_verify_result(connection: &Rc<RefCell<GitLabConnection>>, result: &VerifyResult) {
+    *connection.borrow_mut() = match result {
         VerifyResult::Ok { username } => GitLabConnection::Connected {
             username: username.clone(),
         },
-        VerifyResult::Err(VerifyError::Network(msg)) => {
-            GitLabConnection::Failed(format!("Network: {msg}"))
-        }
-        VerifyResult::Err(VerifyError::Unauthorized) => {
-            GitLabConnection::Failed("Unauthorized (401)".into())
-        }
-        VerifyResult::Err(VerifyError::Other { status, detail }) => {
-            GitLabConnection::Failed(format!("HTTP {status}: {detail}"))
-        }
+        VerifyResult::Err(e) => GitLabConnection::Failed(e.clone()),
     };
 }
 
+/// The token was removed: NoPat now, and any in-flight verify is discarded.
+pub fn set_no_pat(connection: &Rc<RefCell<GitLabConnection>>) {
+    next_generation();
+    *connection.borrow_mut() = GitLabConnection::NoPat;
+}
+
+/// Re-verify the saved base URL + keychain token off the UI thread.
 pub fn spawn_refresh_connection<E: 'static>(
     connection: Rc<RefCell<GitLabConnection>>,
     notify: WeakEntity<E>,
     cx: &mut Context<E>,
 ) {
-    {
-        let pat = settings_store::load_pat().unwrap_or_default();
-        if pat.trim().is_empty() {
-            *connection.borrow_mut() = GitLabConnection::NoPat;
-            cx.notify();
-            return;
-        }
-        *connection.borrow_mut() = GitLabConnection::Checking;
+    let generation = next_generation();
+    let pat = settings_store::load_pat().unwrap_or_default();
+    if pat.trim().is_empty() {
+        *connection.borrow_mut() = GitLabConnection::NoPat;
+        cx.notify();
+        return;
     }
+    *connection.borrow_mut() = GitLabConnection::Checking;
     cx.notify();
 
     cx.spawn(async move |this, cx| {
@@ -64,16 +77,14 @@ pub fn spawn_refresh_connection<E: 'static>(
             Err(_) => return,
         };
         let base = settings_store::effective_base_url(&settings_store::load_file());
-        let pat = settings_store::load_pat().unwrap_or_default();
-        if pat.trim().is_empty() {
-            *connection.borrow_mut() = GitLabConnection::NoPat;
-        } else {
-            let result = cx
-                .background_executor()
-                .spawn(async move { verify_pat(http, &base, &pat).await })
-                .await;
-            apply_verify_result(&connection, &result);
+        let result = cx
+            .background_executor()
+            .spawn(async move { verify_pat(http, &base, &pat).await })
+            .await;
+        if !is_current(generation) {
+            return;
         }
+        apply_verify_result(&connection, &result);
 
         let _ = this.update(cx, |_, cx| cx.notify());
         let _ = notify.update(cx, |_, cx| cx.notify());

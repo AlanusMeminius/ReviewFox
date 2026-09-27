@@ -29,7 +29,6 @@ use super::mac_column_vibrancy::ColumnVibrancy;
 use super::metadata;
 use super::scrollbar;
 use super::splitter::{self, Axis, ResizeState};
-use super::current_repo;
 use super::theme;
 use super::window_controls::window_controls;
 use super::window_geometry;
@@ -91,16 +90,6 @@ enum MainState {
 }
 
 impl AppView {
-    fn sync_current_repo_path(state: &MainState) {
-        let path = match state {
-            MainState::Ready(loaded) => {
-                Some(loaded.comparison.repository.path().to_path_buf())
-            }
-            MainState::Empty | MainState::Error(_) => None,
-        };
-        current_repo::set_current_repo_path(path);
-    }
-
     pub fn new(
         boot: Option<BranchBrowser>,
         gitlab_connection: Rc<RefCell<GitLabConnection>>,
@@ -111,7 +100,6 @@ impl AppView {
             Some(loaded) => MainState::Ready(loaded),
             None => MainState::Empty,
         };
-        Self::sync_current_repo_path(&state);
         gitlab_connection::spawn_refresh_connection(
             gitlab_connection,
             cx.entity().downgrade(),
@@ -328,7 +316,6 @@ impl AppView {
         }) {
             Ok(bb) => {
                 self.state = MainState::Ready(bb);
-                Self::sync_current_repo_path(&self.state);
                 self.refresh_store();
                 self.branch_picker = None;
                 self.mr_picker = None;
@@ -716,7 +703,6 @@ impl AppView {
         self.repo_menu = None;
         if removing_current {
             self.state = MainState::Empty;
-            Self::sync_current_repo_path(&self.state);
             self.branch_picker = None;
             self.mr_picker = None;
             self.mr_entry = None;
@@ -850,14 +836,12 @@ impl AppView {
                 match BranchBrowser::open(&root) {
                     Ok(bb) => {
                         this.state = MainState::Ready(bb);
-                        Self::sync_current_repo_path(&this.state);
                         this.mr_entry = None;
                         this.mr_picker = None;
                         this.remember_current();
                     }
                     Err(e) => {
                         this.state = MainState::Error(e.0);
-                        Self::sync_current_repo_path(&this.state);
                     }
                 }
                 cx.notify();
