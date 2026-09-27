@@ -168,3 +168,8 @@ pub fn error_background() -> Rgba {
 pub fn error_border() -> Rgba {
     rgb(0xf5c8c2)
 }
+/// Settings nav sidebar. Opaque on every platform: the Settings window has no
+/// vibrancy layer, so the main window's clear macOS [`sidebar`] would not read.
+pub fn settings_nav() -> Rgba {
+    rgb(0xf4f5f7)
+}

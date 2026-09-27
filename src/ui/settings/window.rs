@@ -1,6 +1,7 @@
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, Render, SharedString, Window, WindowHandle,
-    actions, div, prelude::*, px,
+    AnyElement, App, Context, ElementId, Entity, FocusHandle, Focusable, KeyBinding, Render,
+    ScrollHandle, SharedString, Window, WindowBackgroundAppearance, WindowHandle, actions, div,
+    point, prelude::*, px, size,
 };
 
 use std::path::PathBuf;
@@ -10,12 +11,77 @@ use crate::settings_store::{self, SettingsFile};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::current_repo;
-use super::gitlab_connection::{self, GitLabConnection};
-use super::text_field::TextField;
-use super::theme;
+use super::SectionHeader;
+use super::nav::{NavItem, SettingsNav};
+use super::nav_tree::{NavEntry, NavPage, NavState};
+use crate::ui::current_repo;
+use crate::ui::gitlab_connection::{self, GitLabConnection};
+use crate::ui::scrollbar;
+use crate::ui::text_field::TextField;
+use crate::ui::theme;
 
-actions!(settings, [SaveSettings, VerifyGitLab, ClearPat, RefreshGitLabProject]);
+actions!(
+    settings,
+    [
+        SaveSettings,
+        VerifyGitLab,
+        ClearPat,
+        RefreshGitLabProject,
+        CloseSettings,
+        FocusNextControl,
+        FocusPrevControl,
+        NavUp,
+        NavDown,
+        NavExpand,
+        NavCollapse,
+    ]
+);
+
+/// Key context on the whole Settings view.
+const CONTEXT: &str = "Settings";
+/// Key context on the nav tree (only while it has focus).
+const NAV_CONTEXT: &str = "SettingsNav";
+const CONTENT_SCROLL_ID: &str = "settings-content-sb";
+
+#[cfg(target_os = "macos")]
+const CLOSE_KEY: &str = "cmd-w";
+#[cfg(not(target_os = "macos"))]
+const CLOSE_KEY: &str = "ctrl-w";
+
+/// Settings-window bindings, scoped to [`CONTEXT`] / [`NAV_CONTEXT`].
+pub fn key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("escape", CloseSettings, Some(CONTEXT)),
+        KeyBinding::new(CLOSE_KEY, CloseSettings, Some(CONTEXT)),
+        KeyBinding::new("tab", FocusNextControl, Some(CONTEXT)),
+        KeyBinding::new("shift-tab", FocusPrevControl, Some(CONTEXT)),
+        KeyBinding::new("up", NavUp, Some(NAV_CONTEXT)),
+        KeyBinding::new("down", NavDown, Some(NAV_CONTEXT)),
+        KeyBinding::new("right", NavExpand, Some(NAV_CONTEXT)),
+        KeyBinding::new("left", NavCollapse, Some(NAV_CONTEXT)),
+    ]
+}
+
+/// Level-2 nav entries; each renders one block of its page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Section {
+    GitLab,
+}
+
+impl Section {
+    fn title(self) -> &'static str {
+        match self {
+            Section::GitLab => "GitLab",
+        }
+    }
+}
+
+/// The nav tree. A new page or section is a new entry here plus its render arm.
+const PAGES: &[NavPage<Section>] = &[NavPage {
+    title: "Accounts",
+    sections: &[Section::GitLab],
+    expanded: true,
+}];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum VerifyStatus {
@@ -44,21 +110,29 @@ pub struct SettingsView {
     verify: VerifyStatus,
     gitlab_project: GitLabProjectLine,
     gitlab_connection: Rc<RefCell<GitLabConnection>>,
+    nav_focus: FocusHandle,
+    nav: NavState,
+    /// Last nav interaction came from the keyboard: show the focus border.
+    nav_keyboard: bool,
+    content_scroll: ScrollHandle,
 }
 
 impl SettingsView {
     pub fn new(gitlab_connection: Rc<RefCell<GitLabConnection>>, cx: &mut Context<Self>) -> Self {
         let file = settings_store::load_file();
         let base = settings_store::effective_base_url(&file);
-        let base_url = cx.new(|cx| TextField::new("https://gitlab.com", false, cx));
+        let base_url = cx.new(|cx| TextField::new("https://gitlab.com", false, cx).tab_index(1));
         base_url.update(cx, |field, cx| field.set_content(base, cx));
 
-        let pat = cx.new(|cx| {
-            TextField::new("Personal access token (read_api)", true, cx)
-        });
+        let pat =
+            cx.new(|cx| TextField::new("Personal access token (read_api)", true, cx).tab_index(2));
         if let Some(stored) = settings_store::load_pat() {
             pat.update(cx, |field, cx| field.set_content(stored, cx));
         }
+
+        // The scroll handle lives in a global registry and outlives the window.
+        let (content_scroll, _) = scrollbar::vertical(CONTENT_SCROLL_ID, cx);
+        content_scroll.set_offset(point(px(0.), px(0.)));
 
         let mut view = Self {
             focus: cx.focus_handle(),
@@ -68,6 +142,10 @@ impl SettingsView {
             verify: VerifyStatus::Idle,
             gitlab_project: GitLabProjectLine::Idle,
             gitlab_connection,
+            nav_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+            nav: NavState::new(PAGES),
+            nav_keyboard: false,
+            content_scroll,
         };
         view.refresh_gitlab_project(current_repo::current_repo_path(), cx);
         gitlab_connection::spawn_refresh_connection(
@@ -150,8 +228,7 @@ impl SettingsView {
     }
 
     fn clear_pat(&mut self, cx: &mut Context<Self>) {
-        self.pat
-            .update(cx, |field, cx| field.set_content("", cx));
+        self.pat.update(cx, |field, cx| field.set_content("", cx));
         if let Err(e) = settings_store::clear_pat() {
             self.status = format!("Could not clear keychain entry: {e}").into();
         } else {
@@ -212,25 +289,163 @@ impl SettingsView {
     }
 }
 
-impl Focusable for SettingsView {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+// Nav tree and window keyboard.
+impl SettingsView {
+    /// Scroll the content to the selected entry: a page to the top, a section
+    /// to its header. Child 0 of the scroll column is the page title.
+    fn reveal_selected(&self) {
+        match self.nav.selected() {
+            NavEntry::Page(_) => self.content_scroll.set_offset(point(px(0.), px(0.))),
+            NavEntry::Section { section, .. } => {
+                self.content_scroll.scroll_to_top_of_item(section + 1)
+            }
+        }
     }
-}
 
-impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn click_nav(&mut self, entry: NavEntry, window: &mut Window, cx: &mut Context<Self>) {
+        self.nav.select(entry);
+        self.nav_keyboard = false;
+        window.focus(&self.nav_focus);
+        self.reveal_selected();
+        cx.notify();
+    }
+
+    fn toggle_nav(&mut self, page: usize, cx: &mut Context<Self>) {
+        if self.nav.toggle(page) {
+            self.reveal_selected();
+        }
+        cx.notify();
+    }
+
+    /// Arrow keys in the tree; `moved` is what the [`NavState`] move returned.
+    fn nav_key(&mut self, moved: bool, cx: &mut Context<Self>) {
+        self.nav_keyboard = true;
+        if moved {
+            self.reveal_selected();
+        }
+        cx.notify();
+    }
+
+    fn focus_control(&mut self, next: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if next {
+            window.focus_next();
+        } else {
+            window.focus_prev();
+        }
+        self.nav_keyboard = self.nav_focus.is_focused(window);
+        cx.notify();
+    }
+
+    fn render_nav(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.nav.selected();
+        let focused = self.nav_keyboard && self.nav_focus.is_focused(window);
+        let items = self
+            .nav
+            .visible()
+            .into_iter()
+            .map(|entry| {
+                let item = match entry {
+                    NavEntry::Page(page) => NavItem::page(
+                        ("settings-nav-page", page),
+                        PAGES[page].title,
+                        self.nav.is_expanded(page),
+                    )
+                    .on_toggle(cx.listener(move |view, _, _, cx| view.toggle_nav(page, cx))),
+                    NavEntry::Section { page, section } => NavItem::section(
+                        ElementId::Name(format!("settings-nav-{page}-{section}").into()),
+                        PAGES[page].sections[section].title(),
+                    ),
+                };
+                item.selected(entry == selected)
+                    .focused(focused && entry == selected)
+                    .on_click(
+                        cx.listener(move |view, _, window, cx| view.click_nav(entry, window, cx)),
+                    )
+            })
+            .collect();
+
         div()
-            .id("settings")
-            .track_focus(&self.focus)
+            .id("settings-nav")
+            .key_context(NAV_CONTEXT)
+            .track_focus(&self.nav_focus)
+            .flex_none()
+            .h_full()
+            .on_action(cx.listener(|view, _: &NavUp, _, cx| {
+                let moved = view.nav.select_prev();
+                view.nav_key(moved, cx);
+            }))
+            .on_action(cx.listener(|view, _: &NavDown, _, cx| {
+                let moved = view.nav.select_next();
+                view.nav_key(moved, cx);
+            }))
+            .on_action(cx.listener(|view, _: &NavExpand, _, cx| {
+                let moved = view.nav.expand();
+                view.nav_key(moved, cx);
+            }))
+            .on_action(cx.listener(|view, _: &NavCollapse, _, cx| {
+                let moved = view.nav.collapse();
+                view.nav_key(moved, cx);
+            }))
+            .child(SettingsNav::new(items))
+    }
+
+    fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let page = &PAGES[self.nav.selected().page()];
+        let (scroll, scrollbar) = scrollbar::vertical(CONTENT_SCROLL_ID, cx);
+        let sections: Vec<_> = page
+            .sections
+            .iter()
+            .map(|&section| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .child(SectionHeader::new(section.title()))
+                    .child(match section {
+                        Section::GitLab => self.render_gitlab_section(cx),
+                    })
+            })
+            .collect();
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .bg(theme::white())
+            .child(scrollbar::overlay_flex(
+                div()
+                    .id("settings-content")
+                    .size_full()
+                    .track_scroll(&scroll)
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .px(px(32.))
+                    .pt(px(24.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .pt(px(8.))
+                            .pb(px(12.))
+                            .text_size(px(16.))
+                            .text_color(theme::text())
+                            .child(page.title),
+                    )
+                    .children(sections),
+                scrollbar,
+            ))
+    }
+
+    /// The pre-redesign GitLab form, unchanged until settings-redesign issue 03.
+    fn render_gitlab_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
             .flex()
             .flex_col()
             .gap_3()
-            .p_4()
-            .size_full()
-            .bg(theme::white())
-            .font_family(theme::UI_FONT)
-            .text_color(theme::text())
+            .pt_3()
+            .pb(px(40.))
             .child(field_label("GitLab Base URL"))
             .child(self.base_url.clone())
             .child(field_label("Personal Access Token"))
@@ -292,6 +507,37 @@ impl Render for SettingsView {
                     .text_color(theme::muted())
                     .child(self.status.clone()),
             )
+            .into_any_element()
+    }
+}
+
+impl Focusable for SettingsView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Render for SettingsView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("settings")
+            .key_context(CONTEXT)
+            .track_focus(&self.focus)
+            .flex()
+            .flex_row()
+            .size_full()
+            .bg(theme::white())
+            .font_family(theme::UI_FONT)
+            .text_color(theme::text())
+            .child(self.render_nav(window, cx))
+            .child(self.render_content(cx))
+            .on_action(cx.listener(|_, _: &CloseSettings, window, _| window.remove_window()))
+            .on_action(cx.listener(|view, _: &FocusNextControl, window, cx| {
+                view.focus_control(true, window, cx)
+            }))
+            .on_action(cx.listener(|view, _: &FocusPrevControl, window, cx| {
+                view.focus_control(false, window, cx)
+            }))
             .on_action(cx.listener(|view, _: &SaveSettings, _, cx| view.save(cx)))
             .on_action(cx.listener(SettingsView::verify))
             .on_action(cx.listener(|view, _: &ClearPat, _, cx| view.clear_pat(cx)))
@@ -320,8 +566,14 @@ fn gitlab_project_line(line: &GitLabProjectLine) -> impl IntoElement {
         GitLabProjectLine::Idle => "Open a repository, then reopen Settings.".into(),
         GitLabProjectLine::NoRepo => "No repository open.".into(),
         GitLabProjectLine::Resolving => "Resolving…".into(),
-        GitLabProjectLine::Ok { path, verified: true } => format!("GitLab project: {path}"),
-        GitLabProjectLine::Ok { path, verified: false } => {
+        GitLabProjectLine::Ok {
+            path,
+            verified: true,
+        } => format!("GitLab project: {path}"),
+        GitLabProjectLine::Ok {
+            path,
+            verified: false,
+        } => {
             format!("GitLab project: {path} (add PAT and Save to verify via API)")
         }
         GitLabProjectLine::Err(msg) => msg.clone(),
@@ -356,7 +608,7 @@ pub fn open_or_focus_settings(
         }
     }
 
-    let bounds = gpui::Bounds::centered(None, gpui::size(px(480.), px(420.)), cx);
+    let bounds = gpui::Bounds::centered(None, size(px(760.), px(520.)), cx);
     match cx.open_window(
         gpui::WindowOptions {
             focus: true,
@@ -366,10 +618,18 @@ pub fn open_or_focus_settings(
                 appears_transparent: false,
                 ..Default::default()
             }),
-            window_background: super::window_background_appearance(),
+            window_min_size: Some(size(px(640.), px(400.))),
+            // Opaque nav + white content; no vibrancy layer to show through.
+            window_background: WindowBackgroundAppearance::Opaque,
             ..Default::default()
         },
-        |_, cx| cx.new(|cx| SettingsView::new(gitlab_connection.clone(), cx)),
+        |window, cx| {
+            let view = cx.new(|cx| SettingsView::new(gitlab_connection.clone(), cx));
+            // Arrow keys work in the tree straight away; no focus border until used.
+            let nav_focus = view.read(cx).nav_focus.clone();
+            window.focus(&nav_focus);
+            view
+        },
     ) {
         Ok(h) => {
             *handle = Some(h);

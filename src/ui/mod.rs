@@ -5,7 +5,6 @@ mod current_repo;
 mod gitlab_connection;
 mod diff_window;
 mod file_tree;
-mod settings_window;
 mod text_field;
 #[cfg(target_os = "macos")]
 mod mac_column_vibrancy;
@@ -33,7 +32,7 @@ use crate::reqwest_client::ReqwestClient;
 use crate::window_geometry_store;
 use crate::workspace_store;
 use gitlab_connection::GitLabConnection;
-use settings_window::SettingsView;
+use settings::SettingsView;
 use text_field::{
     Backspace, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, SelectLeft,
     SelectRight, ShowCharacterPalette,
@@ -125,7 +124,7 @@ pub fn run() {
             let settings_window = settings_window.clone();
             let gitlab_connection = gitlab_connection.clone();
             move |_: &OpenSettings, cx| {
-                settings_window::open_or_focus_settings(
+                settings::open_or_focus_settings(
                     &mut settings_window.borrow_mut(),
                     gitlab_connection.clone(),
                     cx,
@@ -155,6 +154,7 @@ pub fn run() {
             KeyBinding::new("end", End, Some("TextField")),
             KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("TextField")),
         ]);
+        cx.bind_keys(settings::key_bindings());
         cx.set_menus(vec![Menu {
             name: "ReviewFox".into(),
             items: vec![

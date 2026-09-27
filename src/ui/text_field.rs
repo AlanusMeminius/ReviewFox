@@ -77,6 +77,12 @@ impl TextField {
         self
     }
 
+    /// Makes the field a Tab stop at `index` (see `Window::focus_next`).
+    pub fn tab_index(mut self, index: isize) -> Self {
+        self.focus_handle = self.focus_handle.tab_index(index).tab_stop(true);
+        self
+    }
+
     pub fn content(&self) -> &str {
         &self.content
     }
