@@ -1,12 +1,13 @@
 use gpui::{
-    AnyElement, App, Context, ElementId, Entity, FocusHandle, Focusable, KeyBinding, Render,
-    ScrollHandle, Subscription, Window, WindowBackgroundAppearance, WindowHandle,
+    AnyElement, App, Context, ElementId, Entity, FocusHandle, Focusable, Global, KeyBinding,
+    Render, ScrollHandle, Subscription, Window, WindowBackgroundAppearance, WindowHandle,
     actions, div, point, prelude::*, px, size,
 };
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::gitlab::SettingsTarget;
 use crate::settings_store::{self, DEFAULT_BASE_URL};
 
 use super::nav::{NavItem, SettingsNav};
@@ -86,6 +87,21 @@ const PAGES: &[NavPage<Section>] = &[NavPage {
     sections: &[Section::GitLab],
     expanded: true,
 }];
+
+/// The nav entry of `section`.
+fn nav_entry(section: Section) -> NavEntry {
+    PAGES
+        .iter()
+        .enumerate()
+        .find_map(|(page, p)| {
+            let index = p.sections.iter().position(|&s| s == section)?;
+            Some(NavEntry::Section {
+                page,
+                section: index,
+            })
+        })
+        .expect("every Section is listed in PAGES")
+}
 
 pub struct SettingsView {
     focus: FocusHandle,
@@ -246,6 +262,32 @@ impl SettingsView {
 
 // Nav tree and window keyboard.
 impl SettingsView {
+    /// `Open Settings` from an error: select Accounts › GitLab, scroll to it
+    /// and focus the field to fix. The token input only takes focus while the
+    /// row shows it; behind a card, focus goes to the nav (nothing in content).
+    fn open_target(&mut self, target: SettingsTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.nav.select(nav_entry(Section::GitLab));
+        self.nav_keyboard = false;
+        self.reveal_selected();
+        let field = match target {
+            SettingsTarget::GitLabUrl => Some(&self.base_url),
+            SettingsTarget::GitLabToken => {
+                let row = token_row::token_row(
+                    self.has_saved_token,
+                    &self.gitlab_connection.borrow(),
+                    self.keychain_error.as_ref(),
+                );
+                matches!(row, TokenRow::Input).then_some(&self.pat)
+            }
+        };
+        let focus = match field {
+            Some(field) => field.read(cx).focus_handle(cx),
+            None => self.nav_focus.clone(),
+        };
+        window.focus(&focus);
+        cx.notify();
+    }
+
     /// Scroll the content to the selected entry: a page to the top, a section
     /// to its header. Child 0 of the scroll column is the page title.
     fn reveal_selected(&self) {
@@ -539,13 +581,39 @@ impl Render for SettingsView {
     }
 }
 
-pub fn open_or_focus_settings(
-    handle: &mut Option<WindowHandle<SettingsView>>,
+/// The Settings window (at most one) and the connection it verifies through.
+struct SettingsWindow {
+    handle: Option<WindowHandle<SettingsView>>,
     gitlab_connection: Rc<RefCell<GitLabConnection>>,
-    cx: &mut App,
-) {
-    if let Some(h) = *handle
-        && h.update(cx, |_, window, _| window.activate_window()).is_ok()
+}
+
+impl Global for SettingsWindow {}
+
+/// Call once at startup, before [`open_or_focus_settings`].
+pub fn init(gitlab_connection: Rc<RefCell<GitLabConnection>>, cx: &mut App) {
+    cx.set_global(SettingsWindow {
+        handle: None,
+        gitlab_connection,
+    });
+}
+
+/// Open Settings, or focus it when already open. With a `target`
+/// (`Open Settings` on an error) also select and focus the field to fix;
+/// without one (keys, gear, menu) leave the window as it is.
+pub fn open_or_focus_settings(target: Option<SettingsTarget>, cx: &mut App) {
+    let (handle, gitlab_connection) = {
+        let state = cx.global::<SettingsWindow>();
+        (state.handle, state.gitlab_connection.clone())
+    };
+    if let Some(h) = handle
+        && h
+            .update(cx, |view, window, cx| {
+                window.activate_window();
+                if let Some(target) = target {
+                    view.open_target(target, window, cx);
+                }
+            })
+            .is_ok()
     {
         return;
     }
@@ -566,14 +634,17 @@ pub fn open_or_focus_settings(
             ..Default::default()
         },
         |window, cx| {
-            let view = cx.new(|cx| SettingsView::new(gitlab_connection.clone(), window, cx));
+            let view = cx.new(|cx| SettingsView::new(gitlab_connection, window, cx));
             // Arrow keys work in the tree straight away; no focus border until used.
             let nav_focus = view.read(cx).nav_focus.clone();
             window.focus(&nav_focus);
+            if let Some(target) = target {
+                view.update(cx, |view, cx| view.open_target(target, window, cx));
+            }
             view
         },
     ) {
-        Ok(h) => *handle = Some(h),
+        Ok(h) => cx.global_mut::<SettingsWindow>().handle = Some(h),
         Err(e) => eprintln!("failed to open settings: {e}"),
     }
 }

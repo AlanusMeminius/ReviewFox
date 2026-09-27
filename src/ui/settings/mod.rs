@@ -15,4 +15,4 @@ pub use button::{Button, ButtonSize, ButtonStyle};
 pub use configured_card::ConfiguredCard;
 pub use section_header::SectionHeader;
 pub use setting_row::SettingRow;
-pub use window::{SettingsView, key_bindings, open_or_focus_settings};
+pub use window::{init, key_bindings, open_or_focus_settings};

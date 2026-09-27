@@ -170,6 +170,8 @@ impl Button {
     }
 
     /// Makes the button a Tab stop; keyboard focus shows a `border_focused` border.
+    /// While focused, Enter / Space (no modifiers) run [`Self::on_click`]: GPUI's
+    /// div turns their key-up into a `ClickEvent::Keyboard` for focused elements.
     pub fn tab_index(mut self, index: isize) -> Self {
         self.tab_index = Some(index);
         self

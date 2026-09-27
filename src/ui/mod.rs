@@ -17,8 +17,8 @@ mod window_geometry;
 
 use gpui::{
     App, AppContext, Application, AssetSource, KeyBinding, Menu, MenuItem, SharedString,
-    TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle,
-    WindowOptions, actions, point, px,
+    TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions,
+    actions, point, px,
 };
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -31,7 +31,6 @@ use crate::reqwest_client::ReqwestClient;
 use crate::window_geometry_store;
 use crate::workspace_store;
 use gitlab_connection::GitLabConnection;
-use settings::SettingsView;
 use text_field::{
     Backspace, Confirm, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, SelectLeft,
     SelectRight, ShowCharacterPalette,
@@ -113,26 +112,17 @@ pub fn run() {
                 .expect("HTTP client");
         cx.set_http_client(Arc::new(http_client));
 
-        let settings_window: Rc<RefCell<Option<WindowHandle<SettingsView>>>> =
-            Rc::new(RefCell::new(None));
         let gitlab_connection = Rc::new(RefCell::new(GitLabConnection::default()));
+        settings::init(gitlab_connection.clone(), cx);
 
         cx.on_action(|_: &Quit, cx| {
             window_geometry_store::begin_quit();
             window_geometry_store::flush();
             cx.quit();
         });
-        cx.on_action({
-            let settings_window = settings_window.clone();
-            let gitlab_connection = gitlab_connection.clone();
-            move |_: &OpenSettings, cx| {
-                settings::open_or_focus_settings(
-                    &mut settings_window.borrow_mut(),
-                    gitlab_connection.clone(),
-                    cx,
-                );
-            }
-        });
+        // Keys, gear and menu open without a target; error links call
+        // `settings::open_or_focus_settings` with one.
+        cx.on_action(|_: &OpenSettings, cx| settings::open_or_focus_settings(None, cx));
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("ctrl-q", Quit, None),
