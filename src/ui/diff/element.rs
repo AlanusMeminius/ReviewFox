@@ -17,6 +17,7 @@ use gpui::{
 
 use super::layout::{Layout, LineKind, Row};
 use super::pane::DualPane;
+use super::trace::{self, FrameStats};
 use super::viewport::{Viewport, route_wheel, snap};
 use crate::domain::Side;
 use crate::ui::scrollbar::{self, ThumbGeom};
@@ -221,6 +222,8 @@ pub struct Frame {
     bridges: Vec<WinBridge>,
     /// Omission separator joins: (old y, new y), window.
     waves: Vec<(f32, f32)>,
+    /// Frame-trace numbers (zeros unless `REVIEWFOX_FRAME_TRACE=1`).
+    pub(super) stats: FrameStats,
 }
 
 pub(super) struct FrameInput<'a> {
@@ -251,6 +254,8 @@ pub(super) fn build_frame(
         decorations,
         bars,
     } = input;
+    let t_build = trace::start();
+    let mut stats = FrameStats::default();
     let top = geom.top();
     let view_h = f32::from(geom.bounds.size.height);
     let screen = (view_h / row_h).ceil() as usize;
@@ -258,6 +263,7 @@ pub(super) fn build_frame(
     let sides = [Side::Old, Side::New].map(|side| {
         let rows = layout.side(side);
         let visible = vp.visible_rows(side);
+        stats.rows[side_ix(side)] = visible.len();
         keep[side_ix(side)] = visible.start.saturating_sub(screen)..visible.end + screen;
         let side_top = vp.top(side);
         let y_of = |r: usize| snap(top + r as f32 * row_h - side_top, scale);
@@ -271,7 +277,13 @@ pub(super) fn build_frame(
             let shape = shapes
                 .rows
                 .entry((side, i as u32))
-                .or_insert_with(|| shape_row(layout, side, row, font_px, window));
+                .or_insert_with(|| {
+                    let t = trace::start();
+                    let shape = shape_row(layout, side, row, font_px, window);
+                    stats.shaped += 1;
+                    stats.shape += trace::since(t);
+                    shape
+                });
             let (kind, commented, drafting_here, marks) = match row {
                 Row::Line(l) => {
                     let marks = match (layout.marks(side, l), &shape.text) {
@@ -365,6 +377,7 @@ pub(super) fn build_frame(
     };
 
     let (hitbox, code, tracks) = hitboxes;
+    stats.build = trace::since(t_build);
     Frame {
         geom,
         row_h,
@@ -374,6 +387,7 @@ pub(super) fn build_frame(
         sides,
         bridges,
         waves,
+        stats,
     }
 }
 
@@ -863,6 +877,7 @@ impl Element for DualPaneElement {
         let Some(frame) = frame.as_ref() else {
             return;
         };
+        let t = trace::start();
         frame.paint(window, cx);
         for code in &frame.code {
             window.set_cursor_style(CursorStyle::PointingHand, code);
@@ -871,6 +886,9 @@ impl Element for DualPaneElement {
             window.set_cursor_style(CursorStyle::Arrow, track);
         }
         register_listeners(&self.pane, frame, window);
+        if t.is_some() {
+            trace::frame(&frame.stats, trace::since(t));
+        }
     }
 }
 

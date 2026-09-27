@@ -23,6 +23,7 @@ use super::element::{
     line_number_digits, ln_col_width, text_extent, thumb_for, top_at,
 };
 use super::layout::{HunkLand, Layout, Row};
+use super::trace;
 use super::viewport::{self, Viewport};
 
 /// What the shell (DiffView) hears from the pane. Hunk index and hover copy
@@ -199,6 +200,7 @@ impl DualPane {
         let Some(file) = self.file.as_ref() else {
             return;
         };
+        let t = trace::start();
         let mut layout = Layout::build(
             file.old_text.clone(),
             file.new_text.clone(),
@@ -206,6 +208,13 @@ impl DualPane {
             Some(&self.fold),
         );
         layout.set_comments(self.comments.iter());
+        if t.is_some() {
+            trace::layout(
+                trace::since(t),
+                [layout.old.rows(), layout.new.rows()],
+                layout.bridges.len(),
+            );
+        }
         self.layout = Some(layout);
     }
 
@@ -577,13 +586,16 @@ impl DualPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<element::Frame> {
+        let t_prepaint = trace::start();
         self.scale = window.scale_factor();
         self.view_h = f32::from(bounds.size.height);
         let row_h = self.row_h();
         let font_px = self.font_size.px() as f32;
         let advance = self.mono_advance(font_px, window);
         let layout = self.layout.as_ref()?;
+        let t_vp = trace::start();
         let vp = Viewport::new(layout, self.scroll_s, self.view_h, row_h).snapped(self.scale);
+        let viewport_took = trace::since(t_vp);
         let s = vp.s();
         let geom = Geom::new(bounds, ln_col_width(line_number_digits(layout)), self.scale);
         let tracks = [Side::Old, Side::New]
@@ -619,6 +631,7 @@ impl DualPane {
             self.x_offsets[ix] = viewport::clamp_x(self.x_offsets[ix], self.max_x[ix]);
             frame.set_x_offset(side, viewport::snap(self.x_offsets[ix], self.scale));
         }
+        frame.stats.viewport = viewport_took;
         let index = nearest_hunk_index(self.hunk_s.unwrap_or(s / row_h), &layout.hunk_lands);
         // A new view_h can re-clamp `scroll_s`.
         self.scroll_s = s;
@@ -629,6 +642,7 @@ impl DualPane {
                 this.update(cx, |pane, cx| pane.set_hunk_index(index, cx)).ok();
             });
         }
+        frame.stats.prepaint = trace::since(t_prepaint);
         Some(frame)
     }
 }
@@ -758,17 +772,12 @@ fn side_ix(side: Side) -> usize {
     }
 }
 
-fn nearest_hunk_index(s_rows: f32, lands: &[HunkLand]) -> Option<usize> {
+/// Last Hunk landing at or above `s_rows` (the first one if none does).
+/// `lands` are in Alignment order, so `s` is non-decreasing.
+pub(super) fn nearest_hunk_index(s_rows: f32, lands: &[HunkLand]) -> Option<usize> {
     if lands.is_empty() {
         return None;
     }
-    let mut idx = 0;
-    for (i, land) in lands.iter().enumerate() {
-        if land.s as f32 <= s_rows + 0.5 {
-            idx = i;
-        } else {
-            break;
-        }
-    }
-    Some(idx)
+    let past = lands.partition_point(|land| land.s as f32 <= s_rows + 0.5);
+    Some(past.saturating_sub(1))
 }

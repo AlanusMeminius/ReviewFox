@@ -26,7 +26,7 @@ Split by change frequency. Lower-frequency data never sits on the per-frame path
 | Layer | File | Inputs | Outputs | Rebuilt when |
 |---|---|---|---|---|
 | **Layout** (pure) | `src/ui/diff/layout.rs` | `Arc<str>` old/new text, `Alignment`, `FoldState` | Per-side visual lines (line rows and omit separators modeled separately, not a `RowKind`), bridges, knots, hunk lands, seam and comment row indices, lazy per-Replace word marks. Line text is a byte range into the shared text. | Alignment / fold / ignore-whitespace change |
-| **Viewport** (pure) | `src/ui/diff/viewport.rs` | Layout, `scroll_s`, `view_h`, `row_h`, per-side `x_offset`, device scale | `s_range`, per-side top (device-pixel snapped), visible row ranges, pixel bridges / gaps / omit links, hit testing `hit(side, y)` / `bridge_at(y)` | Every frame (cheap, visible-only) |
+| **Viewport** (pure) | `src/ui/diff/viewport.rs` | Layout, `scroll_s`, `view_h`, `row_h`, device scale (the per-side `x_offset` is applied at paint; `route_wheel` / `max_x` / `clamp_x` are free fns here) | `s_range`, per-side top (device-pixel snapped), visible row ranges, pixel bridges / gaps / omit links, hit testing `hit(side, y)` / `bridge_at(y)` | Every frame (cheap, visible-only) |
 | **Render** | `src/ui/diff/element.rs`, `pane.rs` | Layout, Viewport, `Decorations` | Paint only | — |
 
 Layout and Viewport do not depend on GPUI and are unit-tested. `interp`, `s_from`, `track`, `place_bridge`, `gap_intervals`, `empty_seam`, `content_pad` move into Viewport.
@@ -80,7 +80,8 @@ DualPaneElement (one Element: old pane | gutter | new pane)
 
 - Table-driven unit tests for Layout and Viewport: insert at file start / end, delete, 3→1 replace, one side empty, anchor preserved across expand / collapse, end-of-file gap, `s_range` has no dead travel (every step inside the range moves at least one side).
 - Render layer checked by running the app.
-- `REVIEWFOX_FRAME_TRACE=1` (off by default) logs per-frame Layout / Viewport / shape / paint time and visible row count.
+- `REVIEWFOX_FRAME_TRACE=1` (off by default, `src/ui/diff/trace.rs`) prints to stderr one line per Layout build and one per drawn pane frame: Viewport, frame build, newly shaped rows + shaping time, prepaint, paint, visible rows.
+- Headless: `cargo test --release -- --ignored frame_cost_is_flat_in_file_length --nocapture` (`src/ui/diff/perf.rs`) times Layout build and a full-range scroll of Viewport + visible-row paint list (no shaping) on synthetic 2k and 20k-line files, and asserts the per-frame cost stays flat.
 
 ## 8. Migration
 

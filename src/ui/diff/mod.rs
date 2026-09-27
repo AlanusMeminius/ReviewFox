@@ -4,4 +4,8 @@
 pub mod element;
 pub mod layout;
 pub mod pane;
+mod trace;
 pub mod viewport;
+
+#[cfg(test)]
+mod perf;
