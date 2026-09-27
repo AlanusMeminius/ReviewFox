@@ -1,12 +1,19 @@
 use gpui::{
-    App, ClipboardItem, Context, Div, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
-    WindowControlArea, div, prelude::*, px, rgb, svg,
+    App, Bounds, ClipboardItem, ContentMask, Context, Div, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseMoveEvent, ParentElement, PathBuilder,
+    Render, ScrollHandle, ScrollWheelEvent, StatefulInteractiveElement, Styled, Window,
+    WindowControlArea, canvas, div, fill, point, prelude::*, px, rgb, size, svg,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use crate::domain::{ChangedPath, Comparison, DisplayRow, PathStatus, Review, RowKind, Side};
+use crate::domain::{
+    Bridge, ChangedPath, Comparison, DisplayRow, DisplayRows, PathStatus, Review, RowKind,
+    ScrollKnot, Side,
+};
+
+const LN_COL: f32 = 32.;
+const BRIDGE_COL: f32 = 24.;
 use crate::export;
 use crate::git::{self, FileDiff};
 use super::file_tree::{self, TreeRow};
@@ -41,6 +48,32 @@ pub struct DiffView {
     collapsed_dirs: HashSet<String>,
     /// Reset collapsed_dirs when this no longer matches current ChangedPath list.
     tree_path_fingerprint: Vec<String>,
+    old_scroll: ScrollHandle,
+    new_scroll: ScrollHandle,
+    /// Shared scroll parameter, in pixels. See docs/dual-pane-diff.md §3.1.
+    scroll_s: f32,
+    scroll_nudge: f32,
+    applied_old: f32,
+    applied_new: f32,
+    /// Pane viewport height from the previous frame. 0 until the first layout.
+    view_h: f32,
+    hover_copy: Option<String>,
+    hover_bands: Vec<HoverBand>,
+    placed: Vec<PlacedBridge>,
+    old_gaps: Vec<(f32, f32)>,
+    new_gaps: Vec<(f32, f32)>,
+}
+
+struct HoverBand {
+    top: f32,
+    bottom: f32,
+    copy: String,
+}
+
+#[derive(Clone)]
+struct PlacedBridge {
+    kind: RowKind,
+    points: Vec<(f32, f32)>,
 }
 
 impl DiffView {
@@ -57,7 +90,33 @@ impl DiffView {
             export_status: None,
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
+            old_scroll: ScrollHandle::new(),
+            new_scroll: ScrollHandle::new(),
+            scroll_s: 0.,
+            scroll_nudge: 0.,
+            applied_old: 0.,
+            applied_new: 0.,
+            view_h: 0.,
+            hover_copy: None,
+            hover_bands: Vec::new(),
+            placed: Vec::new(),
+            old_gaps: Vec::new(),
+            new_gaps: Vec::new(),
         }
+    }
+
+    fn reset_scroll(&mut self) {
+        self.scroll_s = 0.;
+        self.scroll_nudge = 0.;
+        self.applied_old = 0.;
+        self.applied_new = 0.;
+        self.hover_copy = None;
+        self.hover_bands.clear();
+        self.placed.clear();
+        self.old_gaps.clear();
+        self.new_gaps.clear();
+        self.old_scroll.set_offset(point(px(0.), px(0.)));
+        self.new_scroll.set_offset(point(px(0.), px(0.)));
     }
 
     fn tree_resize_handler(&self, cx: &Context<Self>) -> splitter::ResizeHandler {
@@ -94,12 +153,14 @@ impl DiffView {
                 current.selected_path = incoming.selected_path;
                 current.changed_paths = incoming.changed_paths;
                 current.file = incoming.file;
+                self.reset_scroll();
             }
             _ => {
                 self.review = Some(Review::new(incoming.comparison.clone()));
                 self.drafting = None;
                 self.export_status = None;
                 self.snapshot = Some(incoming);
+                self.reset_scroll();
             }
         }
     }
@@ -121,6 +182,7 @@ impl DiffView {
         snap.selected_path = path;
         snap.file = file;
         self.drafting = None;
+        self.reset_scroll();
     }
 
     fn begin_draft(&mut self, side: Side, line: u32, window: &mut Window, cx: &mut Context<Self>) {
@@ -214,6 +276,99 @@ impl DiffView {
         cx.notify();
     }
 
+    fn on_wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let delta = event.delta.pixel_delta(window.line_height());
+        // AppKit scrollingDeltaY is negative when the user scrolls down.
+        self.scroll_nudge -= f32::from(delta.y);
+        cx.notify();
+    }
+
+    fn sync_scroll(&mut self) {
+        let Some(FileDiff::Text { display, .. }) = self.snapshot.as_ref().map(|s| &s.file) else {
+            return;
+        };
+        let knots = display.knots.clone();
+        let bridges = display.bridges.clone();
+        let old_n = display.old_rows.len();
+        let new_n = display.new_rows.len();
+        let row_h = f32::from(theme::ROW_HEIGHT);
+        if self.view_h < 1. {
+            return;
+        }
+        let anchor = self.view_h / 3.;
+        let end = knots.last().map(|k| k.s as f32 * row_h).unwrap_or(0.);
+        if self.scroll_nudge != 0. {
+            self.scroll_s = (self.scroll_s + self.scroll_nudge).clamp(0., end);
+            self.scroll_nudge = 0.;
+        } else {
+            let old_top = -f32::from(self.old_scroll.offset().y);
+            let new_top = -f32::from(self.new_scroll.offset().y);
+            let old_delta = (old_top - self.applied_old).abs();
+            let new_delta = (new_top - self.applied_new).abs();
+            if old_delta > 0.5 || new_delta > 0.5 {
+                let from_old = old_delta >= new_delta;
+                let (top, n) = if from_old {
+                    (old_top, old_n)
+                } else {
+                    (new_top, new_n)
+                };
+                let content = content_from_scroll(top, n, anchor, row_h);
+                self.scroll_s =
+                    s_from(from_old, content, &knots, row_h, self.scroll_s).clamp(0., end);
+            }
+        }
+        let (old_y, new_y) = interp(self.scroll_s, &knots, row_h);
+        let old_top = track(old_y, old_n, anchor, row_h);
+        let new_top = track(new_y, new_n, anchor, row_h);
+        self.applied_old = old_top;
+        self.applied_new = new_top;
+        self.old_scroll.set_offset(point(px(0.), px(-old_top)));
+        self.new_scroll.set_offset(point(px(0.), px(-new_top)));
+
+        let old_pane = self.old_scroll.bounds();
+        let new_pane = self.new_scroll.bounds();
+        let x_l = f32::from(old_pane.right()) + LN_COL;
+        let x_r = f32::from(new_pane.left()) - LN_COL;
+        let old_top_w = f32::from(old_pane.top());
+        let new_top_w = f32::from(new_pane.top());
+        self.old_gaps = gap_intervals(true, &bridges, old_n, new_n, old_top, new_top, self.view_h, row_h);
+        self.new_gaps = gap_intervals(false, &bridges, old_n, new_n, old_top, new_top, self.view_h, row_h);
+        self.placed.clear();
+        self.hover_bands.clear();
+        if x_r - x_l < 4. {
+            return;
+        }
+        for bridge in &bridges {
+            let Some(placed) = place_bridge(
+                bridge,
+                old_n,
+                new_n,
+                old_top,
+                new_top,
+                old_top_w,
+                new_top_w,
+                self.view_h,
+                row_h,
+                x_l,
+                x_r,
+            ) else {
+                continue;
+            };
+            let mut y0 = f32::MAX;
+            let mut y1 = f32::MIN;
+            for (_, y) in &placed.points {
+                y0 = y0.min(*y);
+                y1 = y1.max(*y);
+            }
+            self.hover_bands.push(HoverBand {
+                top: y0,
+                bottom: y1,
+                copy: bridge.position_copy(),
+            });
+            self.placed.push(placed);
+        }
+    }
+
 }
 
 impl Focusable for DiffView {
@@ -225,6 +380,7 @@ impl Focusable for DiffView {
 impl Render for DiffView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_collapsed_dirs();
+        self.sync_scroll();
         let tree_w = if self.tree_collapsed {
             px(0.)
         } else {
@@ -454,7 +610,7 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                 .as_ref()
                 .map(|r| r.comments_for_path(&s.selected_path).count())
                 .unwrap_or(0);
-            let sub = match &s.file {
+            let mut sub = match &s.file {
                 FileDiff::Text { hunk_count, .. } => {
                     format!(
                         "{hunk_count} difference{} · {n} comment{}",
@@ -465,6 +621,9 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                 FileDiff::Binary => "binary file".into(),
                 FileDiff::Error(e) => e.clone(),
             };
+            if let Some(copy) = &view.hover_copy {
+                sub = format!("{sub} · {copy}");
+            }
             (s.selected_path.clone(), sub)
         }
         None => ("—".into(), "No file selected".into()),
@@ -507,6 +666,8 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
                     div()
                         .text_xs()
                         .text_color(theme::muted())
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .child(subtitle),
                 )
                 .child(export_button(cx))
@@ -531,22 +692,16 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
 
 fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     match view.snapshot.as_ref().map(|s| &s.file) {
-        Some(FileDiff::Text { rows, .. }) => {
-            // One scroll for L+gutter+R → lockstep sync (ADR 0003 intent).
-            div()
-                .id("diff-scroll")
-                .flex_1()
-                .min_h(px(0.))
-                .overflow_y_scroll()
-                .child(
-                    div()
-                        .flex()
-                        .child(code_pane(true, rows, view, cx))
-                        .child(center_gutter(rows))
-                        .child(code_pane(false, rows, view, cx)),
-                )
-                .into_any_element()
-        }
+        Some(FileDiff::Text { display, .. }) => div()
+            .id("diff-panes")
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .overflow_hidden()
+            .child(code_pane(true, display, view, cx))
+            .child(center_gutter(display, view, cx))
+            .child(code_pane(false, display, view, cx))
+            .into_any_element(),
         Some(FileDiff::Binary) => placeholder("Binary file — no Alignment"),
         Some(FileDiff::Error(msg)) => placeholder(msg),
         None => placeholder("Open Diff from the main window"),
@@ -652,158 +807,187 @@ fn placeholder(msg: &str) -> gpui::AnyElement {
 
 fn code_pane(
     left: bool,
-    rows: &[DisplayRow],
+    display: &DisplayRows,
     view: &DiffView,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
     let id = if left { "code-left" } else { "code-right" };
     let side = if left { Side::Old } else { Side::New };
-    let rows = rows.to_vec();
+    let rows = if left {
+        display.old_rows.clone()
+    } else {
+        display.new_rows.clone()
+    };
+    let empty = rows.is_empty();
+    let other_n = if left {
+        display.new_rows.len()
+    } else {
+        display.old_rows.len()
+    };
+    let gaps = if left {
+        view.old_gaps.clone()
+    } else {
+        view.new_gaps.clone()
+    };
+    let seam = empty_seam(other_n, view.view_h, f32::from(theme::ROW_HEIGHT));
+    let handle = if left {
+        view.old_scroll.clone()
+    } else {
+        view.new_scroll.clone()
+    };
     let drafting_line = view
         .drafting
         .as_ref()
         .and_then(|d| (d.side == side).then_some(d.line));
+    let row_h = f32::from(theme::ROW_HEIGHT);
+    let pad = content_pad(rows.len(), view.view_h, row_h);
+    let measure = left.then(|| cx.entity().downgrade());
 
     div()
-        .id(id)
+        .relative()
         .flex_1()
         .min_w(px(0.))
-        .font_family(theme::MONO_FONT)
-        .text_xs()
-        .children(rows.into_iter().enumerate().map(move |(i, row)| {
-            let empty = if left {
-                row.kind == RowKind::Insert || row.old_ln.is_none()
-            } else {
-                row.kind == RowKind::Delete || row.new_ln.is_none()
-            };
-            let text = if left {
-                row.old_text.clone()
-            } else {
-                row.new_text.clone()
-            };
-            let ln = if left { row.old_ln } else { row.new_ln };
-            let marked = ln.is_some_and(|n| view.has_comment(side, n));
-            let drafting_here = ln.is_some_and(|n| drafting_line == Some(n));
-            let bg = if drafting_here {
-                rgb(0xdbe4ff)
-            } else if empty {
-                theme::gap_bg()
-            } else {
-                match row.kind {
-                    RowKind::Replace => theme::mod_bg(),
-                    RowKind::Insert => theme::add_bg(),
-                    RowKind::Delete => theme::del_bg(),
-                    RowKind::Equal => theme::white(),
-                }
-            };
-            let row_id = if left {
-                ("row-l", i)
-            } else {
-                ("row-r", i)
-            };
-            let mut el = div()
-                .id(row_id)
-                .h(theme::ROW_HEIGHT)
-                .px_3()
-                .bg(bg)
-                .text_color(if empty {
-                    theme::faint()
-                } else {
-                    theme::text()
-                })
-                .overflow_hidden()
-                .when(marked, |d| d.border_l_2().border_color(theme::accent()))
-                .child(if empty {
-                    // Subtle hatch stand-in
-                    "╱".to_string()
-                } else {
-                    text
-                });
-
-            if let Some(line) = ln.filter(|_| !empty) {
-                el = el.cursor_pointer().on_click(cx.listener(move |this, _, window, cx| {
-                    this.begin_draft(side, line, window, cx);
-                }));
-            }
-            el
-        }))
+        .h_full()
+        .child(
+            div()
+                .id(id)
+                .size_full()
+                .overflow_y_scroll()
+                // ponytail: GPUI draws the thumb on the trailing edge. The old pane's
+                // outer-left bar would be a custom thumb; wheel coupling is what the bridges use.
+                .track_scroll(&handle)
+                .on_scroll_wheel(cx.listener(DiffView::on_wheel))
+                .font_family(theme::MONO_FONT)
+                .text_xs()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .children(rows.into_iter().enumerate().map(move |(i, row)| {
+                            let marked = view.has_comment(side, row.ln);
+                            let drafting_here = drafting_line == Some(row.ln);
+                            let bg = if drafting_here {
+                                rgb(0xdbe4ff)
+                            } else {
+                                kind_bg(row.kind)
+                            };
+                            let row_id = if left { ("row-l", i) } else { ("row-r", i) };
+                            let line = row.ln;
+                            div()
+                                .id(row_id)
+                                .h(theme::ROW_HEIGHT)
+                                .px_3()
+                                .bg(bg)
+                                .text_color(theme::text())
+                                .overflow_hidden()
+                                .when(marked, |d| d.border_l_2().border_color(theme::accent()))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.begin_draft(side, line, window, cx);
+                                }))
+                                .child(row.text)
+                        }))
+                        .when(pad > 0., |col| col.child(div().h(px(pad)).w_full())),
+                ),
+        )
+        .child(
+            canvas(
+                move |bounds, _, cx| {
+                    if let Some(measure) = &measure {
+                        let h = f32::from(bounds.size.height);
+                        measure
+                            .update(cx, |this, cx| {
+                                if (this.view_h - h).abs() > 0.5 {
+                                    this.view_h = h;
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                    }
+                },
+                move |bounds, _, window, _| {
+                    paint_gaps(window, bounds, &gaps, empty, seam);
+                },
+            )
+            .absolute()
+            .size_full(),
+        )
 }
 
-fn center_gutter(rows: &[DisplayRow]) -> impl IntoElement {
-    let rows_l = rows.to_vec();
-    let rows_r = rows.to_vec();
-    let ribbons = ribbon_marks(rows);
+fn center_gutter(
+    display: &DisplayRows,
+    view: &DiffView,
+    cx: &mut Context<DiffView>,
+) -> impl IntoElement {
+    let placed = view.placed.clone();
     div()
         .id("gutter")
+        .relative()
+        .overflow_hidden()
         .w(theme::GUTTER_WIDTH)
+        .h_full()
         .flex_none()
-        .flex()
-        .child(ln_col(true, rows_l))
-        .child(ribbon_col(ribbons))
-        .child(ln_col(false, rows_r))
-}
-
-fn ribbon_marks(rows: &[DisplayRow]) -> Vec<&'static str> {
-    let mut out = Vec::with_capacity(rows.len());
-    let mut i = 0;
-    while i < rows.len() {
-        let kind = rows[i].kind;
-        if kind == RowKind::Equal {
-            out.push("");
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < rows.len() && rows[i].kind == kind {
-            i += 1;
-        }
-        for j in start..i {
-            out.push(if j == start { "»" } else { "│" });
-        }
-    }
-    out
-}
-
-fn ribbon_col(marks: Vec<&'static str>) -> impl IntoElement {
-    div()
-        .id("ribbon")
-        .w(px(12.))
-        .flex_none()
-        .font_family(theme::MONO_FONT)
-        .text_xs()
-        .text_color(theme::accent())
-        .flex()
-        .flex_col()
-        .items_center()
-        .children(marks.into_iter().enumerate().map(|(i, m)| {
-            div()
-                .id(("rib", i))
-                .h(theme::ROW_HEIGHT)
-                .child(m)
+        .bg(theme::white())
+        .on_scroll_wheel(cx.listener(DiffView::on_wheel))
+        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            if !hovered && this.hover_copy.take().is_some() {
+                cx.notify();
+            }
         }))
+        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+            let y = f32::from(event.position.y);
+            let copy = this
+                .hover_bands
+                .iter()
+                .find(|band| y >= band.top && y <= band.bottom)
+                .map(|band| band.copy.clone());
+            if this.hover_copy != copy {
+                this.hover_copy = copy;
+                cx.notify();
+            }
+        }))
+        .child(ln_col(true, &display.old_rows, view.applied_old))
+        .child(ln_col(false, &display.new_rows, view.applied_new))
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    window.with_content_mask(
+                        Some(ContentMask { bounds }),
+                        |window| paint_bridges(window, &placed),
+                    );
+                },
+            )
+            .absolute()
+            .top(px(0.))
+            .left(px(LN_COL))
+            .w(px(BRIDGE_COL))
+            .h_full(),
+        )
 }
 
-fn ln_col(left: bool, rows: Vec<DisplayRow>) -> impl IntoElement {
+fn ln_col(left: bool, rows: &[DisplayRow], scroll_top: f32) -> impl IntoElement {
     let id = if left { "ln-left" } else { "ln-right" };
+    let rows = rows.to_vec();
     div()
         .id(id)
-        .flex_1()
+        .absolute()
+        .top(px(-scroll_top))
+        .w(px(LN_COL))
+        .when(left, |col| col.left(px(0.)))
+        .when(!left, |col| col.right(px(0.)))
         .font_family(theme::MONO_FONT)
         .text_size(px(10.))
         .text_color(theme::faint())
-        .when(left, |d| d.text_right().pr_1())
-        .when(!left, |d| d.pl_1())
+        .when(left, |col| col.text_right().pr_1())
+        .when(!left, |col| col.pl_1())
         .children(rows.into_iter().enumerate().map(move |(i, row)| {
-            let ln = if left { row.old_ln } else { row.new_ln };
-            let ln_id = if left {
-                ("ln-l", i)
-            } else {
-                ("ln-r", i)
-            };
+            let ln_id = if left { ("ln-l", i) } else { ("ln-r", i) };
             div()
                 .id(ln_id)
                 .h(theme::ROW_HEIGHT)
-                .child(ln.map(|n| n.to_string()).unwrap_or_default())
+                .child(row.ln.to_string())
         }))
 }
 
@@ -891,4 +1075,338 @@ fn traffic_lights_space() -> Option<Div> {
 #[cfg(not(target_os = "macos"))]
 fn traffic_lights_space() -> Option<Div> {
     None
+}
+
+fn kind_bg(kind: RowKind) -> gpui::Rgba {
+    match kind {
+        RowKind::Replace => theme::mod_bg(),
+        RowKind::Insert => theme::add_bg(),
+        RowKind::Delete => theme::del_bg(),
+        RowKind::Equal => theme::white(),
+    }
+}
+
+/// Viewport Y of an empty side's only seam. A short opposite file cannot scroll
+/// its last line down to the one-third anchor, so the seam sits on that line.
+fn empty_seam(other_n: usize, view_h: f32, row_h: f32) -> f32 {
+    let anchor = view_h / 3.;
+    if other_n == 0 {
+        return anchor;
+    }
+    ((other_n as f32 - 1.) * row_h).min(anchor)
+}
+
+fn content_pad(n: usize, view_h: f32, row_h: f32) -> f32 {
+    if n == 0 || view_h < 1. {
+        return 0.;
+    }
+    let anchor = view_h / 3.;
+    (view_h - anchor - row_h).max(0.)
+}
+
+fn max_scroll(n: usize, anchor: f32, row_h: f32) -> f32 {
+    if n == 0 {
+        0.
+    } else {
+        ((n as f32 - 1.) * row_h - anchor).max(0.)
+    }
+}
+
+fn track(content_y: f32, n: usize, anchor: f32, row_h: f32) -> f32 {
+    (content_y - anchor).clamp(0., max_scroll(n, anchor, row_h))
+}
+
+fn content_from_scroll(scroll_top: f32, n: usize, anchor: f32, row_h: f32) -> f32 {
+    if n == 0 || scroll_top <= 0. {
+        return 0.;
+    }
+    let max = max_scroll(n, anchor, row_h);
+    if scroll_top >= max - 0.5 {
+        n as f32 * row_h
+    } else {
+        scroll_top + anchor
+    }
+}
+
+fn interp(s: f32, knots: &[ScrollKnot], row_h: f32) -> (f32, f32) {
+    let Some(first) = knots.first() else {
+        return (0., 0.);
+    };
+    if s <= first.s as f32 * row_h {
+        return (first.old_y as f32 * row_h, first.new_y as f32 * row_h);
+    }
+    let last = knots[knots.len() - 1];
+    if s >= last.s as f32 * row_h {
+        return (last.old_y as f32 * row_h, last.new_y as f32 * row_h);
+    }
+    for i in 1..knots.len() {
+        let a = knots[i - 1];
+        let b = knots[i];
+        let a_s = a.s as f32 * row_h;
+        let b_s = b.s as f32 * row_h;
+        if s <= b_s {
+            let t = if b_s == a_s { 0. } else { (s - a_s) / (b_s - a_s) };
+            let old = (a.old_y as f32 + t * (b.old_y as f32 - a.old_y as f32)) * row_h;
+            let new = (a.new_y as f32 + t * (b.new_y as f32 - a.new_y as f32)) * row_h;
+            return (old, new);
+        }
+    }
+    (last.old_y as f32 * row_h, last.new_y as f32 * row_h)
+}
+
+fn s_from(old_side: bool, content_px: f32, knots: &[ScrollKnot], row_h: f32, current_s: f32) -> f32 {
+    let (cur_old, cur_new) = interp(current_s, knots, row_h);
+    let cur = if old_side { cur_old } else { cur_new };
+    if (cur - content_px).abs() < 0.5 {
+        return current_s;
+    }
+    let content_rows = content_px / row_h;
+    for i in 1..knots.len() {
+        let a = knots[i - 1];
+        let b = knots[i];
+        let (a_y, b_y) = if old_side {
+            (a.old_y, b.old_y)
+        } else {
+            (a.new_y, b.new_y)
+        };
+        if b_y > a_y {
+            let a_yf = a_y as f32;
+            let b_yf = b_y as f32;
+            if content_rows >= a_yf && content_rows <= b_yf {
+                let t = (content_rows - a_yf) / (b_yf - a_yf);
+                return (a.s as f32 + t * (b.s as f32 - a.s as f32)) * row_h;
+            }
+        }
+    }
+    let end = knots[knots.len() - 1];
+    let end_y = if old_side { end.old_y } else { end.new_y };
+    if content_rows >= end_y as f32 {
+        end.s as f32 * row_h
+    } else {
+        0.
+    }
+}
+
+fn gap_intervals(
+    old_pane: bool,
+    bridges: &[Bridge],
+    old_n: usize,
+    new_n: usize,
+    old_scroll: f32,
+    new_scroll: f32,
+    view_h: f32,
+    row_h: f32,
+) -> Vec<(f32, f32)> {
+    let n = if old_pane { old_n } else { new_n };
+    if n == 0 && view_h > 0. {
+        return vec![(0., view_h)];
+    }
+    let mut out = Vec::new();
+    for bridge in bridges {
+        let (y0, y1, cover_scroll, cover_n) = match bridge {
+            Bridge::Insert { new_from, new_to, .. } if old_pane => (
+                *new_from as f32 * row_h - new_scroll,
+                *new_to as f32 * row_h - new_scroll,
+                old_scroll,
+                old_n,
+            ),
+            Bridge::Delete { old_from, old_to, .. } if !old_pane => (
+                *old_from as f32 * row_h - old_scroll,
+                *old_to as f32 * row_h - old_scroll,
+                new_scroll,
+                new_n,
+            ),
+            _ => continue,
+        };
+        let covered = (-cover_scroll, cover_n as f32 * row_h - cover_scroll);
+        for (a, b) in subtract_span((y0, y1), covered) {
+            let top = a.max(0.);
+            let bot = b.min(view_h);
+            if bot - top > 0.5 {
+                out.push((top, bot));
+            }
+        }
+    }
+    out
+}
+
+fn subtract_span(span: (f32, f32), cover: (f32, f32)) -> Vec<(f32, f32)> {
+    let (a, b) = span;
+    let (c, d) = cover;
+    if b <= a {
+        return Vec::new();
+    }
+    if d <= c || b <= c || a >= d {
+        return vec![(a, b)];
+    }
+    let mut parts = Vec::new();
+    if a < c {
+        parts.push((a, c.min(b)));
+    }
+    if b > d {
+        parts.push((d.max(a), b));
+    }
+    parts
+}
+
+fn place_bridge(
+    bridge: &Bridge,
+    old_n: usize,
+    new_n: usize,
+    old_scroll: f32,
+    new_scroll: f32,
+    old_pane: f32,
+    new_pane: f32,
+    view_h: f32,
+    row_h: f32,
+    x_l: f32,
+    x_r: f32,
+) -> Option<PlacedBridge> {
+    let content_y = |rows: f32, scroll: f32, pane: f32| pane + rows * row_h - scroll;
+    let edge_y = |rows: f32, n: usize, other_n: usize, scroll: f32, pane: f32| {
+        if n == 0 {
+            pane + empty_seam(other_n, view_h, row_h)
+        } else {
+            content_y(rows, scroll, pane)
+        }
+    };
+    let (kind, points) = match *bridge {
+        Bridge::Insert {
+            old_seam,
+            new_from,
+            new_to,
+            ..
+        } => {
+            if new_to <= new_from {
+                return None;
+            }
+            (
+                RowKind::Insert,
+                vec![
+                    (
+                        x_l,
+                        edge_y(old_seam as f32, old_n, new_n, old_scroll, old_pane),
+                    ),
+                    (x_r, content_y(new_from as f32, new_scroll, new_pane)),
+                    (x_r, content_y(new_to as f32, new_scroll, new_pane)),
+                ],
+            )
+        }
+        Bridge::Delete {
+            old_from,
+            old_to,
+            new_seam,
+            ..
+        } => {
+            if old_to <= old_from {
+                return None;
+            }
+            (
+                RowKind::Delete,
+                vec![
+                    (x_l, content_y(old_from as f32, old_scroll, old_pane)),
+                    (
+                        x_r,
+                        edge_y(new_seam as f32, new_n, old_n, new_scroll, new_pane),
+                    ),
+                    (x_l, content_y(old_to as f32, old_scroll, old_pane)),
+                ],
+            )
+        }
+        Bridge::Replace {
+            old_from,
+            old_to,
+            new_from,
+            new_to,
+            ..
+        } => {
+            if old_to <= old_from && new_to <= new_from {
+                return None;
+            }
+            (
+                RowKind::Replace,
+                vec![
+                    (
+                        x_l,
+                        edge_y(old_from as f32, old_n, new_n, old_scroll, old_pane),
+                    ),
+                    (
+                        x_r,
+                        edge_y(new_from as f32, new_n, old_n, new_scroll, new_pane),
+                    ),
+                    (
+                        x_r,
+                        edge_y(new_to as f32, new_n, old_n, new_scroll, new_pane),
+                    ),
+                    (
+                        x_l,
+                        edge_y(old_to as f32, old_n, new_n, old_scroll, old_pane),
+                    ),
+                ],
+            )
+        }
+    };
+    Some(PlacedBridge { kind, points })
+}
+
+fn paint_bridges(window: &mut Window, placed: &[PlacedBridge]) {
+    for bridge in placed {
+        if bridge.points.len() < 3 {
+            continue;
+        }
+        let pts: Vec<_> = bridge
+            .points
+            .iter()
+            .map(|(x, y)| point(px(*x), px(*y)))
+            .collect();
+        let mut path = PathBuilder::fill();
+        path.add_polygon(&pts, true);
+        if let Ok(path) = path.build() {
+            window.paint_path(path, kind_bg(bridge.kind));
+        }
+    }
+}
+
+fn paint_gaps(
+    window: &mut Window,
+    bounds: Bounds<gpui::Pixels>,
+    gaps: &[(f32, f32)],
+    empty: bool,
+    seam: f32,
+) {
+    for &(y0, y1) in gaps {
+        if y1 - y0 < 0.5 {
+            continue;
+        }
+        let rect = Bounds {
+            origin: point(bounds.left(), bounds.top() + px(y0)),
+            size: size(bounds.size.width, px(y1 - y0)),
+        };
+        window.paint_quad(fill(rect, theme::gap_bg()));
+        window.with_content_mask(Some(ContentMask { bounds: rect }), |window| {
+            let width = f32::from(rect.size.width);
+            let left = f32::from(rect.left());
+            let top = f32::from(rect.top());
+            let bottom = f32::from(rect.bottom());
+            let mut y = top - width;
+            while y < bottom {
+                let mut stroke = PathBuilder::stroke(px(1.));
+                stroke.move_to(point(px(left), px(y)));
+                stroke.line_to(point(px(left + width), px(y + width)));
+                if let Ok(path) = stroke.build() {
+                    window.paint_path(path, theme::faint());
+                }
+                y += 7.;
+            }
+        });
+    }
+    if empty {
+        let y = bounds.top() + px(seam);
+        let mut stroke = PathBuilder::stroke(px(2.));
+        stroke.move_to(point(bounds.left() + px(8.), y));
+        stroke.line_to(point(bounds.right() - px(8.), y));
+        if let Ok(path) = stroke.build() {
+            window.paint_path(path, rgb(0x8aa0b8));
+        }
+    }
 }

@@ -207,14 +207,92 @@ pub enum RowKind {
     Replace,
 }
 
-/// Dual-pane display row projected from Alignment + file text.
+/// One visual line on one side. Not a shared old+new row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisplayRow {
-    pub old_ln: Option<u32>,
-    pub new_ln: Option<u32>,
-    pub old_text: String,
-    pub new_text: String,
+    pub ln: u32,
+    pub text: String,
     pub kind: RowKind,
+}
+
+/// Center-gutter bridge for one Alignment op. Row offsets are content rows
+/// (end exclusive). A seam has no rows on that side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Bridge {
+    Insert {
+        after_old: u32,
+        news: LineSpan,
+        old_seam: u32,
+        new_from: u32,
+        new_to: u32,
+    },
+    Delete {
+        olds: LineSpan,
+        at_new: u32,
+        old_from: u32,
+        old_to: u32,
+        new_seam: u32,
+    },
+    Replace {
+        olds: LineSpan,
+        news: LineSpan,
+        old_from: u32,
+        old_to: u32,
+        new_from: u32,
+        new_to: u32,
+    },
+}
+
+impl Bridge {
+    /// Short position copy for hover/status. Same facts as the op, not a second model.
+    pub fn position_copy(&self) -> String {
+        match *self {
+            Self::Insert { after_old, news, .. } => {
+                let after = if after_old == 0 {
+                    "file start".to_string()
+                } else {
+                    format!("old {after_old}")
+                };
+                format!("Insert new {} after {after}", span_label(news))
+            }
+            Self::Delete { olds, at_new, .. } => {
+                format!("Delete old {} at new {at_new}", span_label(olds))
+            }
+            Self::Replace { olds, news, .. } => {
+                format!("Replace old {} ↔ new {}", span_label(olds), span_label(news))
+            }
+        }
+    }
+}
+
+fn span_label(span: LineSpan) -> String {
+    if span.count <= 1 {
+        format!("{}", span.start)
+    } else {
+        format!(
+            "{}\u{2013}{}",
+            span.start,
+            span.start + span.count.saturating_sub(1)
+        )
+    }
+}
+
+/// Shared scroll parameter knots, in row units. `s` advances once per visual
+/// step; a side that does not gain a row stays put on that step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollKnot {
+    pub s: u32,
+    pub old_y: u32,
+    pub new_y: u32,
+}
+
+/// Per-side rows plus the connector layout those rows imply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayRows {
+    pub old_rows: Vec<DisplayRow>,
+    pub new_rows: Vec<DisplayRow>,
+    pub bridges: Vec<Bridge>,
+    pub knots: Vec<ScrollKnot>,
 }
 
 /// Which side of a Comparison a line Anchor refers to.
@@ -344,74 +422,151 @@ pub fn split_lines(text: &str) -> Vec<&str> {
     }
 }
 
-/// Project Alignment into dual-pane rows (replace is many-to-many padded).
-pub fn display_rows(old_text: &str, new_text: &str, alignment: &Alignment) -> Vec<DisplayRow> {
+fn line_text(lines: &[&str], ln: u32) -> String {
+    lines
+        .get(ln.saturating_sub(1) as usize)
+        .unwrap_or(&"")
+        .to_string()
+}
+
+fn push_side(rows: &mut Vec<DisplayRow>, lines: &[&str], span: LineSpan, kind: RowKind) {
+    for i in 0..span.count {
+        let ln = span.start + i;
+        rows.push(DisplayRow {
+            ln,
+            text: line_text(lines, ln),
+            kind,
+        });
+    }
+}
+
+fn advance(knots: &mut Vec<ScrollKnot>, old_y: &mut u32, new_y: &mut u32, d_old: u32, d_new: u32) {
+    if d_old == 0 && d_new == 0 {
+        return;
+    }
+    *old_y += d_old;
+    *new_y += d_new;
+    let s = knots.last().map(|k| k.s).unwrap_or(0) + d_old.max(d_new);
+    knots.push(ScrollKnot {
+        s,
+        old_y: *old_y,
+        new_y: *new_y,
+    });
+}
+
+/// Project Alignment into per-side rows and one bridge per change op.
+///
+/// Equal lines are one row on each side. Insert rows exist only on the new
+/// side, delete rows only on the old side. A Replace is one block: the old
+/// lines stacked, the new lines stacked, with no invented partner row on the
+/// shorter side.
+pub fn display_rows(old_text: &str, new_text: &str, alignment: &Alignment) -> DisplayRows {
     let old_lines = split_lines(old_text);
     let new_lines = split_lines(new_text);
-    let mut rows = Vec::new();
+    let mut old_rows = Vec::new();
+    let mut new_rows = Vec::new();
+    let mut bridges = Vec::new();
+    let mut knots = vec![ScrollKnot {
+        s: 0,
+        old_y: 0,
+        new_y: 0,
+    }];
+    let mut old_y = 0u32;
+    let mut new_y = 0u32;
 
     for op in &alignment.ops {
         match *op {
             AlignmentOp::Equal { old, new } => {
-                for i in 0..old.count {
-                    let oi = (old.start - 1 + i) as usize;
-                    let ni = (new.start - 1 + i) as usize;
-                    rows.push(DisplayRow {
-                        old_ln: Some(old.start + i),
-                        new_ln: Some(new.start + i),
-                        old_text: old_lines.get(oi).unwrap_or(&"").to_string(),
-                        new_text: new_lines.get(ni).unwrap_or(&"").to_string(),
-                        kind: RowKind::Equal,
-                    });
-                }
+                let n = old.count.min(new.count);
+                push_side(
+                    &mut old_rows,
+                    &old_lines,
+                    LineSpan {
+                        start: old.start,
+                        count: n,
+                    },
+                    RowKind::Equal,
+                );
+                push_side(
+                    &mut new_rows,
+                    &new_lines,
+                    LineSpan {
+                        start: new.start,
+                        count: n,
+                    },
+                    RowKind::Equal,
+                );
+                advance(&mut knots, &mut old_y, &mut new_y, n, n);
             }
-            AlignmentOp::Delete { olds, .. } => {
-                for i in 0..olds.count {
-                    let oi = (olds.start - 1 + i) as usize;
-                    rows.push(DisplayRow {
-                        old_ln: Some(olds.start + i),
-                        new_ln: None,
-                        old_text: old_lines.get(oi).unwrap_or(&"").to_string(),
-                        new_text: String::new(),
-                        kind: RowKind::Delete,
-                    });
-                }
+            AlignmentOp::Insert { after_old, news } => {
+                let old_seam = old_y;
+                let new_from = new_y;
+                push_side(&mut new_rows, &new_lines, news, RowKind::Insert);
+                advance(&mut knots, &mut old_y, &mut new_y, 0, news.count);
+                bridges.push(Bridge::Insert {
+                    after_old,
+                    news,
+                    old_seam,
+                    new_from,
+                    new_to: new_y,
+                });
             }
-            AlignmentOp::Insert { news, .. } => {
-                for i in 0..news.count {
-                    let ni = (news.start - 1 + i) as usize;
-                    rows.push(DisplayRow {
-                        old_ln: None,
-                        new_ln: Some(news.start + i),
-                        old_text: String::new(),
-                        new_text: new_lines.get(ni).unwrap_or(&"").to_string(),
-                        kind: RowKind::Insert,
-                    });
-                }
+            AlignmentOp::Delete { olds, at_new } => {
+                let old_from = old_y;
+                let new_seam = new_y;
+                push_side(&mut old_rows, &old_lines, olds, RowKind::Delete);
+                advance(&mut knots, &mut old_y, &mut new_y, olds.count, 0);
+                bridges.push(Bridge::Delete {
+                    olds,
+                    at_new,
+                    old_from,
+                    old_to: old_y,
+                    new_seam,
+                });
             }
             AlignmentOp::Replace { olds, news } => {
-                let n = olds.count.max(news.count);
-                for i in 0..n {
-                    let old_ln = (i < olds.count).then_some(olds.start + i);
-                    let new_ln = (i < news.count).then_some(news.start + i);
-                    let old_text = old_ln
-                        .map(|ln| old_lines.get((ln - 1) as usize).unwrap_or(&"").to_string())
-                        .unwrap_or_default();
-                    let new_text = new_ln
-                        .map(|ln| new_lines.get((ln - 1) as usize).unwrap_or(&"").to_string())
-                        .unwrap_or_default();
-                    rows.push(DisplayRow {
-                        old_ln,
-                        new_ln,
-                        old_text,
-                        new_text,
-                        kind: RowKind::Replace,
-                    });
+                let old_from = old_y;
+                let new_from = new_y;
+                push_side(&mut old_rows, &old_lines, olds, RowKind::Replace);
+                push_side(&mut new_rows, &new_lines, news, RowKind::Replace);
+                let common = olds.count.min(news.count);
+                advance(&mut knots, &mut old_y, &mut new_y, common, common);
+                if olds.count > common {
+                    advance(
+                        &mut knots,
+                        &mut old_y,
+                        &mut new_y,
+                        olds.count - common,
+                        0,
+                    );
                 }
+                if news.count > common {
+                    advance(
+                        &mut knots,
+                        &mut old_y,
+                        &mut new_y,
+                        0,
+                        news.count - common,
+                    );
+                }
+                bridges.push(Bridge::Replace {
+                    olds,
+                    news,
+                    old_from,
+                    old_to: old_y,
+                    new_from,
+                    new_to: new_y,
+                });
             }
         }
     }
-    rows
+
+    DisplayRows {
+        old_rows,
+        new_rows,
+        bridges,
+        knots,
+    }
 }
 
 #[cfg(test)]
@@ -454,5 +609,319 @@ mod tests {
         review.ensure_comparison(other.clone());
         assert!(review.comments.is_empty());
         assert_eq!(review.comparison, other);
+    }
+
+    #[test]
+    fn insert_at_file_start_puts_new_lines_only_on_the_new_side() {
+        let display = display_rows(
+            "alpha\nbeta\n",
+            "HEAD\nNECK\nalpha\nbeta\n",
+            &Alignment {
+                ops: vec![
+                    AlignmentOp::Insert {
+                        after_old: 0,
+                        news: LineSpan { start: 1, count: 2 },
+                    },
+                    AlignmentOp::Equal {
+                        old: LineSpan { start: 1, count: 2 },
+                        new: LineSpan { start: 3, count: 2 },
+                    },
+                ],
+            },
+        );
+        assert_eq!(
+            display.old_rows,
+            vec![
+                DisplayRow {
+                    ln: 1,
+                    text: "alpha".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 2,
+                    text: "beta".into(),
+                    kind: RowKind::Equal,
+                },
+            ]
+        );
+        assert_eq!(
+            display.new_rows,
+            vec![
+                DisplayRow {
+                    ln: 1,
+                    text: "HEAD".into(),
+                    kind: RowKind::Insert,
+                },
+                DisplayRow {
+                    ln: 2,
+                    text: "NECK".into(),
+                    kind: RowKind::Insert,
+                },
+                DisplayRow {
+                    ln: 3,
+                    text: "alpha".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 4,
+                    text: "beta".into(),
+                    kind: RowKind::Equal,
+                },
+            ]
+        );
+        assert_eq!(
+            display.bridges,
+            vec![Bridge::Insert {
+                after_old: 0,
+                news: LineSpan { start: 1, count: 2 },
+                old_seam: 0,
+                new_from: 0,
+                new_to: 2,
+            }]
+        );
+        assert_eq!(
+            display.bridges[0].position_copy(),
+            "Insert new 1\u{2013}2 after file start"
+        );
+    }
+
+    #[test]
+    fn insert_at_file_end_anchors_after_the_last_old_line() {
+        let old: String = (1..=15).map(|i| format!("L{i}")).collect::<Vec<_>>().join("\n");
+        let new = format!("{old}\nN16\nN17\nN18");
+        let display = display_rows(
+            &old,
+            &new,
+            &Alignment {
+                ops: vec![
+                    AlignmentOp::Equal {
+                        old: LineSpan { start: 1, count: 15 },
+                        new: LineSpan { start: 1, count: 15 },
+                    },
+                    AlignmentOp::Insert {
+                        after_old: 15,
+                        news: LineSpan { start: 16, count: 3 },
+                    },
+                ],
+            },
+        );
+        assert_eq!(display.old_rows.len(), 15);
+        assert!(display.old_rows.iter().all(|row| row.kind == RowKind::Equal));
+        assert_eq!(display.old_rows[0].ln, 1);
+        assert_eq!(display.old_rows[14].ln, 15);
+        assert_eq!(
+            &display.new_rows[15..],
+            &[
+                DisplayRow {
+                    ln: 16,
+                    text: "N16".into(),
+                    kind: RowKind::Insert,
+                },
+                DisplayRow {
+                    ln: 17,
+                    text: "N17".into(),
+                    kind: RowKind::Insert,
+                },
+                DisplayRow {
+                    ln: 18,
+                    text: "N18".into(),
+                    kind: RowKind::Insert,
+                },
+            ]
+        );
+        assert_eq!(
+            display.bridges,
+            vec![Bridge::Insert {
+                after_old: 15,
+                news: LineSpan { start: 16, count: 3 },
+                old_seam: 15,
+                new_from: 15,
+                new_to: 18,
+            }]
+        );
+        assert_eq!(
+            display.bridges[0].position_copy(),
+            "Insert new 16\u{2013}18 after old 15"
+        );
+    }
+
+    #[test]
+    fn delete_rows_appear_only_on_the_old_side() {
+        let display = display_rows(
+            "keep\ngone-a\ngone-b\nkeep2\n",
+            "keep\nkeep2\n",
+            &Alignment {
+                ops: vec![
+                    AlignmentOp::Equal {
+                        old: LineSpan { start: 1, count: 1 },
+                        new: LineSpan { start: 1, count: 1 },
+                    },
+                    AlignmentOp::Delete {
+                        olds: LineSpan { start: 2, count: 2 },
+                        at_new: 2,
+                    },
+                    AlignmentOp::Equal {
+                        old: LineSpan { start: 4, count: 1 },
+                        new: LineSpan { start: 2, count: 1 },
+                    },
+                ],
+            },
+        );
+        assert_eq!(
+            display.old_rows,
+            vec![
+                DisplayRow {
+                    ln: 1,
+                    text: "keep".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 2,
+                    text: "gone-a".into(),
+                    kind: RowKind::Delete,
+                },
+                DisplayRow {
+                    ln: 3,
+                    text: "gone-b".into(),
+                    kind: RowKind::Delete,
+                },
+                DisplayRow {
+                    ln: 4,
+                    text: "keep2".into(),
+                    kind: RowKind::Equal,
+                },
+            ]
+        );
+        assert_eq!(
+            display.new_rows,
+            vec![
+                DisplayRow {
+                    ln: 1,
+                    text: "keep".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 2,
+                    text: "keep2".into(),
+                    kind: RowKind::Equal,
+                },
+            ]
+        );
+        assert_eq!(
+            display.bridges,
+            vec![Bridge::Delete {
+                olds: LineSpan { start: 2, count: 2 },
+                at_new: 2,
+                old_from: 1,
+                old_to: 3,
+                new_seam: 1,
+            }]
+        );
+        assert_eq!(
+            display.bridges[0].position_copy(),
+            "Delete old 2\u{2013}3 at new 2"
+        );
+    }
+
+    #[test]
+    fn replace_three_old_lines_with_one_new_line_has_no_partner_rows() {
+        let display = display_rows(
+            "old-a\nold-b\nold-c\n",
+            "new-a\n",
+            &Alignment {
+                ops: vec![AlignmentOp::Replace {
+                    olds: LineSpan { start: 1, count: 3 },
+                    news: LineSpan { start: 1, count: 1 },
+                }],
+            },
+        );
+        assert_eq!(
+            display.old_rows,
+            vec![
+                DisplayRow {
+                    ln: 1,
+                    text: "old-a".into(),
+                    kind: RowKind::Replace,
+                },
+                DisplayRow {
+                    ln: 2,
+                    text: "old-b".into(),
+                    kind: RowKind::Replace,
+                },
+                DisplayRow {
+                    ln: 3,
+                    text: "old-c".into(),
+                    kind: RowKind::Replace,
+                },
+            ]
+        );
+        assert_eq!(
+            display.new_rows,
+            vec![DisplayRow {
+                ln: 1,
+                text: "new-a".into(),
+                kind: RowKind::Replace,
+            }]
+        );
+        assert_eq!(
+            display.bridges,
+            vec![Bridge::Replace {
+                olds: LineSpan { start: 1, count: 3 },
+                news: LineSpan { start: 1, count: 1 },
+                old_from: 0,
+                old_to: 3,
+                new_from: 0,
+                new_to: 1,
+            }]
+        );
+        assert_eq!(
+            display.bridges[0].position_copy(),
+            "Replace old 1\u{2013}3 ↔ new 1"
+        );
+    }
+
+    #[test]
+    fn equal_lines_are_one_row_on_each_side_with_paired_line_numbers() {
+        let display = display_rows(
+            "w\nx\ny\nsame\nstill\n",
+            "a\nb\nc\nd\ne\nf\ng\nh\nsame\nstill\n",
+            &Alignment {
+                ops: vec![AlignmentOp::Equal {
+                    old: LineSpan { start: 4, count: 2 },
+                    new: LineSpan { start: 9, count: 2 },
+                }],
+            },
+        );
+        assert_eq!(
+            display.old_rows,
+            vec![
+                DisplayRow {
+                    ln: 4,
+                    text: "same".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 5,
+                    text: "still".into(),
+                    kind: RowKind::Equal,
+                },
+            ]
+        );
+        assert_eq!(
+            display.new_rows,
+            vec![
+                DisplayRow {
+                    ln: 9,
+                    text: "same".into(),
+                    kind: RowKind::Equal,
+                },
+                DisplayRow {
+                    ln: 10,
+                    text: "still".into(),
+                    kind: RowKind::Equal,
+                },
+            ]
+        );
+        assert!(display.bridges.is_empty());
     }
 }

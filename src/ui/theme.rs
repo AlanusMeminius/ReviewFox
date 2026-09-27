@@ -7,7 +7,7 @@ pub const FILES_WIDTH: Pixels = gpui::px(280.);
 pub const DIFF_TREE_WIDTH: Pixels = gpui::px(200.);
 pub const CHROME_HEIGHT: Pixels = gpui::px(36.);
 pub const TOGGLE_SIZE: Pixels = gpui::px(26.);
-pub const GUTTER_WIDTH: Pixels = gpui::px(64.);
+pub const GUTTER_WIDTH: Pixels = gpui::px(88.);
 pub const ROW_HEIGHT: Pixels = gpui::px(20.);
 
 /// Prototype A fonts; OS falls back if not installed.
@@ -60,9 +60,9 @@ pub fn add_bg() -> Rgba {
     rgb(0xe8f7ee)
 }
 pub fn del_bg() -> Rgba {
-    rgb(0xfdeceb)
+    // Prototype delete tint: grey, same color the connector uses.
+    rgb(0xd8dce1)
 }
 pub fn gap_bg() -> Rgba {
-    // ponytail: flat stand-in for prototype diagonal hatch
     rgb(0xe8eaef)
 }

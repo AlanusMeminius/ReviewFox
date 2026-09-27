@@ -1,7 +1,7 @@
 //! git2 adapter: Repository / Comparison I/O → domain types. No UI chrome.
 
 use crate::domain::{
-    Alignment, AlignmentOp, ChangedPath, Comparison, DisplayRow, LineSpan, Oid, PathStatus,
+    Alignment, AlignmentOp, ChangedPath, Comparison, DisplayRows, LineSpan, Oid, PathStatus,
     Repository, Side, ViewOptions, display_rows, split_lines,
 };
 use crate::workspace_store::{self, WorkspaceEntry};
@@ -512,7 +512,7 @@ pub fn is_binary(data: &[u8]) -> bool {
 #[derive(Clone, Debug)]
 pub enum FileDiff {
     Text {
-        rows: Vec<DisplayRow>,
+        display: DisplayRows,
         hunk_count: usize,
     },
     Binary,
@@ -556,8 +556,11 @@ fn file_diff_inner(
     let new_text = String::from_utf8_lossy(&new_bytes);
     let alignment = compute_alignment(&old_text, &new_text, options);
     let hunk_count = alignment.hunks().len();
-    let rows = display_rows(&old_text, &new_text, &alignment);
-    Ok(FileDiff::Text { rows, hunk_count })
+    let display = display_rows(&old_text, &new_text, &alignment);
+    Ok(FileDiff::Text {
+        display,
+        hunk_count,
+    })
 }
 
 pub fn compute_alignment(old_text: &str, new_text: &str, options: &ViewOptions) -> Alignment {
@@ -707,9 +710,14 @@ mod tests {
             &ViewOptions::default(),
         );
         match diff {
-            FileDiff::Text { rows, hunk_count } => {
+            FileDiff::Text { display, hunk_count } => {
                 assert!(hunk_count >= 1);
-                assert!(rows.iter().any(|r| r.kind == crate::domain::RowKind::Insert));
+                assert!(
+                    display
+                        .new_rows
+                        .iter()
+                        .any(|r| r.kind == crate::domain::RowKind::Insert)
+                );
             }
             other => panic!("expected text diff, got {other:?}"),
         }
