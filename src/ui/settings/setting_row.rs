@@ -1,5 +1,6 @@
 use gpui::{AnyElement, App, ElementId, SharedString, Window, div, prelude::*, px, relative};
 
+use crate::ui::appearance::UiTextSize;
 use crate::ui::theme;
 
 /// One setting (Zed `render_settings_item_layout`): title + description on the
@@ -59,7 +60,7 @@ impl SettingRow {
 }
 
 impl RenderOnce for SettingRow {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         div()
             .id(self.id)
             .flex()
@@ -92,7 +93,7 @@ impl RenderOnce for SettingRow {
                             .flex_row()
                             .items_center()
                             .gap_1()
-                            .text_size(px(14.))
+                            .ui_text_size(14., cx)
                             .text_color(theme::text())
                             .child(self.title)
                             .children(self.title_action),
@@ -100,7 +101,7 @@ impl RenderOnce for SettingRow {
                     .when_some(self.description, |left, description| {
                         left.child(
                             div()
-                                .text_size(px(12.))
+                                .ui_text_size(12., cx)
                                 .text_color(theme::muted())
                                 .child(description),
                         )

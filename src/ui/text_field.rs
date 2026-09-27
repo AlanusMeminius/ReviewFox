@@ -9,7 +9,8 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{appearance, theme};
+use super::appearance::{self, UiTextSize};
+use super::theme;
 
 actions!(
     text_field,
@@ -700,7 +701,7 @@ impl Render for TextField {
             .border_1()
             .border_color(theme::line())
             .rounded(px(6.))
-            .text_size(px(13.))
+            .ui_text_size(13., cx)
             .font_family(appearance::ui_font(cx))
             .child(TextElement { input: cx.entity() })
     }

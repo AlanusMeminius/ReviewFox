@@ -19,7 +19,8 @@ use crate::ui::gitlab_connection::{self, GitLabConnection};
 use crate::ui::mac_column_vibrancy::ColumnVibrancy;
 use crate::ui::scrollbar;
 use crate::ui::text_field::{TextField, TextFieldEvent, TextFieldStyle};
-use crate::ui::{appearance, theme};
+use crate::ui::appearance::{self, UiTextSize};
+use crate::ui::theme;
 use crate::ui::window_controls::window_controls;
 
 actions!(
@@ -443,7 +444,7 @@ impl SettingsView {
                             .flex_none()
                             .pt(px(8.))
                             .pb(px(12.))
-                            .text_size(px(16.))
+                            .ui_text_size(16., cx)
                             .text_color(theme::text())
                             .child(page.title),
                     )
@@ -611,6 +612,8 @@ impl Render for SettingsView {
             // clear so it is not painted twice.
             .bg(theme::frost())
             .font_family(appearance::ui_font(cx))
+            // Unsized UI text inherits gpui's 1rem default (16px), scaled like the rest.
+            .ui_text_size(16., cx)
             .text_color(theme::text())
             .child(render_titlebar(window))
             .child(

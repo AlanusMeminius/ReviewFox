@@ -5,6 +5,7 @@ use gpui::{
     Stateful, Window, div, prelude::*, px, rgb,
 };
 
+use super::appearance::UiTextSize;
 use super::theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,18 +14,18 @@ pub struct Item {
     pub value: String,
 }
 
-pub fn row(items: Vec<Item>) -> Div {
+pub fn row(items: Vec<Item>, cx: &App) -> Div {
     div()
         .flex()
         .flex_wrap()
         .items_center()
         .gap_3()
-        .children(items.into_iter().map(render_item))
+        .children(items.into_iter().map(|item| render_item(item, cx)))
 }
 
 /// Compact semantic badge used for statuses and other short values.
 /// Keep the palette intentionally soft so the text remains the primary signal.
-pub fn capsule(value: impl Into<String>) -> Div {
+pub fn capsule(value: impl Into<String>, cx: &App) -> Div {
     let value = value.into();
     let (background, foreground) = capsule_colors(&value);
     div()
@@ -33,7 +34,7 @@ pub fn capsule(value: impl Into<String>) -> Div {
         .py(px(1.))
         .rounded(px(4.))
         .bg(rgb(background))
-        .text_xs()
+        .ui_text_size(12., cx)
         .line_height(px(15.))
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(foreground))
@@ -42,10 +43,10 @@ pub fn capsule(value: impl Into<String>) -> Div {
 
 /// The id doubles as a copy affordance, so it is the one value rendered as an
 /// interactive capsule instead of a plain one.
-fn copyable_capsule(value: impl Into<String>) -> Stateful<Div> {
+fn copyable_capsule(value: impl Into<String>, cx: &App) -> Stateful<Div> {
     let value = value.into();
     let copied = value.clone();
-    capsule(value.clone())
+    capsule(value.clone(), cx)
         .id(SharedString::from(format!("copy-metadata-{value}")))
         .debug_selector(move || format!("metadata-copy-{value}"))
         .cursor_pointer()
@@ -60,13 +61,13 @@ fn copyable_capsule(value: impl Into<String>) -> Stateful<Div> {
 struct CopyTooltip;
 
 impl Render for CopyTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .px_2()
             .py_1()
             .rounded_md()
             .bg(rgb(0x273142))
-            .text_xs()
+            .ui_text_size(12., cx)
             .text_color(theme::white())
             .child("Click to copy")
     }
@@ -76,11 +77,11 @@ fn is_copyable(label: &str) -> bool {
     label == "ID"
 }
 
-fn render_item(item: Item) -> Div {
+fn render_item(item: Item, cx: &App) -> Div {
     let value: AnyElement = if is_copyable(item.label) {
-        copyable_capsule(item.value).into_any_element()
+        copyable_capsule(item.value, cx).into_any_element()
     } else {
-        capsule(item.value).into_any_element()
+        capsule(item.value, cx).into_any_element()
     };
 
     div()
@@ -88,7 +89,7 @@ fn render_item(item: Item) -> Div {
         .flex()
         .items_center()
         .gap_1()
-        .text_xs()
+        .ui_text_size(12., cx)
         .font_weight(FontWeight::NORMAL)
         .child(div().flex_none().text_color(theme::faint()).child(item.label))
         .child(value)

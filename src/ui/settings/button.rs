@@ -3,7 +3,8 @@ use gpui::{
     prelude::*, px, rgb, svg, transparent_black,
 };
 
-use crate::ui::{appearance, theme};
+use crate::ui::appearance::{self, UiTextSize};
+use crate::ui::theme;
 
 /// Zed `ButtonStyle`, cut down to what Settings uses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -213,7 +214,7 @@ impl RenderOnce for Button {
             .border_color(colors.border)
             .bg(colors.background)
             .font_family(appearance::ui_font(cx))
-            .text_size(px(if self.small_label { 12. } else { 14. }))
+            .ui_text_size(if self.small_label { 12. } else { 14. }, cx)
             .text_color(theme::text())
             .hover(|button| button.bg(colors.hover))
             .active(|button| button.bg(colors.active))
@@ -254,7 +255,7 @@ impl Render for Tooltip {
             .rounded_md()
             .bg(rgb(0x273142))
             .font_family(appearance::ui_font(cx))
-            .text_xs()
+            .ui_text_size(12., cx)
             .text_color(theme::white())
             .child(self.0.clone())
     }

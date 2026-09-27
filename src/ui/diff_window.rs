@@ -21,7 +21,8 @@ use super::file_tree::{self, TreeRow};
 use super::mac_column_vibrancy::ColumnVibrancy;
 use super::scrollbar;
 use super::splitter::{self, Axis, ResizeState};
-use super::{appearance, theme};
+use super::appearance::{self, UiTextSize};
+use super::theme;
 use super::window_geometry;
 
 /// Own snapshot for the Diff window — not a live shared model with main.
@@ -529,6 +530,8 @@ impl Render for DiffView {
             // clear so it is never painted twice.
             .bg(theme::frost())
             .font_family(appearance::ui_font(cx))
+            // Unsized UI text inherits gpui's 1rem default (16px), scaled like the rest.
+            .ui_text_size(16., cx)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 this.handle_key(event, cx);
@@ -657,7 +660,7 @@ fn render_titlebar(
                 .child(
                     div()
                         .flex_none()
-                        .text_xs()
+                        .ui_text_size(12., cx)
                         .text_color(theme::muted())
                         .overflow_hidden()
                         .text_ellipsis()
@@ -711,7 +714,7 @@ fn render_titlebar(
                 .children(view.export_status.as_ref().map(|status| {
                     div()
                         .flex_none()
-                        .text_xs()
+                        .ui_text_size(12., cx)
                         .text_color(theme::accent())
                         .child(status.clone())
                 }))
@@ -823,7 +826,7 @@ fn render_tree_pane(
                                     .h(px(16.))
                                     .flex()
                                     .items_center()
-                                    .text_xs()
+                                    .ui_text_size(12., cx)
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(theme::muted())
                                     .child(name),
@@ -882,7 +885,7 @@ fn render_tree_pane(
                                     .min_w(px(0.))
                                     .flex()
                                     .items_center()
-                                    .text_xs()
+                                    .ui_text_size(12., cx)
                                     .text_color(theme::text())
                                     .overflow_hidden()
                                     .child(
@@ -966,7 +969,7 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
         .child(render_search_bar(view, cx))
         .child(render_body(view, cx))
         .child(render_comments(view, cx))
-        .child(render_draft_bar(view, appearance::code_font(cx)))
+        .child(render_draft_bar(view, appearance::code_font(cx), cx))
 }
 
 fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
@@ -1010,7 +1013,7 @@ fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
                 .gap_2()
                 .child(
                     div()
-                        .text_xs()
+                        .ui_text_size(12., cx)
                         .text_color(theme::muted())
                         .child(hint.to_string()),
                 )
@@ -1032,7 +1035,7 @@ fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
                 ))
                 .child(
                     div()
-                        .text_xs()
+                        .ui_text_size(12., cx)
                         .text_color(theme::muted())
                         .child(format!("{} hit{}", matches.len(), if matches.len() == 1 { "" } else { "s" })),
                 ),
@@ -1057,7 +1060,7 @@ fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
                             .justify_center()
                             .rounded_md()
                             .cursor_pointer()
-                            .text_xs()
+                            .ui_text_size(12., cx)
                             .text_color(theme::muted())
                             .hover(|button| button.bg(theme::hover()))
                             .active(|button| button.bg(rgb(0xdfe3e9)))
@@ -1073,7 +1076,7 @@ fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
 
 /// The pane's place in the shell. The pane itself is mounted over it by
 /// `pane::slot`, so a pane frame never re-renders the shell.
-fn render_body(view: &DiffView, _: &mut Context<DiffView>) -> impl IntoElement {
+fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     match view.snapshot.as_ref().map(|s| &s.file) {
         Some(FileDiff::Text { .. }) => {
             let slot = view.pane_bounds.clone();
@@ -1089,9 +1092,9 @@ fn render_body(view: &DiffView, _: &mut Context<DiffView>) -> impl IntoElement {
                 )
                 .into_any_element()
         }
-        Some(FileDiff::Binary) => placeholder("Binary file — no Alignment"),
-        Some(FileDiff::Error(msg)) => placeholder(msg),
-        None => placeholder("Open Diff from the main window"),
+        Some(FileDiff::Binary) => placeholder("Binary file — no Alignment", cx),
+        Some(FileDiff::Error(msg)) => placeholder(msg, cx),
+        None => placeholder("Open Diff from the main window", cx),
     }
 }
 
@@ -1143,7 +1146,7 @@ fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElem
             };
             div()
                 .id(("cmt", c.id as usize))
-                .text_xs()
+                .ui_text_size(12., cx)
                 .child(
                     div()
                         .flex()
@@ -1151,6 +1154,8 @@ fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElem
                         .child(
                             div()
                                 .font_family(mono.clone())
+                                // Own size: the UI text around it scales, Code Font chrome does not.
+                                .text_xs()
                                 .text_color(theme::faint())
                                 .child(label),
                         )
@@ -1162,7 +1167,7 @@ fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElem
         .into_any_element()
 }
 
-fn render_draft_bar(view: &DiffView, mono: SharedString) -> impl IntoElement {
+fn render_draft_bar(view: &DiffView, mono: SharedString, cx: &App) -> impl IntoElement {
     let Some(draft) = &view.drafting else {
         return div().into_any_element();
     };
@@ -1182,7 +1187,7 @@ fn render_draft_bar(view: &DiffView, mono: SharedString) -> impl IntoElement {
         .py_2()
         .child(
             div()
-                .text_xs()
+                .ui_text_size(12., cx)
                 .text_color(theme::muted())
                 .child(hint),
         )
@@ -1213,7 +1218,7 @@ fn chrome_button(
         .justify_center()
         .rounded_md()
         .cursor_pointer()
-        .text_xs()
+        .ui_text_size(12., cx)
         .text_color(theme::muted())
         .hover(|button| button.bg(theme::hover()))
         .active(|button| button.bg(rgb(0xdfe3e9)))
@@ -1238,7 +1243,7 @@ fn chrome_toggle(
         .justify_center()
         .rounded_md()
         .cursor_pointer()
-        .text_xs()
+        .ui_text_size(12., cx)
         .when(pressed, |d| d.bg(theme::range()).text_color(theme::accent()))
         .when(!pressed, |d| d.text_color(theme::muted()))
         .hover(|button| button.bg(theme::hover()))
@@ -1276,13 +1281,13 @@ fn export_button(cx: &mut Context<DiffView>) -> impl IntoElement {
 struct ExportTooltip;
 
 impl Render for ExportTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .px_2()
             .py_1()
             .rounded_md()
             .bg(rgb(0x273142))
-            .text_xs()
+            .ui_text_size(12., cx)
             .text_color(theme::white())
             .child("Export")
     }

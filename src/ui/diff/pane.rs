@@ -18,7 +18,7 @@ use crate::domain::{
     match_jump_plan,
 };
 use crate::git::FileDiff;
-use crate::ui::appearance::Appearance;
+use crate::ui::appearance::{Appearance, UiTextSize};
 use crate::ui::{scrollbar, theme};
 use super::element::{
     self, BarState, Decorations, FrameInput, Geom, ShapeCache, build_frame, insert_hitboxes,
@@ -709,7 +709,7 @@ fn zero_advance(family: &SharedString, font_px: f32, window: &Window) -> f32 {
 impl Render for DualPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.layout.is_none() {
-            return placeholder("No Layout");
+            return placeholder("No Layout", cx);
         }
         element::dual_pane(cx.entity()).into_any_element()
     }
@@ -812,13 +812,13 @@ pub enum FontOp {
     Reset,
 }
 
-pub fn placeholder(msg: &str) -> gpui::AnyElement {
+pub fn placeholder(msg: &str, cx: &App) -> gpui::AnyElement {
     div()
         .flex_1()
         .flex()
         .items_center()
         .justify_center()
-        .text_sm()
+        .ui_text_size(14., cx)
         .text_color(theme::muted())
         .child(msg.to_string())
         .into_any_element()

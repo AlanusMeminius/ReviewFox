@@ -1,6 +1,7 @@
 use gpui::{App, ClickEvent, ElementId, Rgba, SharedString, Window, div, prelude::*, px, svg};
 
-use crate::ui::{appearance, theme};
+use crate::ui::appearance::{self, UiTextSize};
+use crate::ui::theme;
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
@@ -145,7 +146,7 @@ impl RenderOnce for NavItem {
             })
             .cursor_pointer()
             .font_family(appearance::ui_font(cx))
-            .text_size(px(14.))
+            .ui_text_size(14., cx)
             .when_some(self.on_click, |row, handler| {
                 row.on_click(move |event, window, cx| handler(event, window, cx))
             })

@@ -3,7 +3,7 @@
 //! Global; [`update`] writes the file and replaces it, which re-renders every
 //! window.
 
-use gpui::{App, Global, SharedString};
+use gpui::{App, Global, Pixels, SharedString, Styled, px};
 
 use crate::domain::DiffFontSize;
 use crate::settings_store::{self, SettingsFile};
@@ -94,6 +94,31 @@ pub fn ui_font(cx: &App) -> SharedString {
 pub fn code_font(cx: &App) -> SharedString {
     cx.global::<Appearance>().code_font.name.clone()
 }
+
+/// A UI text size as designed at the default UI Font size (13), for the
+/// current `ui_font_size`: the setting is the body size and every other UI
+/// text size keeps its offset from it.
+pub fn ui_text_px(design: f32, ui_font_size: u32) -> f32 {
+    design + (ui_font_size as f32 - UI_FONT_SIZE_DEFAULT as f32)
+}
+
+/// [`ui_text_px`] at the current UI Font size.
+pub fn ui_text(cx: &App, design: f32) -> Pixels {
+    px(ui_text_px(design, cx.global::<Appearance>().ui_font_size))
+}
+
+/// Sizes UI Font text through [`ui_text`]. Every UI text size goes through
+/// this, in design px: 12 for gpui's `text_xs`, 14 for `text_sm`, 16 for the
+/// unsized default (1rem, set at each window root). Code Font chrome/meta text
+/// keeps gpui's rem helpers and does not scale, so it sets its own size even
+/// inside UI text; icon glyphs and layout sizes never scale.
+pub trait UiTextSize: Styled + Sized {
+    fn ui_text_size(self, design: f32, cx: &App) -> Self {
+        self.text_size(ui_text(cx, design))
+    }
+}
+
+impl<E: Styled> UiTextSize for E {}
 
 pub fn resolve(file: &SettingsFile, installed: &[String]) -> Appearance {
     Appearance {
@@ -189,6 +214,18 @@ mod tests {
         assert_eq!(a.code_font.name, "IBM Plex Mono");
         assert_eq!(a.code_font.stored.as_deref(), Some("Gone Mono"));
         assert!(a.code_font.not_installed);
+    }
+
+    #[test]
+    fn ui_text_keeps_its_offset_from_the_body_size() {
+        // Default: every design size renders as designed.
+        assert_eq!(ui_text_px(12., 13), 12.);
+        assert_eq!(ui_text_px(14., 13), 14.);
+        // Spec example: at 14, former 12px text is 13px and 16px is 17px.
+        assert_eq!(ui_text_px(12., 14), 13.);
+        assert_eq!(ui_text_px(16., 14), 17.);
+        assert_eq!(ui_text_px(13., 11), 11.);
+        assert_eq!(ui_text_px(16., 15), 18.);
     }
 
     #[test]

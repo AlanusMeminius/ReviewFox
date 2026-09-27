@@ -1,5 +1,6 @@
 use gpui::{App, Hsla, Rgba, SharedString, Window, div, prelude::*, px, svg};
 
+use crate::ui::appearance::UiTextSize;
 use crate::ui::theme;
 
 use super::Button;
@@ -37,7 +38,7 @@ impl ConfiguredCard {
 }
 
 impl RenderOnce for ConfiguredCard {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         div()
             .flex()
             .flex_row()
@@ -63,7 +64,7 @@ impl RenderOnce for ConfiguredCard {
                     .items_center()
                     .gap_1()
                     .min_w_0()
-                    .text_size(px(14.))
+                    .ui_text_size(14., cx)
                     .text_color(theme::text())
                     .when_some(self.icon, |left, (icon, color)| {
                         left.child(svg().size_4().flex_none().path(icon).text_color(color))
