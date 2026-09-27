@@ -12,12 +12,13 @@
 - **Diff chrome sync** (2026-09-26): tree toggle/traffic-lights match main, resizable tree|dual splitter (`clamp_diff_tree_width`), Export icon button, dual-heads row removed
 - **Workspace sidebar** (2026-09-26): persist `{last, pinned, workspaces}` to Application Support; restore `last` on launch; sidebar is **Recent** (0–1, no context menu) + **Pin** (hidden when empty, newest on top) + **Repositories** (non-pinned only, alpha by display name); right-click Pin → Unpin|Remove, Repositories → Pin|Remove; Open Repo / branch select / click row write immediately; CLI argv / `REVIEWFOX_REPO` removed.
 - **Overlay scrollbars** (2026-09-26): BeadsViewer-shaped overlay thumbs on sidebar / commits / file tree / head-meta / branch picker / Diff tree / comments; Diff dual-pane per-pane scroll (old left / new right) + gutter lockstep (ADR 0003).
-- **GitLab Phase A** (2026-09-26): Settings window (ReviewFox → Settings…, `Cmd+,` / `Ctrl+,`); Base URL → `settings.json`, PAT → keychain; explicit Verify via GPUI `HttpClient` → `GET /api/v4/user` (ADR-0006).
-- **GitLab Phase B** (2026-09-26): Map open repo remotes → GitLab `path_with_namespace` (prefer host matching Settings Base URL; among matches prefer `origin`); reject when no remote matches; optional `GET /api/v4/projects/{path}` confirm; Settings shows project line (ADR-0006).
-- **GitLab Phase C** (2026-09-26): List open MRs for resolved project; MR Entry picker in main chrome (in-memory); shared GitLab connection line (user + Re-verify + Settings) in shell and Settings (ADR-0006).
-- **GitLab Phase D** (2026-09-26): On MR select, fetch detail + `diff_refs` (base/head/start SHA); pipeline / approval check state; MR Entry chrome shows loaded detail and short SHAs (ADR-0006).
+- **GitLab Phase A** (2026-09-26): Settings window (ReviewFox → Settings…, `Cmd+,` / `Ctrl+,`); Base URL → `settings.json`, PAT → keychain; explicit Verify via GPUI `HttpClient` → `GET /api/v4/user` (`docs/adr/0006-gitlab-mr-is-readonly-entry.md`).
+- **GitLab Phase B** (2026-09-26): Map open repo remotes → GitLab `path_with_namespace` (prefer host matching Settings Base URL; among matches prefer `origin`); reject when no remote matches; optional `GET /api/v4/projects/{path}` confirm; Settings shows project line.
+- **GitLab Phase C** (2026-09-26): List open MRs for resolved project; MR Entry picker in main chrome (in-memory); shared GitLab connection line (user + Re-verify + Settings) in shell and Settings.
+- **GitLab Phase D** (2026-09-26): On MR select, fetch detail + `diff_refs` (base/head/start SHA); pipeline / approval check state; MR Entry chrome shows loaded detail and short SHAs.
 - **GitLab MR activate** (2026-09-27): Hide MR + connection chrome unless a remote host matches Settings; on MR select load GitLab MR commits (web-parity set, newest-first), `git fetch` SHAs from matching remote, replace commit list, set Comparison to `diff_refs`; clear MR / switch branch restores Branch Browser (E+F slice).
-- **GitLab Phase G** (2026-09-27): Persist MR Entry label (`project` + `iid`) on Workspace; restore + refetch on launch / repo select; clear label when clearing MR or switching branch (ADR-0006).
+- **GitLab Phase G** (2026-09-27): Persist MR Entry label (`project` + `iid`) on Workspace; restore + refetch on launch / repo select; clear label when clearing MR or switching branch.
+- **Dual-pane Diff** (2026-09-27): block-first Replace, fold, hunk jump, ignore-whitespace, word highlight, search, font size, bezier ribbons. Design: `docs/dual-pane-diff.md`, `docs/adr/0006-block-first-replace-position.md`. Prototype: `prototype/diff-view.html`.
 
 ## Still deferred
 

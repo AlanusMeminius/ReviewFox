@@ -1,0 +1,990 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Diff prototype — dual pane</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --text: #1e1e1e;
+      --muted: #808080;
+      --ln: #9a9a9a;
+      --bg: #fff;
+      --del-bg: #d8dce1;
+      --del-fill: #d5d9df;
+      --add-bg: #cfe9cf;
+      --add-fill: #c6e4c4;
+      --mod-bg: #d4e4fa;
+      --mod-fill: #b9ceee;
+      --chg: #6f97d2;
+      --wave: #b5b5b5;
+      --accent: #1d4e89;
+      --fs: 13px;
+      --rh: 22px;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: system-ui, sans-serif;
+      background: #c8cdd4;
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+    }
+    .frame { flex: 1; min-height: 0; padding: 12px 12px 0; display: flex; justify-content: center; }
+    .win {
+      width: min(1100px, 100%);
+      height: 100%;
+      background: var(--bg);
+      border: 1px solid #9aa1ab;
+      border-radius: 4px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.16);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .bar {
+      flex-shrink: 0;
+      min-height: 28px;
+      padding: 4px 10px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 12px;
+      color: var(--muted);
+      border-bottom: 1px solid #eee;
+      background: #fafafa;
+    }
+    .bar strong { color: var(--text); font-weight: 500; }
+    .stage {
+      flex: 1;
+      min-height: 280px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 36px minmax(0, 1fr);
+      position: relative;
+      background: var(--bg);
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: var(--fs);
+      line-height: var(--rh);
+    }
+    .pane { min-width: 0; min-height: 0; overflow-x: auto; overflow-y: scroll; position: relative; scrollbar-gutter: stable; overflow-anchor: none; }
+    #paneL { direction: rtl; }
+    #paneL .sheet { direction: ltr; }
+    .sheet { position: relative; }
+    .code-col, .ln-col { position: absolute; top: 0; bottom: 0; }
+    .sheet.left .code-col { left: 0; right: 46px; }
+    .sheet.left .ln-col { right: 0; width: 46px; }
+    .sheet.right .ln-col { left: 0; width: 46px; }
+    .sheet.right .code-col { left: 46px; right: 0; }
+    .overlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .row {
+      position: absolute;
+      left: 0; right: 0;
+      height: var(--rh);
+      line-height: var(--rh);
+      white-space: pre;
+      overflow: hidden;
+    }
+    .code { padding: 0 10px; }
+    .lns { color: var(--ln); font-size: 11px; user-select: none; }
+    .lns.old { text-align: right; padding-right: 6px; }
+    .lns.new { text-align: left; padding-left: 6px; }
+    .row.del { background: var(--del-bg); }
+    .row.add { background: var(--add-bg); }
+    .row.mod { background: var(--mod-bg); }
+    .row.mod .chg { background: var(--chg); border-radius: 2px; }
+    .row.omit {
+      cursor: pointer;
+      color: var(--muted);
+      background: #f6f6f6;
+    }
+    .row.code.omit {
+      background-color: #f6f6f6;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='8'%3E%3Cpath d='M0 4 Q4 1 8 4 Q12 7 16 4' fill='none' stroke='%23b5b5b5' stroke-width='1.4'/%3E%3C/svg%3E");
+      background-repeat: repeat-x;
+      background-position: left center;
+      background-size: 16px 8px;
+    }
+    .row.hit { outline: 1px solid #e6c200; outline-offset: -1px; }
+    mark { background: #ffe08a; color: inherit; }
+    .seam {
+      position: absolute;
+      left: 10px; right: 10px;
+      height: 0;
+      border-top: 2px solid #8aa0b8;
+      z-index: 2;
+      pointer-events: none;
+    }
+    .panel {
+      flex-shrink: 0;
+      margin: 10px 12px 12px;
+      background: #fff;
+      border: 1px solid #d5d8de;
+      border-radius: 8px;
+      padding: 10px 12px 12px;
+      width: min(1100px, calc(100% - 24px));
+      align-self: center;
+    }
+    .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; align-items: center; }
+    button, input {
+      font: inherit;
+      font-size: 12px;
+      border: 1px solid #c5cad3;
+      background: #fff;
+      border-radius: 999px;
+      padding: 4px 10px;
+    }
+    input { border-radius: 6px; min-width: 180px; }
+    button { cursor: pointer; }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+    #hits { list-style: none; margin: 0; padding: 0; max-height: 96px; overflow: auto; display: flex; flex-wrap: wrap; gap: 4px; }
+    #hits button { border-radius: 6px; font-family: ui-monospace, monospace; }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <div class="win">
+      <div class="bar">
+        <strong id="fileName">StressBridge.hpp</strong>
+        <span id="comparison">a1b2c3d..9f8e7d6</span>
+        <span id="hunkCount"></span>
+        <span id="readout"></span>
+      </div>
+      <div class="stage" id="stage">
+        <div class="pane" id="paneL"><div class="sheet left" id="sheetL"></div><div class="seam" id="seamL" hidden></div></div>
+        <div class="gutter" id="gutter"></div>
+        <div class="pane" id="paneR"><div class="sheet right" id="sheetR"></div><div class="seam" id="seamR" hidden></div></div>
+        <svg class="overlay" id="overlay"></svg>
+      </div>
+    </div>
+  </div>
+  <section class="panel">
+    <div class="btns" id="files">
+      <button type="button" data-file="modify" aria-pressed="true">Modify</button>
+      <button type="button" data-file="add">Added file</button>
+      <button type="button" data-file="del">Deleted file</button>
+      <button type="button" data-file="same">Unchanged</button>
+    </div>
+    <div class="btns">
+      <button type="button" id="prevHunk">Previous hunk</button>
+      <button type="button" id="nextHunk">Next hunk</button>
+      <button type="button" id="expandAll">Expand all</button>
+      <button type="button" id="collapse">Collapse unchanged</button>
+      <button type="button" id="ws" aria-pressed="false">Ignore whitespace</button>
+      <button type="button" id="fontDec">A−</button>
+      <button type="button" id="fontReset">Font reset</button>
+      <button type="button" id="fontInc">A+</button>
+    </div>
+    <div class="btns">
+      <input id="find" type="search" placeholder="Search this file" aria-label="Search this file" />
+      <button type="button" data-scope="old">Old</button>
+      <button type="button" data-scope="new">New</button>
+      <button type="button" data-scope="both" aria-pressed="true">Both</button>
+    </div>
+    <ul id="hits"></ul>
+  </section>
+  <script>
+    const COMPARISON = 'a1b2c3d..9f8e7d6';
+    const CONTEXT = 3;
+
+    const state = {
+      file: 'modify',
+      ignoreWs: false,
+      expanded: new Set(),
+      fontSize: 13,
+      s: 0,
+      scope: 'both',
+      query: '',
+    };
+
+    let model = null;
+    let lock = false;
+    let layoutAy = 0;
+
+    const paneL = document.getElementById('paneL');
+    const paneR = document.getElementById('paneR');
+    const sheetL = document.getElementById('sheetL');
+    const sheetR = document.getElementById('sheetR');
+    const stage = document.getElementById('stage');
+    const overlay = document.getElementById('overlay');
+
+    function rowH() { return Math.round(state.fontSize * 22 / 13); }
+    function anchorY() {
+      const h = paneL.clientHeight || 360;
+      return Math.round(h / 3);
+    }
+    function viewH() { return paneL.clientHeight || 360; }
+    function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+    function escapeHtml(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    }
+
+    function fileTexts() {
+      const head = [
+        '#pragma once',
+        '#include "MechanicsError.hpp"',
+        '#include <Teuchos_RCP.hpp>',
+        '#include <optional>',
+        '#include <string>',
+        '#include <vector>',
+        '#include <cstdint>',
+        '#include <memory>',
+      ];
+      const mid = ['namespace Nuwa {', 'class IGeometryAccess;', 'public:', 'void keepContext();'];
+      const before = ['explicit StressBridge();', 'void bind(const Mesh& mesh);'];
+      const longEq = Array.from({ length: 12 }, (_, i) =>
+        i === 5 ? 'std::optional<MechanicsError> takeFailure();' : 'void step_' + (i + 1) + '();'
+      );
+      const beforeWs = ['protected:', 'double timeS = 0;', 'int ticks = 0;', 'void note();'];
+      const afterWs = Array.from({ length: 10 }, (_, i) => 'void tail_' + i + '();');
+      const old = [
+        ...head,
+        '#include "ResponseOnlyModelEvaluatorBase.hpp"',
+        ...mid,
+        ...before,
+        'int timeoutMs = 10;',
+        ...longEq,
+        'alpha();', 'beta();', 'gamma();',
+        ...beforeWs,
+        '    void poll();',
+        ...afterWs,
+      ];
+      const neu = [
+        ...head,
+        ...mid,
+        '#include <array>',
+        '#include <span>',
+        ...before,
+        'int timeoutMs = 40;',
+        ...longEq,
+        'alphaBetaGamma();',
+        ...beforeWs,
+        'void poll();',
+        ...afterWs,
+      ];
+      if (state.file === 'modify') return { name: 'StressBridge.hpp', old, neu };
+      if (state.file === 'add') {
+        const lines = Array.from({ length: 48 }, (_, i) =>
+          i === 47 ? 'void added_last();' : 'void added_' + (i + 1) + '();'
+        );
+        return { name: 'Added.cpp', old: [], neu: lines };
+      }
+      if (state.file === 'del') {
+        const lines = Array.from({ length: 48 }, (_, i) =>
+          i === 47 ? 'void removed_last();' : 'void removed_' + (i + 1) + '();'
+        );
+        return { name: 'Removed.cpp', old: lines, neu: [] };
+      }
+      const same = Array.from({ length: 10 }, (_, i) => 'void unchanged_' + (i + 1) + '();');
+      return { name: 'Unchanged.hpp', old: same, neu: same.slice() };
+    }
+
+    function normLine(s) { return s.replace(/\s+/g, ''); }
+
+    // ponytail: O(n*m) line LCS. Prototype files stay under ~50 lines.
+    function align(oldLines, newLines, ignoreWs) {
+      const eq = (x, y) => (ignoreWs ? normLine(x) === normLine(y) : x === y);
+      const n = oldLines.length, m = newLines.length;
+      const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+      for (let i = n - 1; i >= 0; i--) {
+        for (let j = m - 1; j >= 0; j--) {
+          dp[i][j] = eq(oldLines[i], newLines[j]) ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+      }
+      const prim = [];
+      let i = 0, j = 0;
+      while (i < n && j < m) {
+        if (eq(oldLines[i], newLines[j])) {
+          const i0 = i, j0 = j;
+          while (i < n && j < m && eq(oldLines[i], newLines[j])) { i++; j++; }
+          prim.push({ k: 'eq', i: i0, j: j0, n: i - i0 });
+        } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+          prim.push({ k: 'd', i, j }); i++;
+        } else {
+          prim.push({ k: 'i', i, j }); j++;
+        }
+      }
+      while (i < n) { prim.push({ k: 'd', i, j }); i++; }
+      while (j < m) { prim.push({ k: 'i', i, j }); j++; }
+
+      const ops = [];
+      const flush = (buf) => {
+        if (!buf.length) return;
+        const dels = buf.filter((x) => x.k === 'd');
+        const ins = buf.filter((x) => x.k === 'i');
+        if (dels.length && ins.length) {
+          ops.push({
+            kind: 'replace',
+            oldStart: dels[0].i + 1,
+            oldCount: dels.length,
+            newStart: ins[0].j + 1,
+            newCount: ins.length,
+          });
+        } else if (dels.length) {
+          ops.push({
+            kind: 'delete',
+            oldStart: dels[0].i + 1,
+            oldCount: dels.length,
+            atNew: dels[0].j + 1,
+          });
+        } else {
+          ops.push({
+            kind: 'insert',
+            afterOld: ins[0].i,
+            newStart: ins[0].j + 1,
+            newCount: ins.length,
+          });
+        }
+      };
+      let buf = [];
+      for (const p of prim) {
+        if (p.k === 'eq') {
+          flush(buf); buf = [];
+          ops.push({ kind: 'equal', oldStart: p.i + 1, newStart: p.j + 1, count: p.n });
+        } else buf.push(p);
+      }
+      flush(buf);
+      ops.forEach((op, idx) => { op.id = String(idx); });
+      return ops;
+    }
+
+    function tokens(s) {
+      return s.match(/[A-Za-z0-9_]+|\s+|[^\sA-Za-z0-9_]/g) || [s];
+    }
+
+    function lcsChanged(a, b) {
+      const n = a.length, m = b.length;
+      const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+      for (let i = n - 1; i >= 0; i--) {
+        for (let j = m - 1; j >= 0; j--) {
+          dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+      }
+      const changed = a.map(() => true);
+      let i = 0, j = 0;
+      while (i < n && j < m) {
+        if (a[i] === b[j]) { changed[i] = false; i++; j++; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) i++;
+        else j++;
+      }
+      return changed;
+    }
+
+    function pairMarks(oldText, newText) {
+      const a = tokens(oldText), b = tokens(newText);
+      const ca = lcsChanged(a, b);
+      const cb = lcsChanged(b, a);
+      return {
+        old: a.map((t, i) => ({ t, chg: ca[i] && t.trim() !== '' })),
+        neu: b.map((t, i) => ({ t, chg: cb[i] && t.trim() !== '' })),
+      };
+    }
+
+    function blockMarks(lines, otherLines) {
+      const other = new Set(otherLines.flatMap((line) => tokens(line).filter((t) => t.trim())));
+      return lines.map((line) => tokens(line).map((t) => ({
+        t, chg: t.trim() !== '' && !other.has(t),
+      })));
+    }
+
+    function htmlParts(parts) {
+      return parts.map((p) => (p.chg ? '<span class="chg">' + escapeHtml(p.t) + '</span>' : escapeHtml(p.t))).join('');
+    }
+
+    function htmlPlain(text) {
+      const q = state.query.trim();
+      if (!q) return escapeHtml(text);
+      const i = text.toLowerCase().indexOf(q.toLowerCase());
+      if (i < 0) return escapeHtml(text);
+      return escapeHtml(text.slice(0, i))
+        + '<mark>' + escapeHtml(text.slice(i, i + q.length)) + '</mark>'
+        + escapeHtml(text.slice(i + q.length));
+    }
+
+    function project(ops, oldLines, newLines) {
+      const RH = rowH();
+      const hasHunk = ops.some((op) => op.kind !== 'equal');
+      const oldRows = [];
+      const newRows = [];
+      const ribbons = [];
+      const hunks = [];
+      const knots = [{ s: 0, oldY: 0, newY: 0 }];
+      let oldY = 0, newY = 0, s = 0;
+
+      function step(dOld, dNew) {
+        oldY += dOld * RH;
+        newY += dNew * RH;
+        s += RH;
+        knots.push({ s, oldY, newY });
+      }
+      function pushOld(row) {
+        row.side = 'old';
+        row.i = oldRows.length;
+        row.contentY = oldY;
+        row.s = s;
+        oldRows.push(row);
+      }
+      function pushNew(row) {
+        row.side = 'new';
+        row.i = newRows.length;
+        row.contentY = newY;
+        row.s = s;
+        newRows.push(row);
+      }
+
+      ops.forEach((op) => {
+        if (op.kind === 'equal') {
+          const open = hasHunk && op.count > CONTEXT * 2 && !state.expanded.has(op.id);
+          const head = open ? CONTEXT : op.count;
+          const tail = open ? CONTEXT : 0;
+          for (let k = 0; k < head; k++) {
+            const text = oldLines[op.oldStart - 1 + k];
+            pushOld({ kind: 'equal', ln: op.oldStart + k, text });
+            pushNew({ kind: 'equal', ln: op.newStart + k, text: newLines[op.newStart - 1 + k] });
+            step(1, 1);
+          }
+          if (open) {
+            const fromOld = op.oldStart + CONTEXT;
+            const toOld = op.oldStart + op.count - CONTEXT - 1;
+            const fromNew = op.newStart + CONTEXT;
+            const toNew = op.newStart + op.count - CONTEXT - 1;
+            pushOld({ kind: 'omit', omit: op.id, from: fromOld, to: toOld, text: '⋯ ' + fromOld + '–' + toOld });
+            pushNew({ kind: 'omit', omit: op.id, from: fromNew, to: toNew, text: '⋯ ' + fromNew + '–' + toNew });
+            step(1, 1);
+          }
+          for (let k = op.count - tail; k < op.count; k++) {
+            pushOld({ kind: 'equal', ln: op.oldStart + k, text: oldLines[op.oldStart - 1 + k] });
+            pushNew({ kind: 'equal', ln: op.newStart + k, text: newLines[op.newStart - 1 + k] });
+            step(1, 1);
+          }
+          return;
+        }
+
+        const hunkS = s;
+        if (op.kind === 'delete') {
+          const y0 = oldY;
+          for (let k = 0; k < op.oldCount; k++) {
+            pushOld({ kind: 'delete', ln: op.oldStart + k, text: oldLines[op.oldStart - 1 + k], hunk: op.id });
+            step(1, 0);
+          }
+          ribbons.push({
+            kind: 'delete',
+            oldY0: y0, oldY1: oldY, newSeam: newY,
+            title: 'Delete old ' + op.oldStart + (op.oldCount > 1 ? '–' + (op.oldStart + op.oldCount - 1) : '') + ' at new ' + op.atNew,
+          });
+          hunks.push({ kind: 'delete', s: hunkS, side: 'old' });
+          return;
+        }
+        if (op.kind === 'insert') {
+          const y0 = newY;
+          const seam = oldY;
+          for (let k = 0; k < op.newCount; k++) {
+            pushNew({ kind: 'insert', ln: op.newStart + k, text: newLines[op.newStart - 1 + k], hunk: op.id });
+            step(0, 1);
+          }
+          const a = op.newStart, b = op.newStart + op.newCount - 1;
+          const after = op.afterOld === 0 ? 'file start' : 'old ' + op.afterOld;
+          ribbons.push({
+            kind: 'insert',
+            newY0: y0, newY1: newY, oldSeam: seam,
+            title: 'Insert new ' + a + (b !== a ? '–' + b : '') + ' after ' + after,
+          });
+          hunks.push({ kind: 'insert', s: hunkS, side: 'new' });
+          return;
+        }
+
+        const oLines = [];
+        const nLines = [];
+        for (let k = 0; k < op.oldCount; k++) oLines.push(oldLines[op.oldStart - 1 + k]);
+        for (let k = 0; k < op.newCount; k++) nLines.push(newLines[op.newStart - 1 + k]);
+        let marksO, marksN;
+        if (op.oldCount === 1 && op.newCount === 1) {
+          const m = pairMarks(oLines[0], nLines[0]);
+          marksO = [m.old];
+          marksN = [m.neu];
+        } else {
+          marksO = blockMarks(oLines, nLines);
+          marksN = blockMarks(nLines, oLines);
+        }
+        const yL0 = oldY, yR0 = newY;
+        const common = Math.min(op.oldCount, op.newCount);
+        for (let k = 0; k < common; k++) {
+          pushOld({ kind: 'replace', ln: op.oldStart + k, text: oLines[k], parts: marksO[k], hunk: op.id });
+          pushNew({ kind: 'replace', ln: op.newStart + k, text: nLines[k], parts: marksN[k], hunk: op.id });
+          step(1, 1);
+        }
+        for (let k = common; k < op.oldCount; k++) {
+          pushOld({ kind: 'replace', ln: op.oldStart + k, text: oLines[k], parts: marksO[k], hunk: op.id });
+          step(1, 0);
+        }
+        for (let k = common; k < op.newCount; k++) {
+          pushNew({ kind: 'replace', ln: op.newStart + k, text: nLines[k], parts: marksN[k], hunk: op.id });
+          step(0, 1);
+        }
+        const os = op.oldStart, oe = op.oldStart + op.oldCount - 1;
+        const ns = op.newStart, ne = op.newStart + op.newCount - 1;
+        ribbons.push({
+          kind: 'replace',
+          oldY0: yL0, oldY1: oldY, newY0: yR0, newY1: newY,
+          title: 'Replace old ' + os + (oe !== os ? '–' + oe : '') + ' ↔ new ' + ns + (ne !== ns ? '–' + ne : ''),
+        });
+        hunks.push({ kind: 'replace', s: hunkS, side: op.oldCount ? 'old' : 'new' });
+      });
+
+      return { ops, oldRows, newRows, knots, ribbons, hunks, oldLines, newLines };
+    }
+
+    function maxScroll(n) {
+      if (!n) return 0;
+      return Math.max(0, (n - 1) * rowH() - anchorY());
+    }
+
+    function track(contentY, n) {
+      return clamp(contentY - anchorY(), 0, maxScroll(n));
+    }
+
+    function interp(s) {
+      const knots = model.knots;
+      if (s <= 0) return knots[0];
+      const last = knots[knots.length - 1];
+      if (s >= last.s) return last;
+      for (let i = 1; i < knots.length; i++) {
+        if (s <= knots[i].s) {
+          const a = knots[i - 1], b = knots[i];
+          const t = b.s === a.s ? 0 : (s - a.s) / (b.s - a.s);
+          return { s, oldY: a.oldY + t * (b.oldY - a.oldY), newY: a.newY + t * (b.newY - a.newY) };
+        }
+      }
+      return last;
+    }
+
+    function sFrom(side, contentY) {
+      const key = side === 'old' ? 'oldY' : 'newY';
+      const cur = interp(state.s);
+      if (Math.abs(cur[key] - contentY) < 0.5) return state.s;
+      const knots = model.knots;
+      for (let i = 1; i < knots.length; i++) {
+        const a = knots[i - 1], b = knots[i];
+        if (b[key] > a[key] && contentY >= a[key] && contentY <= b[key]) {
+          const t = (contentY - a[key]) / (b[key] - a[key]);
+          return a.s + t * (b.s - a.s);
+        }
+      }
+      const end = knots[knots.length - 1];
+      return contentY >= end[key] ? end.s : 0;
+    }
+
+    function initialS() { return 0; }
+
+    function sheetHeight(n) {
+      if (!n) return 0;
+      const bottom = Math.max(0, viewH() - anchorY() - rowH());
+      return n * rowH() + bottom;
+    }
+
+    function paintRows(rows, lnClass) {
+      const rh = rowH();
+      const q = state.query.trim().toLowerCase();
+      const code = rows.map((r) => {
+        const cls = r.kind === 'delete' ? 'del' : r.kind === 'insert' ? 'add' : r.kind === 'replace' ? 'mod' : r.kind === 'omit' ? 'omit' : '';
+        const hit = q && r.text && r.text.toLowerCase().includes(q) ? ' hit' : '';
+        const body = r.parts ? htmlParts(r.parts) : htmlPlain(r.text || '');
+        const omit = r.kind === 'omit' ? ' data-omit="' + r.omit + '"' : '';
+        const ln = r.ln != null ? ' data-ln="' + r.ln + '"' : '';
+        return '<div class="row code ' + cls + hit + '" data-side="' + r.side + '" data-kind="' + r.kind + '" data-i="' + r.i + '"' + ln + omit + ' data-s="' + r.s + '" style="top:' + r.contentY + 'px;height:' + rh + 'px">' + body + '</div>';
+      }).join('');
+      const lns = rows.map((r) => {
+        const cls = r.kind === 'delete' ? 'del' : r.kind === 'insert' ? 'add' : r.kind === 'replace' ? 'mod' : r.kind === 'omit' ? 'omit' : '';
+        const label = r.kind === 'omit' ? '⋯' : (r.ln != null ? String(r.ln) : '');
+        const omit = r.kind === 'omit' ? ' data-omit="' + r.omit + '"' : '';
+        return '<div class="row lns ' + lnClass + ' ' + cls + '"' + omit + ' style="top:' + r.contentY + 'px;height:' + rh + 'px">' + label + '</div>';
+      }).join('');
+      return { code, lns };
+    }
+
+    function fillSheet(sheet, rows, sideClass, lnClass) {
+      const painted = paintRows(rows, lnClass);
+      sheet.style.height = sheetHeight(rows.length) + 'px';
+      sheet.innerHTML = sideClass === 'left'
+        ? '<div class="code-col">' + painted.code + '</div><div class="ln-col">' + painted.lns + '</div>'
+        : '<div class="ln-col">' + painted.lns + '</div><div class="code-col">' + painted.code + '</div>';
+    }
+
+    function placeSeam(id, empty) {
+      const el = document.getElementById(id);
+      el.hidden = !empty;
+      if (empty) el.style.top = anchorY() + 'px';
+    }
+
+    function stageY(pane, contentY) {
+      const top = pane.getBoundingClientRect().top - stage.getBoundingClientRect().top;
+      return top + contentY - pane.scrollTop;
+    }
+
+    function shapeDelete(y0, y1, seamY, xL, xR, w) {
+      const stub = 10, tip = 2;
+      const mw = Math.max(xR - xL, 8);
+      const yT = seamY, yB = seamY + tip;
+      return 'M ' + (xL - stub) + ' ' + y0 + ' L ' + xL + ' ' + y0
+        + ' C ' + (xL + mw * 0.45) + ' ' + y0 + ', ' + (xR - mw * 0.45) + ' ' + yT + ', ' + xR + ' ' + yT
+        + ' L ' + w + ' ' + yT + ' L ' + w + ' ' + yB + ' L ' + xR + ' ' + yB
+        + ' C ' + (xR - mw * 0.45) + ' ' + yB + ', ' + (xL + mw * 0.45) + ' ' + y1 + ', ' + xL + ' ' + y1
+        + ' L ' + (xL - stub) + ' ' + y1 + ' Z';
+    }
+
+    function shapeInsert(seamY, y0, y1, x0, xL, xR) {
+      const stub = 10, tip = 2;
+      const mw = Math.max(xR - xL, 8);
+      const yT = seamY, yB = seamY + tip;
+      return 'M ' + x0 + ' ' + yT + ' L ' + xL + ' ' + yT
+        + ' C ' + (xL + mw * 0.45) + ' ' + yT + ', ' + (xR - mw * 0.45) + ' ' + y0 + ', ' + xR + ' ' + y0
+        + ' L ' + (xR + stub) + ' ' + y0 + ' L ' + (xR + stub) + ' ' + y1 + ' L ' + xR + ' ' + y1
+        + ' C ' + (xR - mw * 0.45) + ' ' + y1 + ', ' + (xL + mw * 0.45) + ' ' + yB + ', ' + xL + ' ' + yB
+        + ' L ' + x0 + ' ' + yB + ' Z';
+    }
+
+    function shapeReplace(yL0, yL1, yR0, yR1, xL, xR) {
+      const stub = 12;
+      const mw = Math.max(xR - xL, 8);
+      return 'M ' + (xL - stub) + ' ' + yL0 + ' L ' + xL + ' ' + yL0
+        + ' C ' + (xL + mw * 0.45) + ' ' + yL0 + ', ' + (xR - mw * 0.45) + ' ' + yR0 + ', ' + xR + ' ' + yR0
+        + ' L ' + (xR + stub) + ' ' + yR0 + ' L ' + (xR + stub) + ' ' + yR1 + ' L ' + xR + ' ' + yR1
+        + ' C ' + (xR - mw * 0.45) + ' ' + yR1 + ', ' + (xL + mw * 0.45) + ' ' + yL1 + ', ' + xL + ' ' + yL1
+        + ' L ' + (xL - stub) + ' ' + yL1 + ' Z';
+    }
+
+    function sine(x0, y0, x1, y1) {
+      const span = x1 - x0;
+      if (span < 2) return '';
+      const step = 8, amp = 3.5;
+      let d = 'M ' + x0.toFixed(1) + ' ' + y0.toFixed(1);
+      let up = false;
+      for (let x = x0; x < x1 - 0.5; x += step) {
+        const end = Math.min(x + step, x1);
+        const mid = (x + end) / 2;
+        const y = (t) => y0 + (y1 - y0) * ((t - x0) / span);
+        d += ' Q ' + mid.toFixed(1) + ' ' + (y(mid) + (up ? -amp : amp)).toFixed(1)
+          + ' ' + end.toFixed(1) + ' ' + y(end).toFixed(1);
+        up = !up;
+      }
+      return d;
+    }
+
+    function paintRibbons() {
+      const box = stage.getBoundingClientRect();
+      const gutter = document.getElementById('gutter').getBoundingClientRect();
+      overlay.setAttribute('width', stage.clientWidth);
+      overlay.setAttribute('height', stage.clientHeight);
+      const xL = gutter.left - box.left;
+      const xR = gutter.right - box.left;
+      const x0 = paneL.getBoundingClientRect().left - box.left + (paneL.offsetWidth - paneL.clientWidth);
+      const w = paneR.getBoundingClientRect().right - box.left - (paneR.offsetWidth - paneR.clientWidth);
+      const fill = { delete: '#d5d9df', insert: '#c6e4c4', replace: '#b9ceee' };
+      let html = '';
+      model.ribbons.forEach((rb) => {
+        if (rb.kind === 'delete') {
+          const y0 = stageY(paneL, rb.oldY0);
+          const y1 = stageY(paneL, rb.oldY1);
+          const seam = stageY(paneR, rb.newSeam);
+          html += '<path fill="' + fill.delete + '" d="' + shapeDelete(y0, y1, seam, xL, xR, w) + '"><title>' + escapeHtml(rb.title) + '</title></path>';
+        } else if (rb.kind === 'insert') {
+          const y0 = stageY(paneR, rb.newY0);
+          const y1 = stageY(paneR, rb.newY1);
+          const seam = stageY(paneL, rb.oldSeam);
+          html += '<path fill="' + fill.insert + '" d="' + shapeInsert(seam, y0, y1, x0, xL, xR) + '"><title>' + escapeHtml(rb.title) + '</title></path>';
+        } else {
+          const yL0 = stageY(paneL, rb.oldY0), yL1 = stageY(paneL, rb.oldY1);
+          const yR0 = stageY(paneR, rb.newY0), yR1 = stageY(paneR, rb.newY1);
+          html += '<path fill="' + fill.replace + '" d="' + shapeReplace(yL0, yL1, yR0, yR1, xL, xR) + '"><title>' + escapeHtml(rb.title) + '</title></path>';
+        }
+      });
+      const omits = [];
+      model.oldRows.forEach((r, i) => {
+        if (r.kind === 'omit') omits.push([r, model.newRows.find((n) => n.kind === 'omit' && n.omit === r.omit)]);
+      });
+      omits.forEach(([L, R]) => {
+        if (!R) return;
+        const yL = stageY(paneL, L.contentY + rowH() / 2);
+        const yR = stageY(paneR, R.contentY + rowH() / 2);
+        html += '<path d="' + sine(xL, yL, xR, yR) + '" fill="none" stroke="#b5b5b5" stroke-width="1.4"/>';
+      });
+      if (!model.oldRows.length) {
+        const y = stageY(paneL, anchorY());
+        html += '<line x1="' + x0 + '" y1="' + y + '" x2="' + xL + '" y2="' + y + '" stroke="#8aa0b8" stroke-width="2"/>';
+      }
+      if (!model.newRows.length) {
+        const y = stageY(paneR, anchorY());
+        html += '<line x1="' + xR + '" y1="' + y + '" x2="' + w + '" y2="' + y + '" stroke="#8aa0b8" stroke-width="2"/>';
+      }
+      overlay.innerHTML = html;
+    }
+
+    function rowAt(rows, scrollTop) {
+      if (!rows.length) return null;
+      const i = Math.floor((scrollTop + anchorY()) / rowH());
+      if (i < 0) return rows[0];
+      if (i >= rows.length) return rows[rows.length - 1];
+      return rows[i];
+    }
+
+    function paintReadout() {
+      const left = rowAt(model.oldRows, paneL.scrollTop);
+      const right = rowAt(model.newRows, paneR.scrollTop);
+      const label = (row, empty) => {
+        if (!row) return empty ? 'seam' : '—';
+        if (row.kind === 'omit') return 'omit ' + row.from + '–' + row.to;
+        return 'L' + row.ln;
+      };
+      const gap = Math.round((paneL.scrollTop - paneR.scrollTop) / rowH());
+      document.getElementById('readout').textContent =
+        'anchor ' + label(left, !model.oldRows.length) + ' · ' + label(right, !model.newRows.length) + ' · gap ' + gap;
+      document.getElementById('hunkCount').textContent = model.hunks.length + (model.hunks.length === 1 ? ' hunk' : ' hunks');
+    }
+
+    function applyS(next) {
+      if (anchorY() !== layoutAy) rebuild();
+      const end = model.knots[model.knots.length - 1].s;
+      state.s = clamp(next, 0, end);
+      const p = interp(state.s);
+      lock = true;
+      paneL.scrollTop = track(p.oldY, model.oldRows.length);
+      paneR.scrollTop = track(p.newY, model.newRows.length);
+      lock = false;
+      placeSeam('seamL', model.oldRows.length === 0);
+      placeSeam('seamR', model.newRows.length === 0);
+      paintRibbons();
+      paintReadout();
+    }
+
+    function rebuild() {
+      const prevLock = lock;
+      lock = true;
+      const file = fileTexts();
+      document.getElementById('fileName').textContent = file.name;
+      document.getElementById('comparison').textContent = COMPARISON;
+      stage.style.setProperty('--fs', state.fontSize + 'px');
+      stage.style.setProperty('--rh', rowH() + 'px');
+      layoutAy = anchorY();
+      const ops = align(file.old, file.neu, state.ignoreWs);
+      model = project(ops, file.old, file.neu);
+      fillSheet(sheetL, model.oldRows, 'left', 'old');
+      fillSheet(sheetR, model.newRows, 'right', 'new');
+      document.getElementById('ws').setAttribute('aria-pressed', state.ignoreWs ? 'true' : 'false');
+      paintHits();
+      lock = prevLock;
+    }
+
+    function render() {
+      rebuild();
+      applyS(state.s);
+    }
+
+    function capture() {
+      const oldHit = rowAt(model.oldRows, paneL.scrollTop);
+      const newHit = rowAt(model.newRows, paneR.scrollTop);
+      const holdAbove = (side, rows, hit, scroll) => {
+        const i = rows.indexOf(hit);
+        for (let p = i - 1; p >= 0; p--) {
+          if (rows[p].ln != null) {
+            return { side, ln: rows[p].ln, viewY: rows[p].contentY - scroll };
+          }
+        }
+        return null;
+      };
+      if (oldHit && oldHit.kind === 'omit') return holdAbove('old', model.oldRows, oldHit, paneL.scrollTop);
+      if (newHit && newHit.kind === 'omit') return holdAbove('new', model.newRows, newHit, paneR.scrollTop);
+      if (oldHit && oldHit.ln != null) {
+        return { side: 'old', ln: oldHit.ln, viewY: oldHit.contentY - paneL.scrollTop };
+      }
+      if (newHit && newHit.ln != null) {
+        return { side: 'new', ln: newHit.ln, viewY: newHit.contentY - paneR.scrollTop };
+      }
+      return null;
+    }
+
+    function restore(cap) {
+      if (!cap) { applyS(initialS()); return; }
+      const rows = cap.side === 'old' ? model.oldRows : model.newRows;
+      const row = rows.find((r) => r.ln === cap.ln && r.kind !== 'omit');
+      if (!row) { applyS(clamp(state.s, 0, model.knots[model.knots.length - 1].s)); return; }
+      const want = anchorY() + row.contentY - cap.viewY;
+      applyS(sFrom(cap.side, want));
+    }
+
+    function withAnchor(fn) {
+      const cap = capture();
+      fn();
+      rebuild();
+      restore(cap);
+    }
+
+    function collapsedSpan(side, ln) {
+      const hasHunk = model.ops.some((op) => op.kind !== 'equal');
+      if (!hasHunk) return null;
+      for (const op of model.ops) {
+        if (op.kind !== 'equal' || state.expanded.has(op.id) || op.count <= CONTEXT * 2) continue;
+        const start = side === 'old' ? op.oldStart : op.newStart;
+        const from = start + CONTEXT;
+        const to = start + op.count - CONTEXT - 1;
+        if (ln >= from && ln <= to) return op.id;
+      }
+      return null;
+    }
+
+    function jumpToLine(side, ln) {
+      const span = collapsedSpan(side, ln);
+      if (span) {
+        state.expanded.add(span);
+        rebuild();
+      }
+      const rows = side === 'old' ? model.oldRows : model.newRows;
+      const row = rows.find((r) => r.ln === ln && r.kind !== 'omit');
+      if (row) applyS(row.s);
+    }
+
+    function matches() {
+      const q = state.query.trim().toLowerCase();
+      if (!q) return [];
+      const file = fileTexts();
+      const out = [];
+      const take = (side, lines) => {
+        if (state.scope !== 'both' && state.scope !== side) return;
+        lines.forEach((text, i) => {
+          if (text.toLowerCase().includes(q)) out.push({ side, ln: i + 1, text });
+        });
+      };
+      take('old', file.old);
+      take('new', file.neu);
+      return out;
+    }
+
+    function paintHits() {
+      const list = matches();
+      document.getElementById('hits').innerHTML = list.map((m, i) =>
+        '<li><button type="button" data-hit="' + i + '">' + m.side + ' ' + m.ln + '</button></li>'
+      ).join('');
+      document.getElementById('hits').querySelectorAll('button').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const m = matches()[Number(btn.dataset.hit)];
+          if (m) jumpToLine(m.side, m.ln);
+        });
+      });
+    }
+
+    function nearestHunk(dir) {
+      const hunks = model.hunks;
+      if (dir > 0) return hunks.find((h) => h.s > state.s + 0.5) || null;
+      for (let i = hunks.length - 1; i >= 0; i--) if (hunks[i].s < state.s - 0.5) return hunks[i];
+      return null;
+    }
+
+    document.getElementById('files').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-file]');
+      if (!btn) return;
+      state.file = btn.dataset.file;
+      state.expanded.clear();
+      document.querySelectorAll('#files button').forEach((b) => {
+        b.setAttribute('aria-pressed', b === btn ? 'true' : 'false');
+      });
+      rebuild();
+      applyS(initialS());
+    });
+
+    document.getElementById('prevHunk').addEventListener('click', () => {
+      const h = nearestHunk(-1);
+      if (h) applyS(h.s);
+    });
+    document.getElementById('nextHunk').addEventListener('click', () => {
+      const h = nearestHunk(1);
+      if (h) applyS(h.s);
+    });
+    document.getElementById('expandAll').addEventListener('click', () => {
+      withAnchor(() => {
+        model.ops.forEach((op) => { if (op.kind === 'equal') state.expanded.add(op.id); });
+      });
+    });
+    document.getElementById('collapse').addEventListener('click', () => {
+      withAnchor(() => { state.expanded.clear(); });
+    });
+    document.getElementById('ws').addEventListener('click', () => {
+      withAnchor(() => {
+        state.ignoreWs = !state.ignoreWs;
+        state.expanded.clear();
+      });
+    });
+    document.getElementById('fontDec').addEventListener('click', () => {
+      const prev = rowH();
+      state.fontSize = Math.max(10, state.fontSize - 1);
+      state.s *= rowH() / prev;
+      render();
+    });
+    document.getElementById('fontInc').addEventListener('click', () => {
+      const prev = rowH();
+      state.fontSize = Math.min(22, state.fontSize + 1);
+      state.s *= rowH() / prev;
+      render();
+    });
+    document.getElementById('fontReset').addEventListener('click', () => {
+      const prev = rowH();
+      state.fontSize = 13;
+      state.s *= rowH() / prev;
+      render();
+    });
+
+    document.querySelectorAll('[data-scope]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.scope = btn.dataset.scope;
+        document.querySelectorAll('[data-scope]').forEach((b) => {
+          b.setAttribute('aria-pressed', b === btn ? 'true' : 'false');
+        });
+        paintHits();
+        render();
+      });
+    });
+    document.getElementById('find').addEventListener('input', (e) => {
+      state.query = e.target.value;
+      paintHits();
+      render();
+    });
+
+    stage.addEventListener('click', (e) => {
+      const row = e.target.closest('[data-omit]');
+      if (!row) return;
+      const id = row.dataset.omit;
+      withAnchor(() => { state.expanded.add(id); });
+    });
+
+    function onWheel(e) {
+      e.preventDefault();
+      applyS(state.s + e.deltaY);
+    }
+    paneL.addEventListener('wheel', onWheel, { passive: false });
+    paneR.addEventListener('wheel', onWheel, { passive: false });
+    function contentFromScroll(scrollTop, n) {
+      if (scrollTop <= 0) return 0;
+      if (scrollTop >= maxScroll(n) - 0.5) return n * rowH();
+      return scrollTop + anchorY();
+    }
+    paneL.addEventListener('scroll', () => { if (!lock) applyS(sFrom('old', contentFromScroll(paneL.scrollTop, model.oldRows.length))); });
+    paneR.addEventListener('scroll', () => { if (!lock) applyS(sFrom('new', contentFromScroll(paneR.scrollTop, model.newRows.length))); });
+    window.addEventListener('resize', () => render());
+
+    function boot() {
+      rebuild();
+      applyS(initialS());
+    }
+    boot();
+    window.addEventListener('load', boot);
+  </script>
+</body>
+</html>

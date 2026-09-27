@@ -1,8 +1,8 @@
 //! git2 adapter: Repository / Comparison I/O → domain types. No UI chrome.
 
 use crate::domain::{
-    Alignment, AlignmentOp, ChangedPath, Comparison, DisplayRow, LineSpan, Oid, PathStatus,
-    Repository, Side, ViewOptions, display_rows, split_lines,
+    Alignment, AlignmentOp, ChangedPath, Comparison, DisplayRows, LineSpan, Oid, PathStatus,
+    Repository, Side, ViewOptions, display_rows_folded, split_lines,
 };
 use crate::workspace_store::{self, WorkspaceEntry};
 use similar::{DiffOp, TextDiff};
@@ -652,8 +652,11 @@ pub fn is_binary(data: &[u8]) -> bool {
 #[derive(Clone, Debug)]
 pub enum FileDiff {
     Text {
-        rows: Vec<DisplayRow>,
+        display: DisplayRows,
         hunk_count: usize,
+        alignment: Alignment,
+        old_text: String,
+        new_text: String,
     },
     Binary,
     Error(String),
@@ -692,31 +695,39 @@ fn file_diff_inner(
         return Ok(FileDiff::Binary);
     }
 
-    let old_text = String::from_utf8_lossy(&old_bytes);
-    let new_text = String::from_utf8_lossy(&new_bytes);
+    let old_text = String::from_utf8_lossy(&old_bytes).into_owned();
+    let new_text = String::from_utf8_lossy(&new_bytes).into_owned();
     let alignment = compute_alignment(&old_text, &new_text, options);
     let hunk_count = alignment.hunks().len();
-    let rows = display_rows(&old_text, &new_text, &alignment);
-    Ok(FileDiff::Text { rows, hunk_count })
+    let display = display_rows_folded(
+        &old_text,
+        &new_text,
+        &alignment,
+        &crate::domain::FoldState::collapsed(),
+    );
+    Ok(FileDiff::Text {
+        display,
+        hunk_count,
+        alignment,
+        old_text,
+        new_text,
+    })
 }
 
-pub fn compute_alignment(old_text: &str, new_text: &str, options: &ViewOptions) -> Alignment {
-    // ponytail: ignore_whitespace stays false in v1 slice; wire when UI toggle exists
-    let _ = options.ignore_whitespace;
+fn strip_whitespace(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
 
-    let old_lines = split_lines(old_text);
-    let new_lines = split_lines(new_text);
-    let diff = TextDiff::from_slices(&old_lines, &new_lines);
-
-    let mut ops = Vec::new();
-    for op in diff.ops() {
+fn alignment_from_diff_ops(ops: &[DiffOp]) -> Alignment {
+    let mut out = Vec::with_capacity(ops.len());
+    for op in ops {
         match *op {
             DiffOp::Equal {
                 old_index,
                 new_index,
                 len,
             } => {
-                ops.push(AlignmentOp::Equal {
+                out.push(AlignmentOp::Equal {
                     old: LineSpan {
                         start: old_index as u32 + 1,
                         count: len as u32,
@@ -732,7 +743,7 @@ pub fn compute_alignment(old_text: &str, new_text: &str, options: &ViewOptions) 
                 old_len,
                 new_index,
             } => {
-                ops.push(AlignmentOp::Delete {
+                out.push(AlignmentOp::Delete {
                     olds: LineSpan {
                         start: old_index as u32 + 1,
                         count: old_len as u32,
@@ -745,7 +756,7 @@ pub fn compute_alignment(old_text: &str, new_text: &str, options: &ViewOptions) 
                 new_index,
                 new_len,
             } => {
-                ops.push(AlignmentOp::Insert {
+                out.push(AlignmentOp::Insert {
                     after_old: old_index as u32,
                     news: LineSpan {
                         start: new_index as u32 + 1,
@@ -759,7 +770,7 @@ pub fn compute_alignment(old_text: &str, new_text: &str, options: &ViewOptions) 
                 new_index,
                 new_len,
             } => {
-                ops.push(AlignmentOp::Replace {
+                out.push(AlignmentOp::Replace {
                     olds: LineSpan {
                         start: old_index as u32 + 1,
                         count: old_len as u32,
@@ -772,7 +783,25 @@ pub fn compute_alignment(old_text: &str, new_text: &str, options: &ViewOptions) 
             }
         }
     }
-    Alignment { ops }
+    Alignment { ops: out }
+}
+
+pub fn compute_alignment(old_text: &str, new_text: &str, options: &ViewOptions) -> Alignment {
+    let old_lines = split_lines(old_text);
+    let new_lines = split_lines(new_text);
+
+    if options.ignore_whitespace {
+        // Diff on whitespace-stripped keys; indices still map to original lines.
+        let old_keys: Vec<String> = old_lines.iter().map(|l| strip_whitespace(l)).collect();
+        let new_keys: Vec<String> = new_lines.iter().map(|l| strip_whitespace(l)).collect();
+        let old_refs: Vec<&str> = old_keys.iter().map(|s| s.as_str()).collect();
+        let new_refs: Vec<&str> = new_keys.iter().map(|s| s.as_str()).collect();
+        let diff = TextDiff::from_slices(&old_refs, &new_refs);
+        alignment_from_diff_ops(diff.ops())
+    } else {
+        let diff = TextDiff::from_slices(&old_lines, &new_lines);
+        alignment_from_diff_ops(diff.ops())
+    }
 }
 
 #[cfg(test)]
@@ -847,14 +876,68 @@ mod tests {
             &ViewOptions::default(),
         );
         match diff {
-            FileDiff::Text { rows, hunk_count } => {
+            FileDiff::Text {
+                display,
+                hunk_count,
+                ..
+            } => {
                 assert!(hunk_count >= 1);
-                assert!(rows.iter().any(|r| r.kind == crate::domain::RowKind::Insert));
+                assert!(
+                    display
+                        .new_rows
+                        .iter()
+                        .any(|r| r.kind == crate::domain::RowKind::Insert)
+                );
             }
             other => panic!("expected text diff, got {other:?}"),
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ignore_whitespace_merges_whitespace_only_change_into_equal() {
+        let old = "keep\n  spaced  \nend\n";
+        let new = "keep\nspaced\nend\n";
+
+        let with_ws = compute_alignment(old, new, &ViewOptions::default());
+        assert_eq!(
+            with_ws.hunks().len(),
+            1,
+            "whitespace-only edit is a Hunk when ignore_whitespace is off"
+        );
+        assert!(
+            matches!(
+                with_ws.ops.as_slice(),
+                [
+                    AlignmentOp::Equal { .. },
+                    AlignmentOp::Replace { .. },
+                    AlignmentOp::Equal { .. },
+                ]
+            ),
+            "expected Equal-Replace-Equal, got {:?}",
+            with_ws.ops
+        );
+
+        let ignore = compute_alignment(
+            old,
+            new,
+            &ViewOptions {
+                ignore_whitespace: true,
+            },
+        );
+        assert!(
+            ignore.hunks().is_empty(),
+            "ignore_whitespace merges whitespace-only change into Equal; got {:?}",
+            ignore.ops
+        );
+        assert_eq!(
+            ignore.ops,
+            vec![AlignmentOp::Equal {
+                old: LineSpan { start: 1, count: 3 },
+                new: LineSpan { start: 1, count: 3 },
+            }]
+        );
     }
 
     #[test]
