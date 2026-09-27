@@ -14,8 +14,36 @@ use crate::domain::{
     search_file,
 };
 
-const LN_COL: f32 = 32.;
+const LN_FONT_PX: f32 = 10.;
+/// Wider than Menlo/Consolas at 10px (~6px) so a digit is never clipped.
+const LN_DIGIT_PX: f32 = 8.;
+/// `pr_1` / `pl_1` on the column.
+const LN_PAD: f32 = 4.;
 const BRIDGE_COL: f32 = 24.;
+
+fn line_number_digits(display: &DisplayRows) -> u32 {
+    let max_ln = display
+        .old_rows
+        .iter()
+        .chain(&display.new_rows)
+        .map(|row| match row.kind {
+            RowKind::Omit { to, .. } => to.max(row.ln),
+            _ => row.ln,
+        })
+        .max()
+        .unwrap_or(1);
+    let mut digits = 0u32;
+    let mut n = max_ln.max(1);
+    while n > 0 {
+        digits += 1;
+        n /= 10;
+    }
+    digits.max(2)
+}
+
+fn ln_col_width(digits: u32) -> f32 {
+    digits as f32 * LN_DIGIT_PX + LN_PAD
+}
 use crate::export;
 use crate::git::{self, FileDiff};
 use crate::window_geometry_store;
@@ -1304,6 +1332,7 @@ fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement 
     match view.snapshot.as_ref().map(|s| &s.file) {
         Some(FileDiff::Text { display, .. }) => {
             let waves = view.omit_links.clone();
+            let ln_w = ln_col_width(line_number_digits(display));
             div()
                 .id("diff-panes")
                 .relative()
@@ -1318,7 +1347,7 @@ fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement 
                     canvas(
                         |_, _, _| (),
                         move |bounds, _, window, _| {
-                            paint_omit_waves(window, bounds, &waves);
+                            paint_omit_waves(window, bounds, &waves, ln_w);
                         },
                     )
                     .absolute()
@@ -1592,11 +1621,12 @@ fn center_gutter(
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
     let placed = view.placed.clone();
+    let ln_w = ln_col_width(line_number_digits(display));
     div()
         .id("gutter")
         .relative()
         .overflow_hidden()
-        .w(theme::GUTTER_WIDTH)
+        .w(px(ln_w * 2. + BRIDGE_COL))
         .h_full()
         .flex_none()
         .bg(theme::white())
@@ -1623,7 +1653,7 @@ fn center_gutter(
             &display.old_rows,
             view.applied_old,
             view.row_h(),
-            view.font_size.px() as f32,
+            ln_w,
             &view.old_seam_rows,
             false,
         ))
@@ -1632,7 +1662,7 @@ fn center_gutter(
             &display.new_rows,
             view.applied_new,
             view.row_h(),
-            view.font_size.px() as f32,
+            ln_w,
             &view.new_seam_rows,
             false,
         ))
@@ -1641,7 +1671,7 @@ fn center_gutter(
                 |_, _, _| (),
                 move |bounds, _, window, _| {
                     window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                        paint_bridges(window, &placed);
+                        paint_bridges(window, &placed, ln_w);
                     });
                 },
             )
@@ -1655,7 +1685,7 @@ fn center_gutter(
             &display.old_rows,
             view.applied_old,
             view.row_h(),
-            view.font_size.px() as f32,
+            ln_w,
             &[],
             true,
         ))
@@ -1664,7 +1694,7 @@ fn center_gutter(
             &display.new_rows,
             view.applied_new,
             view.row_h(),
-            view.font_size.px() as f32,
+            ln_w,
             &[],
             true,
         ))
@@ -1675,7 +1705,7 @@ fn ln_col(
     rows: &[DisplayRow],
     scroll_top: f32,
     row_h: f32,
-    font_px: f32,
+    col_w: f32,
     seams: &[u32],
     labels_only: bool,
 ) -> impl IntoElement {
@@ -1693,11 +1723,13 @@ fn ln_col(
         .id(id)
         .absolute()
         .top(px(-scroll_top))
-        .w(px(LN_COL))
+        .w(px(col_w))
+        .overflow_hidden()
+        .whitespace_nowrap()
         .when(left, |col| col.left(px(0.)))
         .when(!left, |col| col.right(px(0.)))
-        .font_family(theme::MONO_FONT)
-        .text_size(px(font_px))
+        .font_family(theme::line_number_font())
+        .text_size(px(LN_FONT_PX))
         .text_color(theme::faint())
         .when(left, |col| col.text_right().pr_1())
         .when(!left, |col| col.pl_1())
@@ -1715,7 +1747,10 @@ fn ln_col(
             div()
                 .id(ln_id)
                 .relative()
+                .w_full()
                 .h(px(row_h))
+                .whitespace_nowrap()
+                .overflow_hidden()
                 .when(!labels_only, |cell| cell.bg(kind_bg(row.kind)))
                 .child(label)
                 .when(is_seam && !labels_only, |cell| cell.child(seam_hairline(seam_color)))
@@ -2248,7 +2283,7 @@ fn place_bridge(
     })
 }
 
-fn paint_bridges(window: &mut Window, placed: &[PlacedBridge]) {
+fn paint_bridges(window: &mut Window, placed: &[PlacedBridge], ln_w: f32) {
     for bridge in placed {
         let parallel = (bridge.y_l0 - bridge.y_r0).abs() < 1. && (bridge.y_l1 - bridge.y_r1).abs() < 1.;
         let mut path = PathBuilder::fill();
@@ -2258,7 +2293,7 @@ fn paint_bridges(window: &mut Window, placed: &[PlacedBridge]) {
             path.line_to(point(px(bridge.x_r), px(bridge.y_r1)));
             path.line_to(point(px(bridge.x_l), px(bridge.y_l1)));
         } else {
-            pinch_bezier(&mut path, bridge);
+            pinch_bezier(&mut path, bridge, ln_w);
         }
         path.close();
         if let Ok(path) = path.build() {
@@ -2269,11 +2304,11 @@ fn paint_bridges(window: &mut Window, placed: &[PlacedBridge]) {
 
 /// Full row on the long side, cubic Bézier through the center gutter, then a 2px
 /// hairline across the short side's line-number column so it meets the code hairline.
-fn pinch_bezier(path: &mut PathBuilder, bridge: &PlacedBridge) {
+fn pinch_bezier(path: &mut PathBuilder, bridge: &PlacedBridge, ln_w: f32) {
     let x_l = bridge.x_l;
     let x_r = bridge.x_r;
-    let mid_l = x_l + LN_COL;
-    let mid_r = x_r - LN_COL;
+    let mid_l = x_l + ln_w;
+    let mid_r = x_r - ln_w;
     let mw = (mid_r - mid_l).max(8.);
     match bridge.kind {
         RowKind::Delete => {
@@ -2348,6 +2383,7 @@ fn paint_omit_waves(
     window: &mut Window,
     bounds: Bounds<gpui::Pixels>,
     folds: &[(f32, f32, f32, f32)],
+    ln_w: f32,
 ) {
     if folds.is_empty() {
         return;
@@ -2362,8 +2398,8 @@ fn paint_omit_waves(
                 x0,
                 x1,
                 y_l,
-                gutter_l + LN_COL,
-                gutter_r - LN_COL,
+                gutter_l + ln_w,
+                gutter_r - ln_w,
                 y_r,
             );
             if let Ok(path) = path.build() {
