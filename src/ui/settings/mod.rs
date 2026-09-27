@@ -4,6 +4,8 @@
 
 mod button;
 mod configured_card;
+mod font_list;
+mod font_picker;
 mod nav;
 mod nav_tree;
 mod number_field;
@@ -14,6 +16,7 @@ mod window;
 
 pub use button::{Button, ButtonSize, ButtonStyle};
 pub use configured_card::ConfiguredCard;
+pub use font_picker::{FontPicker, FontPickerEvent};
 pub use number_field::{NumberField, NumberFieldEvent};
 pub use section_header::SectionHeader;
 pub use setting_row::SettingRow;

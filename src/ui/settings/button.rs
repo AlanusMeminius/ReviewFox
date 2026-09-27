@@ -1,6 +1,6 @@
 use gpui::{
-    App, ClickEvent, Context, ElementId, Hsla, Pixels, Render, SharedString, Window, div,
-    prelude::*, px, rgb, svg, transparent_black,
+    App, ClickEvent, Context, ElementId, FocusHandle, Hsla, Pixels, Render, SharedString, Window,
+    div, prelude::*, px, rgb, svg, transparent_black,
 };
 
 use crate::ui::appearance::{self, UiTextSize};
@@ -11,7 +11,6 @@ use crate::ui::theme;
 pub enum ButtonStyle {
     #[default]
     Subtle,
-    #[allow(dead_code)] // Part of the component set; no Settings page uses it yet.
     Outlined,
     #[allow(dead_code)] // Part of the component set; no Settings page uses it yet.
     Tinted(TintColor),
@@ -27,7 +26,6 @@ pub enum TintColor {
 /// Zed `ButtonSize::Medium` (28px, 8px padding) / `Default` (22px, 4px).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ButtonSize {
-    #[allow(dead_code)] // Part of the component set; no Settings page uses it yet.
     Medium,
     #[default]
     Default,
@@ -96,18 +94,21 @@ impl ButtonStyle {
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
-/// Settings button: label with an optional leading icon, or icon only.
+/// Settings button: label with an optional leading or trailing icon, or icon only.
 #[derive(IntoElement)]
 pub struct Button {
     id: ElementId,
     label: Option<SharedString>,
     icon: Option<SharedString>,
     icon_color: Option<Hsla>,
+    icon_end: bool,
+    hint: Option<SharedString>,
     style: ButtonStyle,
     size: ButtonSize,
     small_label: bool,
     tooltip: Option<SharedString>,
     tab_index: Option<isize>,
+    focus_handle: Option<FocusHandle>,
     disabled: bool,
     on_click: Option<ClickHandler>,
 }
@@ -128,11 +129,14 @@ impl Button {
             label,
             icon,
             icon_color: None,
+            icon_end: false,
+            hint: None,
             style: ButtonStyle::default(),
             size: ButtonSize::default(),
             small_label: false,
             tooltip: None,
             tab_index: None,
+            focus_handle: None,
             disabled: false,
             on_click: None,
         }
@@ -151,6 +155,19 @@ impl Button {
     /// Leading icon, an asset path such as `"undo.svg"`.
     pub fn start_icon(mut self, icon: impl Into<SharedString>) -> Self {
         self.icon = Some(icon.into());
+        self
+    }
+
+    /// Trailing icon (Zed `IconPosition::End`), e.g. a picker's chevron.
+    pub fn end_icon(mut self, icon: impl Into<SharedString>) -> Self {
+        self.icon = Some(icon.into());
+        self.icon_end = true;
+        self
+    }
+
+    /// Muted 12px text after the label, e.g. `not installed`.
+    pub fn hint(mut self, hint: impl Into<SharedString>) -> Self {
+        self.hint = Some(hint.into());
         self
     }
 
@@ -177,6 +194,14 @@ impl Button {
     /// div turns their key-up into a `ClickEvent::Keyboard` for focused elements.
     pub fn tab_index(mut self, index: isize) -> Self {
         self.tab_index = Some(index);
+        self
+    }
+
+    /// Like [`Self::tab_index`], with a handle the owner keeps, so it can
+    /// focus the button (e.g. when a popover it opened closes). The handle
+    /// carries the tab index.
+    pub fn track_focus(mut self, handle: &FocusHandle) -> Self {
+        self.focus_handle = Some(handle.clone());
         self
     }
 
@@ -209,6 +234,19 @@ impl RenderOnce for Button {
             )
         };
         let on_click = self.on_click.filter(|_| !self.disabled);
+        let focusable = self.tab_index.is_some() || self.focus_handle.is_some();
+        let icon = self.icon.map(|icon| {
+            svg()
+                .size(px(14.))
+                .flex_none()
+                .path(icon)
+                .text_color(icon_color)
+        });
+        let (start_icon, end_icon) = if self.icon_end {
+            (None, icon)
+        } else {
+            (icon, None)
+        };
 
         div()
             .id(self.id)
@@ -237,11 +275,11 @@ impl RenderOnce for Button {
                     .hover(|button| button.bg(colors.hover))
                     .active(|button| button.bg(colors.active))
             })
-            .when_some(self.tab_index, |button, index| {
-                button
-                    .tab_index(index)
-                    .focus(|button| button.border_color(theme::border_focused()))
+            .when(focusable, |button| {
+                button.focus(|button| button.border_color(theme::border_focused()))
             })
+            .when_some(self.tab_index, |button, index| button.tab_index(index))
+            .when_some(self.focus_handle, |button, handle| button.track_focus(&handle))
             .when_some(self.tooltip, |button, text| {
                 button.tooltip(move |_, cx| cx.new(|_| Tooltip(text.clone())).into())
             })
@@ -250,16 +288,17 @@ impl RenderOnce for Button {
                     .cursor_pointer()
                     .on_click(move |event, window, cx| handler(event, window, cx))
             })
-            .when_some(self.icon, |button, icon| {
+            .children(start_icon)
+            .when_some(self.label, |button, label| button.child(label))
+            .when_some(self.hint, |button, hint| {
                 button.child(
-                    svg()
-                        .size(px(14.))
-                        .flex_none()
-                        .path(icon)
-                        .text_color(icon_color),
+                    div()
+                        .ui_text_size(12., cx)
+                        .text_color(theme::muted())
+                        .child(hint),
                 )
             })
-            .when_some(self.label, |button, label| button.child(label))
+            .children(end_icon)
     }
 }
 

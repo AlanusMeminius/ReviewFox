@@ -89,6 +89,26 @@ impl FontRole {
             FontRole::Code => file.code_font_size = stored,
         }
     }
+
+    /// The family Default resolves to on this machine.
+    pub fn default_family(self, installed: &[String]) -> &'static str {
+        match self {
+            FontRole::Ui => DEFAULT_UI_FONT,
+            FontRole::Code => default_code_font(installed),
+        }
+    }
+
+    /// Store a chosen family; like [`Self::set_size`], `None` (Reset) and the
+    /// family Default resolves to both remove the field.
+    pub fn set_family(self, file: &mut SettingsFile, family: Option<&str>, installed: &[String]) {
+        let stored = family
+            .filter(|&family| family != self.default_family(installed))
+            .map(str::to_string);
+        match self {
+            FontRole::Ui => file.ui_font_family = stored,
+            FontRole::Code => file.code_font_family = stored,
+        }
+    }
 }
 
 /// Code Font Default: Plex Mono when installed, else the system monospace. The
@@ -106,7 +126,8 @@ fn default_code_font(installed: &[String]) -> &'static str {
     }
 }
 
-/// Installed font names, read once at startup; what [`update`] resolves against.
+/// Installed font names (sorted, deduplicated), read once at startup: what
+/// [`update`] resolves against and what the font picker lists.
 struct InstalledFonts(Vec<String>);
 
 impl Global for InstalledFonts {}
@@ -128,10 +149,15 @@ pub fn update(cx: &mut App, edit: impl FnOnce(&mut SettingsFile)) {
     let mut file = settings_store::load_file();
     edit(&mut file);
     settings_store::save_file(&file).ok();
-    let next = resolve(&file, &cx.global::<InstalledFonts>().0);
+    let next = resolve(&file, installed_fonts(cx));
     if &next != cx.global::<Appearance>() {
         cx.set_global(next);
     }
+}
+
+/// The installed font names, cached since startup.
+pub fn installed_fonts(cx: &App) -> &[String] {
+    &cx.global::<InstalledFonts>().0
 }
 
 /// UI Font family to render with.
@@ -171,12 +197,16 @@ impl<E: Styled> UiTextSize for E {}
 
 pub fn resolve(file: &SettingsFile, installed: &[String]) -> Appearance {
     Appearance {
-        ui_font: resolve_family(file.ui_font_family.as_deref(), DEFAULT_UI_FONT, installed),
+        ui_font: resolve_family(
+            file.ui_font_family.as_deref(),
+            FontRole::Ui.default_family(installed),
+            installed,
+        ),
         ui_font_size: round_size(file.ui_font_size)
             .map_or(UI_FONT_SIZE_DEFAULT, |px| px.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX)),
         code_font: resolve_family(
             file.code_font_family.as_deref(),
-            default_code_font(installed),
+            FontRole::Code.default_family(installed),
             installed,
         ),
         // `DiffFontSize::new` owns the Code Font size range.
@@ -290,6 +320,25 @@ mod tests {
 
         FontRole::Code.set_size(&mut file, Some(13));
         assert_eq!(file.code_font_size, None);
+    }
+
+    #[test]
+    fn choosing_the_default_family_or_resetting_removes_the_field() {
+        let fonts = installed(&["IBM Plex Mono", "Inter", "Consolas"]);
+        let mut file = SettingsFile::default();
+        FontRole::Ui.set_family(&mut file, Some("Inter"), &fonts);
+        FontRole::Code.set_family(&mut file, Some("Consolas"), &fonts);
+        assert_eq!(file.ui_font_family.as_deref(), Some("Inter"));
+        assert_eq!(file.code_font_family.as_deref(), Some("Consolas"));
+
+        // The resolved Default: Plex Sans for UI, Plex Mono (installed) for Code.
+        FontRole::Ui.set_family(&mut file, Some("IBM Plex Sans"), &fonts);
+        FontRole::Code.set_family(&mut file, Some("IBM Plex Mono"), &fonts);
+        assert_eq!((file.ui_font_family.clone(), file.code_font_family.clone()), (None, None));
+
+        FontRole::Ui.set_family(&mut file, Some("Inter"), &fonts);
+        FontRole::Ui.set_family(&mut file, None, &fonts);
+        assert_eq!(file.ui_font_family, None);
     }
 
     #[test]

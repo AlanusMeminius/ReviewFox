@@ -93,6 +93,9 @@ impl AssetSource for Assets {
             "plus.svg" => Some(Cow::Borrowed(
                 include_bytes!("../../assets/plus.svg") as &'static [u8],
             )),
+            "chevrons_up_down.svg" => Some(Cow::Borrowed(
+                include_bytes!("../../assets/chevrons_up_down.svg") as &'static [u8],
+            )),
             _ => None,
         })
     }

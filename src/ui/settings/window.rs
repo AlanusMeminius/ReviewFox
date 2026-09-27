@@ -10,13 +10,14 @@ use std::rc::Rc;
 use crate::gitlab::SettingsTarget;
 use crate::settings_store::{self, DEFAULT_BASE_URL};
 
+use super::font_picker;
 use super::nav::{NavItem, SettingsNav};
 use super::nav_tree::{NavEntry, NavPage, NavState};
 use super::number_field;
 use super::token_row::{self, CardStatus, KeychainError, TokenRow};
 use super::{
-    Button, ButtonSize, ButtonStyle, ConfiguredCard, NumberField, NumberFieldEvent, SectionHeader,
-    SettingRow,
+    Button, ButtonSize, ButtonStyle, ConfiguredCard, FontPicker, FontPickerEvent, NumberField,
+    NumberFieldEvent, SectionHeader, SettingRow,
 };
 use crate::ui::gitlab_connection::{self, GitLabConnection};
 #[cfg(target_os = "macos")]
@@ -52,14 +53,16 @@ const CLOSE_KEY: &str = "cmd-w";
 const CLOSE_KEY: &str = "ctrl-w";
 
 /// Tab order: nav, GitLab URL, then the token input or the token card's buttons
-/// (up to two), then the font sizes. Only the selected page's controls render,
-/// so each page tabs through its own.
+/// (up to two), then each font group's family and size. Only the selected
+/// page's controls render, so each page tabs through its own.
 const TAB_NAV: isize = 0;
 const TAB_URL: isize = 1;
 const TAB_TOKEN: isize = 2;
 /// After the token card's two buttons (Retry, Reset Token).
-const TAB_UI_FONT_SIZE: isize = TAB_TOKEN + 2;
-const TAB_CODE_FONT_SIZE: isize = TAB_UI_FONT_SIZE + 1;
+const TAB_UI_FONT_FAMILY: isize = TAB_TOKEN + 2;
+const TAB_UI_FONT_SIZE: isize = TAB_UI_FONT_FAMILY + 1;
+const TAB_CODE_FONT_FAMILY: isize = TAB_UI_FONT_SIZE + 1;
+const TAB_CODE_FONT_SIZE: isize = TAB_CODE_FONT_FAMILY + 1;
 
 const URL_TITLE: &str = "GitLab URL";
 const URL_DESCRIPTION: &str = "Your self-hosted GitLab address. Leave empty for gitlab.com.";
@@ -73,6 +76,7 @@ struct FontGroup {
     title: &'static str,
     /// Element id prefix of the group's rows.
     id: &'static str,
+    family_tab_index: isize,
     size_tab_index: isize,
     preview: &'static [&'static str],
 }
@@ -82,6 +86,7 @@ const FONT_GROUPS: [FontGroup; 2] = [
         role: FontRole::Ui,
         title: "UI Font",
         id: "settings-ui-font",
+        family_tab_index: TAB_UI_FONT_FAMILY,
         size_tab_index: TAB_UI_FONT_SIZE,
         preview: &[
             "The quick brown fox jumps over the lazy dog",
@@ -93,6 +98,7 @@ const FONT_GROUPS: [FontGroup; 2] = [
         role: FontRole::Code,
         title: "Code Font",
         id: "settings-code-font",
+        family_tab_index: TAB_CODE_FONT_FAMILY,
         size_tab_index: TAB_CODE_FONT_SIZE,
         preview: &["fn main() { let 名称 = \"你好，世界\"; }", "0O o 1lI |"],
     },
@@ -112,6 +118,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
     ]
     .into_iter()
     .chain(number_field::key_bindings())
+    .chain(font_picker::key_bindings())
     .collect()
 }
 
@@ -170,6 +177,8 @@ pub struct SettingsView {
     has_saved_token: bool,
     keychain_error: Option<KeychainError>,
     gitlab_connection: Rc<RefCell<GitLabConnection>>,
+    ui_font_family: Entity<FontPicker>,
+    code_font_family: Entity<FontPicker>,
     ui_font_size: Entity<NumberField>,
     code_font_size: Entity<NumberField>,
     nav_focus: FocusHandle,
@@ -233,6 +242,19 @@ impl SettingsView {
             ));
             field
         });
+        let [ui_font_family, code_font_family] = FONT_GROUPS.map(|group| {
+            let picker = cx.new(|cx| {
+                let id = format!("{}-family", group.id);
+                FontPicker::new(id, group.role, group.family_tab_index, cx)
+            });
+            subscriptions.push(cx.subscribe(
+                &picker,
+                move |_, _, event: &FontPickerEvent, cx| match event {
+                    FontPickerEvent::Confirm(family) => set_family(group.role, Some(family), cx),
+                },
+            ));
+            picker
+        });
 
         // The scroll handle lives in a global registry and outlives the window.
         let (content_scroll, _) = scrollbar::vertical(CONTENT_SCROLL_ID, cx);
@@ -246,6 +268,8 @@ impl SettingsView {
             has_saved_token,
             keychain_error: None,
             gitlab_connection,
+            ui_font_family,
+            code_font_family,
             ui_font_size,
             code_font_size,
             nav_focus: cx.focus_handle().tab_index(TAB_NAV).tab_stop(true),
@@ -303,6 +327,13 @@ impl SettingsView {
         self.base_url
             .update(cx, |field, cx| field.set_content(DEFAULT_BASE_URL, cx));
         self.commit_base_url(cx);
+    }
+
+    fn family_picker(&self, role: FontRole) -> &Entity<FontPicker> {
+        match role {
+            FontRole::Ui => &self.ui_font_family,
+            FontRole::Code => &self.code_font_family,
+        }
     }
 
     fn size_field(&self, role: FontRole) -> &Entity<NumberField> {
@@ -675,7 +706,7 @@ impl SettingsView {
     }
 
     /// Heading, rows (each with its divider), then the preview in the group's
-    /// resolved family and size. Ticket 04's Family row goes above Size.
+    /// resolved family and size.
     fn render_font_group(&self, group: FontGroup, cx: &mut Context<Self>) -> gpui::Div {
         let appearance = cx.global::<Appearance>();
         let family = group.role.family(appearance).name.clone();
@@ -693,6 +724,7 @@ impl SettingsView {
                     .text_color(theme::text())
                     .child(group.title),
             )
+            .child(self.render_family_row(group, cx))
             .child(self.render_size_row(group, cx))
             .child(
                 div().pt(px(16.)).pb(px(16.)).child(
@@ -701,6 +733,23 @@ impl SettingsView {
                         .text_size(size),
                 ),
             )
+    }
+
+    /// `Family` row; Reset to Default (shown while a family is stored, also
+    /// one that is not installed) removes the field from `settings.json`.
+    fn render_family_row(&self, group: FontGroup, cx: &mut Context<Self>) -> SettingRow {
+        let role = group.role;
+        let id = format!("{}-family", group.id);
+        let stored = role.family(cx.global::<Appearance>()).stored.is_some();
+        SettingRow::new(ElementId::Name(id.clone().into()), "Family")
+            .when(stored, |row| {
+                row.title_action(
+                    Button::icon_only(ElementId::Name(format!("{id}-reset").into()), "undo.svg")
+                        .tooltip(RESET_TO_DEFAULT)
+                        .on_click(cx.listener(move |_, _, _, cx| set_family(role, None, cx))),
+                )
+            })
+            .control(self.family_picker(role).clone())
     }
 
     /// `Size` row; Reset to Default removes the field from `settings.json`.
@@ -720,6 +769,13 @@ impl SettingsView {
             })
             .control(self.size_field(role).clone())
     }
+}
+
+/// Store a picked family (`None`: Reset). The resolved Default is stored as
+/// unset, like a size equal to its default.
+fn set_family(role: FontRole, family: Option<&str>, cx: &mut App) {
+    let installed = appearance::installed_fonts(cx).to_vec();
+    appearance::update(cx, |file| role.set_family(file, family, &installed));
 }
 
 /// Preview lines in a quiet box; the caller sets the family and size.

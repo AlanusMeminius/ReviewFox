@@ -40,13 +40,15 @@ pub enum TextFieldEvent {
 
 /// Visual variant. `Default` is the original full-width field; `Settings`
 /// follows Zed's settings input (min 256px wide, focused border); `Number` is
-/// the bare centered value inside a `NumberField`, which draws the frame.
+/// the bare centered value inside a `NumberField`, which draws the frame;
+/// `Search` is the frameless full-width query bar atop a picker popover.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TextFieldStyle {
     #[default]
     Default,
     Settings,
     Number,
+    Search,
 }
 
 pub struct TextField {
@@ -713,6 +715,7 @@ impl Render for TextField {
                         .min_w(px(256.))
                         .focus(|field| field.border_color(theme::border_focused())),
                     TextFieldStyle::Number => field.size_full().px_1(),
+                    TextFieldStyle::Search => field.w_full().h(px(32.)).px_2(),
                 }
             })
             .ui_text_size(13., cx)
