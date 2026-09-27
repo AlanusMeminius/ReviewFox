@@ -86,13 +86,22 @@ impl Repository {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Comparison {
     pub repository: Repository,
-    pub base_oid: Oid,
+    /// Base commit; `None` = the empty tree (base of a root commit).
+    pub base_oid: Option<Oid>,
     pub head_oid: Oid,
 }
 
 impl Comparison {
+    /// Label shown for an empty-tree base.
+    pub const EMPTY_BASE_LABEL: &'static str = "root";
+
+    /// `e7a2ab7..287bfa5`, or `root..ae12de0` for an empty-tree base.
     pub fn label(&self) -> String {
-        format!("{}..{}", self.base_oid.short(), self.head_oid.short())
+        let base = self
+            .base_oid
+            .map(|o| o.short())
+            .unwrap_or_else(|| Self::EMPTY_BASE_LABEL.to_string());
+        format!("{base}..{}", self.head_oid.short())
     }
 }
 
@@ -643,9 +652,17 @@ mod tests {
     fn fake_comparison() -> Comparison {
         Comparison {
             repository: Repository::new(PathBuf::from("/tmp/repo")),
-            base_oid: Oid::from_bytes([1; 20]),
+            base_oid: Some(Oid::from_bytes([1; 20])),
             head_oid: Oid::from_bytes([2; 20]),
         }
+    }
+
+    #[test]
+    fn comparison_label_renders_empty_base_as_root() {
+        let mut c = fake_comparison();
+        assert_eq!(c.label(), "0101010..0202020");
+        c.base_oid = None;
+        assert_eq!(c.label(), "root..0202020");
     }
 
     #[test]

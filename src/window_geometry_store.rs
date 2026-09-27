@@ -20,7 +20,10 @@ pub struct StoredBounds {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffReopen {
     pub repository: PathBuf,
-    pub base_oid: String,
+    /// Base commit OID; `None` (JSON `null`) = empty tree (root-commit Comparison).
+    /// Older files always carry a string, which loads as `Some`.
+    #[serde(default)]
+    pub base_oid: Option<String>,
     pub head_oid: String,
     pub selected_path: String,
 }
@@ -216,7 +219,7 @@ mod tests {
             diff_open: true,
             diff_reopen: Some(DiffReopen {
                 repository: PathBuf::from("/repo"),
-                base_oid: "a".repeat(40),
+                base_oid: Some("a".repeat(40)),
                 head_oid: "b".repeat(40),
                 selected_path: "src/a.rs".into(),
             }),
@@ -226,6 +229,38 @@ mod tests {
         save_at(&path, &file);
         let loaded = load_at(&path);
         assert_eq!(loaded, file);
+    }
+
+    #[test]
+    fn empty_tree_base_round_trips() {
+        let file = WindowGeometryFile {
+            diff_open: true,
+            diff_reopen: Some(DiffReopen {
+                repository: PathBuf::from("/repo"),
+                base_oid: None,
+                head_oid: "b".repeat(40),
+                selected_path: "README.md".into(),
+            }),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path_for_tests(dir.path());
+        save_at(&path, &file);
+        assert_eq!(load_at(&path), file);
+    }
+
+    #[test]
+    fn old_format_string_base_oid_loads() {
+        let old = format!(
+            r#"{{"diff_open":true,"diff_reopen":{{"repository":"/repo","base_oid":"{}","head_oid":"{}","selected_path":"a.rs"}}}}"#,
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        let loaded: WindowGeometryFile = serde_json::from_str(&old).unwrap();
+        let reopen = loaded.diff_reopen.expect("diff_reopen");
+        assert_eq!(reopen.base_oid, Some("a".repeat(40)));
+        assert_eq!(reopen.head_oid, "b".repeat(40));
+        assert!(loaded.diff_open);
     }
 
     #[test]

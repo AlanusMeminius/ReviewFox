@@ -919,14 +919,17 @@ fn open_or_update_diff(
 fn remember_diff_reopen_from_snapshot(snapshot: &DiffSnapshot) {
     window_geometry_store::note_diff_opened(DiffReopen {
         repository: snapshot.comparison.repository.path().to_path_buf(),
-        base_oid: snapshot.comparison.base_oid.to_string(),
+        base_oid: snapshot.comparison.base_oid.map(|o| o.to_string()),
         head_oid: snapshot.comparison.head_oid.to_string(),
         selected_path: snapshot.selected_path.clone(),
     });
 }
 
 fn rebuild_diff_snapshot(reopen: &DiffReopen) -> Option<DiffSnapshot> {
-    let base_oid: Oid = reopen.base_oid.parse().ok()?;
+    let base_oid: Option<Oid> = match &reopen.base_oid {
+        Some(s) => Some(s.parse().ok()?),
+        None => None,
+    };
     let head_oid: Oid = reopen.head_oid.parse().ok()?;
     let comparison = Comparison {
         repository: Repository::new(reopen.repository.clone()),

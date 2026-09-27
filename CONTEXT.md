@@ -21,7 +21,7 @@ A user-pinned Workspace shown in the Pin section and excluded from the Repositor
 _Avoid_: favorite, bookmark, starred
 
 **Comparison**:
-A reviewable surface identified only by `(repository, base_oid, head_oid)` where `base_oid` and `head_oid` are commit object IDs; the reviewable content is the trees those commits name. Branch names and MR metadata are Entry labels, not identity. Diff is always over this two-tree pair (possibly folded from a commit selection), never “the MR” as a third identity.
+A reviewable surface identified only by `(repository, base_oid, head_oid)` where `base_oid` and `head_oid` are commit object IDs; the reviewable content is the trees those commits name. For a root commit there is no base commit, so the base is the empty tree (every path is an addition). Branch names and MR metadata are Entry labels, not identity. Diff is always over this two-tree pair (possibly folded from a commit selection), never “the MR” as a third identity.
 _Avoid_: commit range (as identity), MR, branch tip (as identity), tree OID pair (as identity), per-commit review surface (as a second identity)
 
 **Branch Browser**:
