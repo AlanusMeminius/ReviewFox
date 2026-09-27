@@ -1534,7 +1534,8 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
         .flex()
         .flex_col()
         .pl(inset)
-        .pr(inset)
+        // No right padding: `changes_float_clearance` already ends this column one
+        // gap short of the Changes island, so padding here would count it twice.
         .pt(px(theme::CHANGES_TOP_INSET))
         .pb(inset)
         .when(show_mr, |d| {
