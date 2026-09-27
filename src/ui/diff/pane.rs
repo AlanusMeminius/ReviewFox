@@ -422,7 +422,7 @@ impl DualPane {
             return advance;
         }
         let text = window.text_system();
-        let id = text.resolve_font(&font(theme::MONO_FONT));
+        let id = text.resolve_font(&font(theme::code_font()));
         let advance = text
             .advance(id, px(font_px), '0')
             .map(|s| f32::from(s.width))

@@ -410,7 +410,7 @@ fn shape_row(layout: &Layout, side: Side, row: Row<'_>, font_px: f32, window: &m
             shape(
                 window,
                 SharedString::from(t.text.clone()),
-                theme::MONO_FONT,
+                theme::code_font(),
                 font_px,
                 theme::text(),
             )
