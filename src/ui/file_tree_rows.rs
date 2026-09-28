@@ -139,12 +139,14 @@ pub fn file_row(
                 .h(px(16.))
                 .flex_1()
                 .min_w(px(0.))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
                 .flex()
                 .items_center()
                 .ui_text_size(12., cx)
                 .text_color(name_color)
-                .overflow_hidden()
-                .child(div().overflow_hidden().text_ellipsis().child(name)),
+                .child(name),
         )
         .child(
             div()
