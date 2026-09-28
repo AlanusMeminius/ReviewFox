@@ -46,11 +46,26 @@ fn forbids_break_between(prev: char, c: char) -> bool {
 }
 
 fn segment_width(text: &str, start: usize, end: usize, char_width: &mut impl FnMut(char) -> f32) -> f32 {
-    text[start..end].chars().map(|c| char_width(c)).sum()
+    let mut w = 0_f32;
+    for c in text[start..end].chars() {
+        w += char_width(c);
+    }
+    w
 }
 
-fn glued_run_start(text: &str, break_ix: usize) -> usize {
-    let indices: Vec<(usize, char)> = text.char_indices().collect();
+/// Width of `text[start..end]` using prefix sums at char boundaries in `char_bounds`.
+fn segment_width_prefix(
+    width_at: &[f32],
+    char_bounds: &[usize],
+    start: usize,
+    end: usize,
+) -> f32 {
+    let i = char_bounds.partition_point(|&b| b < start);
+    let j = char_bounds.partition_point(|&b| b < end);
+    width_at[j] - width_at[i]
+}
+
+fn glued_run_start(indices: &[(usize, char)], break_ix: usize) -> usize {
     let mut i = match indices.iter().position(|(b, _)| *b == break_ix) {
         Some(i) => i,
         None => return break_ix,
@@ -77,8 +92,7 @@ fn run_is_indivisible(text: &str, start: usize, end: usize) -> bool {
     INDIVISIBLE_OPS.contains(&&text[start..end])
 }
 
-fn glued_run_end(text: &str, from_ix: usize) -> usize {
-    let indices: Vec<(usize, char)> = text.char_indices().collect();
+fn glued_run_end(text: &str, indices: &[(usize, char)], from_ix: usize) -> usize {
     let mut i = match indices.iter().position(|(b, _)| *b == from_ix) {
         Some(i) => i,
         None => return from_ix + text[from_ix..].chars().next().map_or(0, |c| c.len_utf8()),
@@ -109,20 +123,18 @@ fn next_char_boundary(text: &str, ix: usize) -> usize {
 
 /// Latest byte index `b` in `(last_wrap_ix, end_ix)` where the tail `b..end_ix` fits with indent.
 fn tail_fit_break(
-    text: &str,
+    width_at: &[f32],
+    char_bounds: &[usize],
     last_wrap_ix: usize,
     end_ix: usize,
     wrap_width: f32,
     indent: f32,
-    char_width: &mut impl FnMut(char) -> f32,
 ) -> Option<usize> {
-    let bounds: Vec<usize> = text
-        .char_indices()
-        .map(|(b, _)| b)
-        .filter(|&b| b > last_wrap_ix && b < end_ix)
-        .collect();
-    for &b in bounds.iter().rev() {
-        if segment_width(text, b, end_ix, char_width) + indent <= wrap_width {
+    for &b in char_bounds.iter().rev() {
+        if b <= last_wrap_ix || b >= end_ix {
+            continue;
+        }
+        if segment_width_prefix(width_at, char_bounds, b, end_ix) + indent <= wrap_width {
             return Some(b);
         }
     }
@@ -131,8 +143,10 @@ fn tail_fit_break(
 
 fn adjust_char_break_ix(
     text: &str,
+    indices: &[(usize, char)],
+    _char_bounds: &[usize],
     ix: usize,
-    char_width: &mut impl FnMut(char) -> f32,
+    char_width: &mut dyn FnMut(char) -> f32,
     wrap_width: f32,
 ) -> usize {
     if ix == 0 {
@@ -147,12 +161,15 @@ fn adjust_char_break_ix(
     if !forbids_break_between(prev, cur) {
         return ix;
     }
-    let run_start = glued_run_start(text, ix);
-    let run_end = glued_run_end(text, ix);
+    let run_start = glued_run_start(indices, ix);
+    let run_end = glued_run_end(text, indices, ix);
     if run_is_indivisible(text, run_start, run_end) {
         return run_start;
     }
-    let run_w = segment_width(text, run_start, run_end, char_width);
+    let mut run_w = 0_f32;
+    for c in text[run_start..run_end].chars() {
+        run_w += char_width(c);
+    }
     if run_w > wrap_width {
         ix
     } else {
@@ -162,8 +179,10 @@ fn adjust_char_break_ix(
 
 fn legalize_break_ix(
     text: &str,
+    indices: &[(usize, char)],
+    char_bounds: &[usize],
     ix: usize,
-    char_width: &mut impl FnMut(char) -> f32,
+    char_width: &mut dyn FnMut(char) -> f32,
     wrap_width: f32,
 ) -> usize {
     if ix == 0 {
@@ -176,10 +195,16 @@ fn legalize_break_ix(
         return ix;
     };
     if forbids_break_between(prev, cur) {
-        adjust_char_break_ix(text, ix, char_width, wrap_width)
+        adjust_char_break_ix(text, indices, char_bounds, ix, char_width, wrap_width)
     } else {
         ix
     }
+}
+
+#[derive(Clone, Copy)]
+enum WrapFit {
+    Unknown,
+    MustWrap,
 }
 
 pub fn wrap_display_line(
@@ -187,18 +212,62 @@ pub fn wrap_display_line(
     wrap_width: f32,
     mut char_width: impl FnMut(char) -> f32,
 ) -> WrapBreaks {
+    wrap_display_line_inner(text, wrap_width, &mut char_width, WrapFit::Unknown)
+}
+
+pub(crate) fn wrap_display_line_dyn(
+    text: &str,
+    wrap_width: f32,
+    cw: &mut dyn FnMut(char) -> f32,
+) -> WrapBreaks {
+    wrap_display_line_inner(text, wrap_width, cw, WrapFit::Unknown)
+}
+
+pub(crate) fn wrap_display_line_must_wrap(
+    text: &str,
+    wrap_width: f32,
+    cw: &mut dyn FnMut(char) -> f32,
+) -> WrapBreaks {
+    wrap_display_line_inner(text, wrap_width, cw, WrapFit::MustWrap)
+}
+
+fn wrap_display_line_inner(
+    text: &str,
+    wrap_width: f32,
+    char_width: &mut dyn FnMut(char) -> f32,
+    fit: WrapFit,
+) -> WrapBreaks {
+    if !matches!(fit, WrapFit::MustWrap) {
+        let mut total_width = 0_f32;
+        for (_, c) in text.char_indices() {
+            if c == '\n' {
+                continue;
+            }
+            total_width += char_width(c);
+        }
+        if total_width <= wrap_width {
+            return WrapBreaks {
+                breaks: Vec::new(),
+                continuation_indent_px: 0.,
+            };
+        }
+    }
+
     let first_non_ws = text
         .char_indices()
         .find(|(_, c)| *c != ' ')
         .map(|(ix, _)| ix)
         .unwrap_or(text.len());
 
-    let leading_indent_px: f32 = segment_width(text, 0, first_non_ws, &mut char_width);
+    let mut leading_indent_px = 0_f32;
+    for (_, c) in text[..first_non_ws].char_indices() {
+        leading_indent_px += char_width(c);
+    }
 
-    let max_glyph_w = text
-        .chars()
-        .map(|c| char_width(c))
-        .fold(0_f32, f32::max);
+    let mut max_glyph_w = 0_f32;
+    for c in text.chars() {
+        max_glyph_w = max_glyph_w.max(char_width(c));
+    }
 
     let continuation_indent_px = if leading_indent_px > wrap_width / 2.
         || leading_indent_px + max_glyph_w > wrap_width
@@ -207,6 +276,14 @@ pub fn wrap_display_line(
     } else {
         leading_indent_px
     };
+
+    let indices: Vec<(usize, char)> = text.char_indices().filter(|(_, c)| *c != '\n').collect();
+    let char_bounds: Vec<usize> = indices.iter().map(|(b, _)| *b).collect();
+    let mut width_at: Vec<f32> = Vec::with_capacity(indices.len() + 1);
+    width_at.push(0.);
+    for (_, c) in &indices {
+        width_at.push(width_at.last().copied().unwrap_or(0.) + char_width(*c));
+    }
 
     let mut breaks = Vec::new();
     let mut row_width = 0_f32;
@@ -249,19 +326,28 @@ pub fn wrap_display_line(
 
             let break_ix = legalize_break_ix(
                 text,
+                &indices,
+                &char_bounds,
                 if last_candidate_ix > last_wrap_ix {
                     let b = last_candidate_ix;
                     row_width -= last_candidate_width;
                     b
                 } else {
-                    let b = adjust_char_break_ix(text, ix, &mut char_width, wrap_width);
+                    let b = adjust_char_break_ix(
+                        text,
+                        &indices,
+                        &char_bounds,
+                        ix,
+                        char_width,
+                        wrap_width,
+                    );
                     if b <= last_wrap_ix {
                         break;
                     }
-                    row_width = segment_width(text, b, end_ix, &mut char_width);
+                    row_width = segment_width_prefix(&width_at, &char_bounds, b, end_ix);
                     b
                 },
-                &mut char_width,
+                char_width,
                 wrap_width,
             );
 
@@ -277,31 +363,39 @@ pub fn wrap_display_line(
             while row_width + indent > wrap_width {
                 let inner = legalize_break_ix(
                     text,
+                    &indices,
+                    &char_bounds,
                     tail_fit_break(
-                        text,
+                        &width_at,
+                        &char_bounds,
                         last_wrap_ix,
                         end_ix,
                         wrap_width,
                         indent,
-                        &mut char_width,
                     )
                     .unwrap_or_else(|| {
-                        let forced =
-                            adjust_char_break_ix(text, end_ix, &mut char_width, wrap_width);
+                        let forced = adjust_char_break_ix(
+                            text,
+                            &indices,
+                            &char_bounds,
+                            end_ix,
+                            char_width,
+                            wrap_width,
+                        );
                         if forced <= last_wrap_ix {
                             next_char_boundary(text, last_wrap_ix)
                         } else {
                             forced
                         }
                     }),
-                    &mut char_width,
+                    char_width,
                     wrap_width,
                 );
                 if inner <= last_wrap_ix || inner >= end_ix {
                     break;
                 }
                 last_wrap_ix = inner;
-                row_width = segment_width(text, inner, end_ix, &mut char_width);
+                row_width = segment_width_prefix(&width_at, &char_bounds, inner, end_ix);
                 breaks.push(inner);
             }
         }

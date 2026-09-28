@@ -5,10 +5,12 @@
 //! `cargo test --release -- --ignored frame_cost_is_flat_in_file_length --nocapture`
 
 use std::hint::black_box;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::layout::{Layout, LineKind, Row};
 use super::pane::nearest_hunk_index;
+use super::visual_wrap::{WrapPlan, WrapSide};
 use super::viewport::{self, Viewport, snap};
 use crate::domain::{Alignment, AlignmentOp, FoldState, LineSpan, Side};
 
@@ -84,6 +86,200 @@ fn synthetic(lines: u32, hunks: u32) -> (String, String, Alignment, FoldState) {
         push(&mut new, n + i, "tail");
     }
     (old, new, Alignment { ops }, fold)
+}
+
+/// One display line for wrap perf: short, long, punct-heavy, or megabyte-ish.
+fn synthetic_wrap_line(ln: u32, tag: &str) -> String {
+    match ln % 23 {
+        0 => format!("    let value_{ln} = compute({tag}, {ln});\n"),
+        1 => format!("}}\n"),
+        2 => format!("    if cond_{ln} {{ do_work({tag}); }}\n"),
+        3..=5 => {
+            let mut s = format!("    // context {tag} line {ln}: ");
+            while s.len() < 280 {
+                s.push_str("data ");
+            }
+            s.push('\n');
+            s
+        }
+        6..=8 => format!(
+            "    ptr->next->child[{ln}]->flags |= MASK_{ln} && ok_{ln} // tail\n"
+        ),
+        9..=11 => format!(
+            "    stream << item_{ln} << delim << a->b->c<<=d&&e// note {ln}\n"
+        ),
+        12..=14 => {
+            let mut s = String::from("    ");
+            for i in 0..120 {
+                s.push_str(&format!("x{i}->"));
+            }
+            s.push_str(&format!("end_{ln};\n"));
+            s
+        }
+        15..=17 => format!("    处理行_{ln} 与 {tag} 混合 ascii;\n"),
+        18..=20 => {
+            let mut s = format!("    call({tag}, {ln}, ");
+            while s.len() < 300 {
+                s.push_str("arg, ");
+            }
+            s.push_str("done);\n");
+            s
+        }
+        _ if ln % 500 == 0 => {
+            let mut s = format!("    // meg line {ln} ");
+            while s.len() < 2000 {
+                s.push_str("a->b->c<<=d&&e//");
+            }
+            s.push('\n');
+            s
+        }
+        _ => format!("    ok_{ln}();\n"),
+    }
+}
+
+/// Like [`synthetic`] but with [`synthetic_wrap_line`] bodies for rewrap timing.
+fn synthetic_wrap(lines: u32, hunks: u32) -> (String, String, Alignment, FoldState) {
+    let (mut old, mut new) = (String::new(), String::new());
+    let (mut o, mut n) = (1u32, 1u32);
+    let mut ops = Vec::new();
+    let mut fold = FoldState::collapsed();
+    let equal = (lines / hunks).saturating_sub(3).max(1);
+    let span = |start, count| LineSpan { start, count };
+    let push = |text: &mut String, ln: u32, tag: &str| {
+        text.push_str(&synthetic_wrap_line(ln, tag));
+    };
+    for h in 0..hunks {
+        if h % 5 == 0 {
+            fold.expand(ops.len());
+        }
+        ops.push(AlignmentOp::Equal {
+            old: span(o, equal),
+            new: span(n, equal),
+        });
+        for i in 0..equal {
+            push(&mut old, o + i, "same");
+            push(&mut new, o + i, "same");
+        }
+        o += equal;
+        n += equal;
+        let (olds, news) = match h % 4 {
+            0 => (0, 3),
+            1 => (3, 0),
+            2 => (3, 2),
+            _ => (2, 4),
+        };
+        for i in 0..olds {
+            push(&mut old, o + i, "before");
+        }
+        for i in 0..news {
+            push(&mut new, n + i, "after");
+        }
+        ops.push(match (olds, news) {
+            (0, _) => AlignmentOp::Insert {
+                after_old: o - 1,
+                news: span(n, news),
+            },
+            (_, 0) => AlignmentOp::Delete {
+                olds: span(o, olds),
+                at_new: n - 1,
+            },
+            _ => AlignmentOp::Replace {
+                olds: span(o, olds),
+                news: span(n, news),
+            },
+        });
+        o += olds;
+        n += news;
+    }
+    ops.push(AlignmentOp::Equal {
+        old: span(o, equal),
+        new: span(n, equal),
+    });
+    for i in 0..equal {
+        push(&mut old, o + i, "tail");
+        push(&mut new, n + i, "tail");
+    }
+    (old, new, Alignment { ops }, fold)
+}
+
+const REWRAP_WARM: usize = 15;
+
+fn fake_char_width(c: char) -> f32 {
+    if c.is_ascii() { 8. } else { 16. }
+}
+
+struct RewrapRun {
+    wrap_off: Duration,
+    wrap_median: Duration,
+    wrap_max: Duration,
+    rows: [usize; 2],
+}
+
+fn median(mut samples: Vec<Duration>) -> Duration {
+    samples.sort();
+    samples[samples.len() / 2]
+}
+
+fn time_layout_rewrap(
+    old: &str,
+    new: &str,
+    alignment: &Alignment,
+    fold: Option<&FoldState>,
+    width_px: f32,
+) -> RewrapRun {
+    let old_arc: Arc<str> = old.into();
+    let new_arc: Arc<str> = new.into();
+    let t0 = Instant::now();
+    let off = Layout::build(
+        Arc::clone(&old_arc),
+        Arc::clone(&new_arc),
+        alignment,
+        fold,
+        None,
+    );
+    let wrap_off = t0.elapsed();
+    black_box((off.old.rows(), off.new.rows()));
+
+    let plan = WrapPlan {
+        old: WrapSide { width_px },
+        new: WrapSide { width_px },
+    };
+    for _ in 0..2 {
+        let mut cw = fake_char_width;
+        let _ = Layout::build(
+            Arc::clone(&old_arc),
+            Arc::clone(&new_arc),
+            alignment,
+            fold,
+            Some((&plan, &mut cw)),
+        );
+    }
+    let mut samples = Vec::with_capacity(REWRAP_WARM);
+    let mut max = Duration::ZERO;
+    let mut rows = [0usize; 2];
+    for _ in 0..REWRAP_WARM {
+        let t = Instant::now();
+        let mut cw = fake_char_width;
+        let layout = Layout::build(
+            Arc::clone(&old_arc),
+            Arc::clone(&new_arc),
+            alignment,
+            fold,
+            Some((&plan, &mut cw)),
+        );
+        let took = t.elapsed();
+        samples.push(took);
+        max = max.max(took);
+        rows = [layout.old.rows(), layout.new.rows()];
+        black_box(layout.wrap.is_some());
+    }
+    let wrap_median = median(samples);
+    RewrapRun {
+        wrap_off,
+        wrap_median,
+        wrap_max: max,
+        rows,
+    }
 }
 
 /// What paint needs for one row, without the shaped glyphs.
@@ -239,5 +435,53 @@ fn frame_cost_is_flat_in_file_length() {
         );
         // Far under a 120 fps budget (8.3 ms) for the pure part.
         assert!(large.warm < Duration::from_millis(1));
+    }
+}
+
+const REWRAP_WIDTH_PX: f32 = 640.;
+
+#[test]
+#[ignore = "timing; run with --release --ignored --nocapture"]
+fn rewrap_20k_lines_under_budget() {
+    let (old, new, alignment, fold) = synthetic_wrap(20_000, 500);
+    let width = REWRAP_WIDTH_PX;
+    // Allocator / icache warm-up.
+    {
+        let mut cw = fake_char_width;
+        let plan = WrapPlan {
+            old: WrapSide { width_px: width },
+            new: WrapSide { width_px: width },
+        };
+        let _ = Layout::build(
+            old.as_str().into(),
+            new.as_str().into(),
+            &alignment,
+            Some(&fold),
+            Some((&plan, &mut cw)),
+        );
+    }
+    let folded = time_layout_rewrap(&old, &new, &alignment, Some(&fold), width);
+    let expanded = time_layout_rewrap(&old, &new, &alignment, None, width);
+    let target = Duration::from_millis(8);
+    let cases = [
+        ("20k wrap synth, folded", &folded),
+        ("20k wrap synth, expanded", &expanded),
+    ];
+    for (name, r) in cases {
+        eprintln!(
+            "{name} @ {width}px: layout wrap-off {:.2}ms, rewrap warm median {:.2}ms (max {:.2}ms), rows {}+{}",
+            r.wrap_off.as_secs_f64() * 1e3,
+            r.wrap_median.as_secs_f64() * 1e3,
+            r.wrap_max.as_secs_f64() * 1e3,
+            r.rows[0],
+            r.rows[1],
+        );
+    }
+    for (name, r) in cases {
+        assert!(
+            r.wrap_median <= target,
+            "{name}: rewrap median {:.2}ms exceeds 8ms budget",
+            r.wrap_median.as_secs_f64() * 1e3,
+        );
     }
 }

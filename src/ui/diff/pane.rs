@@ -333,6 +333,7 @@ impl DualPane {
                 trace::since(t),
                 [layout.old.rows(), layout.new.rows()],
                 layout.bridges.len(),
+                layout.wrap.is_some(),
             );
         }
         self.layout = Some(layout);

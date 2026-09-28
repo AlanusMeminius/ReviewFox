@@ -451,13 +451,14 @@ impl Layout {
         let Some(applied) = self.wrap.as_ref() else {
             return Some(first);
         };
-        let breaks = applied.breaks(side, ln)?;
         let mut row = first;
-        for &b in &breaks.breaks {
-            if byte >= b {
-                row += 1;
-            } else {
-                break;
+        if let Some(breaks) = applied.breaks(side, ln) {
+            for &b in &breaks.breaks {
+                if byte >= b {
+                    row += 1;
+                } else {
+                    break;
+                }
             }
         }
         Some(row)
