@@ -1,4 +1,4 @@
-use gpui::{
+﻿use gpui::{
     anchored, canvas, deferred, ease_out_quint, Animation, AnimationExt, App, Bounds,
     ClickEvent, ClipboardItem, Context, Corner, Div, FocusHandle, Focusable, InteractiveElement,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render,
@@ -335,7 +335,7 @@ impl AppView {
         self.ensure_mr_picker_open(cx);
     }
 
-    /// Hard-exclusive Entry kind switch (unified capsule kind hits).
+    /// Hard-exclusive Entry kind switch (kind-track hits).
     fn select_entry_kind(&mut self, target: EntryKind, cx: &mut Context<Self>) {
         if !gitlab_chrome_visible(self) {
             return;
@@ -1395,8 +1395,8 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
         EntryChromeMode::BranchPillOnly => {
             render_branch_pill(view, &branch, cx).into_any_element()
         }
-        EntryChromeMode::UnifiedCapsule => {
-            render_unified_entry_capsule(view, &branch, cx).into_any_element()
+        EntryChromeMode::KindTrackAndValuePill => {
+            render_gitlab_entry_chrome(view, &branch, cx).into_any_element()
         }
     };
 
@@ -1541,8 +1541,8 @@ fn render_branch_pill(
         )
 }
 
-/// Unified A3 Entry capsule: kind hits (Branch | MR) + value hit in one hull.
-fn render_unified_entry_capsule(
+/// Two-piece GitLab Entry chrome: capsule-track kind switch + separate value pill (ADR-0011 / prototype A).
+fn render_gitlab_entry_chrome(
     view: &AppView,
     branch: &str,
     cx: &mut Context<AppView>,
@@ -1551,6 +1551,7 @@ fn render_unified_entry_capsule(
     let mr_iid = view.mr_entry.as_ref().map(|e| e.summary.iid);
     let value = entry_chrome::value_label(kind, branch, mr_iid);
     let picker_open = view.branch_picker.is_some() || view.mr_picker.is_some();
+    let hide_value = entry_chrome::value_pill_hidden(picker_open);
     let branch_track = view.branch_toggle_bounds.clone();
     let mr_track = view.mr_toggle_bounds.clone();
     let value_icon = match kind {
@@ -1559,38 +1560,23 @@ fn render_unified_entry_capsule(
     };
 
     div()
-        .id("entry-kind-capsule")
-        .relative()
-        .h(theme::TOGGLE_SIZE)
-        .max_w(px(420.))
-        .min_w(px(0.))
+        .id("entry-chrome")
         .flex()
         .items_center()
+        .gap(px(theme::CHROME_GAP))
         .flex_none()
-        .overflow_hidden()
-        .rounded_full()
-        .bg(theme::capsule_track())
-        .when(picker_open, |d| d.opacity(0.))
-        .child(
-            // Both pickers anchor to this hull so islands share its left edge.
-            canvas(
-                move |bounds, _, _| {
-                    branch_track.set(bounds);
-                    mr_track.set(bounds);
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .size_full(),
-        )
+        .min_w(px(0.))
+        .max_w(px(480.))
         .child(
             div()
-                .id("entry-kind-hits")
+                .id("entry-kind-track")
+                .h(theme::TOGGLE_SIZE)
+                .flex_none()
                 .flex()
                 .items_center()
-                .flex_none()
                 .p(px(2.))
-                .gap(px(0.))
+                .rounded_full()
+                .bg(theme::capsule_track())
                 .child(entry_kind_hit(
                     "entry-kind-branch",
                     "Branch",
@@ -1610,26 +1596,34 @@ fn render_unified_entry_capsule(
         )
         .child(
             div()
-                .w(px(1.))
-                .flex_none()
-                .my(px(5.))
-                .bg(theme::line()),
-        )
-        .child(
-            div()
-                .id("entry-value-hit")
+                .id("entry-value-pill")
+                .relative()
+                .h(theme::TOGGLE_SIZE)
                 .flex_1()
                 .min_w(px(0.))
-                .h_full()
-                .px(px(10.))
+                .max_w(px(260.))
+                .px_2()
+                .rounded_full()
+                .bg(theme::capsule())
                 .flex()
                 .items_center()
                 .gap_1()
+                .overflow_hidden()
                 .cursor_pointer()
-                .when(picker_open, |d| d.bg(theme::range()))
-                .when(!picker_open, |d| {
-                    d.hover(|d| d.bg(theme::capsule_track_hover()))
-                })
+                .when(hide_value, |d| d.opacity(0.))
+                .when(!hide_value, |d| d.hover(|d| d.bg(theme::capsule_track_hover())))
+                .child(
+                    // Pickers anchor to the value pill (kind track stays visible).
+                    canvas(
+                        move |bounds, _, _| {
+                            branch_track.set(bounds);
+                            mr_track.set(bounds);
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
                 .on_click(cx.listener(move |this, _, _, cx| match kind {
                     EntryKind::Branch => this.toggle_branch_picker(cx),
                     EntryKind::Mr => this.toggle_mr_picker(cx),
@@ -1667,6 +1661,7 @@ fn render_unified_entry_capsule(
                 ),
         )
 }
+
 
 fn entry_kind_hit(
     id: &'static str,

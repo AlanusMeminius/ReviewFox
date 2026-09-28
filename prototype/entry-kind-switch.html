@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ReviewFox — Entry kind switch (throwaway)</title>
+  <!--
+    PROTOTYPE — throwaway. Not production.
+    Question: Branch vs MR Entry chrome switch (exclusive); segment style vs value pill.
+    VERDICT (2026-09-28):
+      Behaviour: hard exclusive Entry; default Branch; last-MR memory (Workspace);
+        enter MR with nothing to restore → open picker; empty hold `Select MR…`
+      Chrome shape (revised same day): **A Capsule-track + value pill** (two-piece).
+        A3 unified shell was shipped then rejected for affordance clarity (kind vs value).
+      Picker open: hide value pill only; kind track stays visible.
+    A2/B/C parked. A3 parked (shape). open prototype/entry-kind-switch.html
+  -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --text: #172033;
+      --muted: #596579;
+      --faint: #98a2b3;
+      --line: #dfe3ea;
+      --surface: #ffffff;
+      --sidebar: #f4f5f7;
+      --hover: #e9ebef;
+      --selected: #2457d6;
+      --selected-soft: #f1f5ff;
+      --accent: #2457d6;
+      --add: #1a7f4b;
+      --del: #b42318;
+      --chrome: 36px;
+      --capsule-h: 26px;
+      --capsule-bg: #eef0f4;
+      --capsule-bg-hover: #e4e7ed;
+      --capsule-radius: 999px;
+      --menu-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: "IBM Plex Sans", sans-serif;
+      color: var(--text);
+      background: #c5ccd6;
+      overflow: hidden;
+    }
+    button, input { font: inherit; }
+    .proto-root {
+      height: 100%; padding: 16px;
+      display: flex; align-items: stretch; justify-content: center;
+    }
+    .desk { max-width: 1180px; width: 100%; height: 100%; min-width: 0; }
+
+    .win {
+      height: 100%;
+      background: var(--surface);
+      border: 1px solid #b4bcc8;
+      border-radius: 10px;
+      box-shadow: 0 16px 36px rgba(23, 32, 51, 0.16);
+      display: flex; overflow: hidden; min-width: 0;
+    }
+
+    .traffic { display: flex; gap: 6px; align-items: center; flex-shrink: 0; width: 52px; }
+    .traffic i { width: 10px; height: 10px; border-radius: 50%; display: block; }
+    .traffic .r { background: #ff5f57; }
+    .traffic .y { background: #febc2e; }
+    .traffic .g { background: #28c840; }
+
+    .icon-btn {
+      width: 26px; height: 26px; border: 0; border-radius: 6px;
+      background: transparent; color: var(--muted); cursor: pointer;
+      display: grid; place-items: center; flex-shrink: 0;
+    }
+    .icon-btn:hover { background: var(--hover); }
+    .icon-btn svg { width: 16px; height: 16px; }
+
+    .mono { font-family: "IBM Plex Mono", monospace; }
+    .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* —— Sidebar —— */
+    .side {
+      width: 220px; flex-shrink: 0;
+      background: var(--sidebar);
+      display: flex; flex-direction: column; min-width: 0; overflow: hidden;
+    }
+    .side.collapsed { width: 0; }
+    .side-chrome {
+      height: var(--chrome); flex-shrink: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 8px 0 12px;
+    }
+    .side-body { flex: 1; overflow: auto; padding: 4px 8px 12px; }
+    .side-label {
+      font-size: 11px; font-weight: 600; color: var(--faint);
+      padding: 8px 8px 6px;
+    }
+    .side-nav {
+      display: flex; flex-direction: column; gap: 2px;
+      margin: 0 0 10px; padding: 0 0 10px;
+      border-bottom: 1px solid var(--line);
+    }
+    .side-nav-btn {
+      text-align: left; border: 0; background: transparent;
+      padding: 8px 10px; border-radius: 8px; cursor: pointer;
+      font-size: 13px; font-weight: 500; color: var(--text);
+    }
+    .side-nav-btn:hover { background: var(--hover); }
+    .side-nav-btn.active { background: var(--selected); color: #fff; }
+    .side-nav-btn .sub {
+      display: block; font-size: 11px; font-weight: 400;
+      color: var(--muted); margin-top: 2px;
+    }
+    .side-nav-btn.active .sub { color: rgba(255,255,255,.78); }
+
+    .repo {
+      display: flex; flex-direction: column; gap: 2px;
+      padding: 8px 10px; margin-bottom: 2px;
+      border-radius: 8px; cursor: pointer;
+    }
+    .repo:hover { background: var(--hover); }
+    .repo.active { background: var(--selected); color: #fff; }
+    .repo .name { font-size: 13px; font-weight: 500; }
+    .repo .path { font-size: 11px; color: var(--muted); }
+    .repo.active .path { color: rgba(255,255,255,.78); }
+
+    /* —— Main columns —— */
+    .main {
+      flex: 1; min-width: 0;
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) 280px;
+    }
+    .center {
+      background: #fff;
+      display: flex; flex-direction: column; min-width: 0;
+      border-right: 1px solid var(--line);
+      position: relative;
+    }
+    .center-chrome {
+      height: var(--chrome); flex-shrink: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 12px 0 8px;
+    }
+    .files {
+      background: #fff;
+      display: flex; flex-direction: column; min-width: 0;
+    }
+    .files-chrome {
+      height: var(--chrome); flex-shrink: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 12px;
+      font-size: 12px; font-weight: 600; color: var(--muted);
+    }
+    .cmp {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px; color: var(--muted);
+      margin-left: auto; flex-shrink: 0;
+    }
+
+    .pill {
+      height: var(--capsule-h); max-width: 220px;
+      padding: 0 10px; border: 0; border-radius: var(--capsule-radius);
+      background: var(--capsule-bg); color: var(--text);
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; font-weight: 500; cursor: pointer;
+      flex-shrink: 1; min-width: 0;
+    }
+    .pill:hover { background: var(--capsule-bg-hover); }
+    .pill.open { background: var(--selected-soft); color: var(--accent); }
+    .pill .chev { color: var(--faint); font-size: 10px; flex-shrink: 0; }
+    .pill.mr { background: #eef2ff; }
+    .pill.mr.open { background: #e0e7ff; color: #3730a3; }
+
+    /* A: same capsule tokens as .pill — track is a pill, thumb is a pill */
+    .seg-track {
+      display: inline-flex; align-items: center;
+      height: var(--capsule-h); padding: 2px; gap: 0;
+      background: var(--capsule-bg);
+      border-radius: var(--capsule-radius);
+      flex-shrink: 0;
+    }
+    .seg-track button {
+      border: 0; background: transparent; cursor: pointer;
+      height: calc(var(--capsule-h) - 4px);
+      padding: 0 12px; border-radius: var(--capsule-radius);
+      font-size: 12px; font-weight: 500; color: var(--muted);
+      display: inline-flex; align-items: center; gap: 5px;
+    }
+    .seg-track button:hover { color: var(--text); }
+    .seg-track button.on {
+      background: #fff; color: var(--text);
+      box-shadow: 0 1px 2px rgba(23, 32, 51, 0.10);
+    }
+
+    /* A2: no track — two peer capsules; selected matches value-pill selected-soft */
+    .seg-peers {
+      display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+    }
+    .seg-peers button {
+      border: 0; cursor: pointer;
+      height: var(--capsule-h); padding: 0 12px;
+      border-radius: var(--capsule-radius);
+      background: var(--capsule-bg); color: var(--muted);
+      font-size: 12px; font-weight: 500;
+      display: inline-flex; align-items: center; gap: 5px;
+    }
+    .seg-peers button:hover { background: var(--capsule-bg-hover); color: var(--text); }
+    .seg-peers button.on {
+      background: var(--selected-soft); color: var(--accent);
+    }
+
+    /* A3: one continuous capsule shell — kind | value share the same hull */
+    .seg-shell {
+      display: inline-flex; align-items: stretch;
+      height: var(--capsule-h); max-width: min(420px, 100%);
+      background: var(--capsule-bg);
+      border-radius: var(--capsule-radius);
+      overflow: hidden; flex-shrink: 1; min-width: 0;
+    }
+    .seg-shell .kinds {
+      display: inline-flex; padding: 2px; flex-shrink: 0;
+    }
+    .seg-shell .kinds button {
+      border: 0; background: transparent; cursor: pointer;
+      height: calc(var(--capsule-h) - 4px); padding: 0 10px;
+      border-radius: var(--capsule-radius);
+      font-size: 12px; font-weight: 500; color: var(--muted);
+      display: inline-flex; align-items: center; gap: 5px;
+    }
+    .seg-shell .kinds button:hover { color: var(--text); }
+    .seg-shell .kinds button.on {
+      background: #fff; color: var(--text);
+      box-shadow: 0 1px 2px rgba(23, 32, 51, 0.10);
+    }
+    .seg-shell .divider {
+      width: 1px; align-self: stretch; margin: 5px 0;
+      background: #dde1e8; flex-shrink: 0;
+    }
+    .seg-shell .value {
+      border: 0; background: transparent; cursor: pointer;
+      padding: 0 12px 0 10px; min-width: 0; flex: 1;
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; font-weight: 500; color: var(--text);
+    }
+    .seg-shell .value:hover { background: var(--capsule-bg-hover); }
+    .seg-shell.open .value { background: var(--selected-soft); color: var(--accent); }
+    .seg-shell .value .chev { color: var(--faint); font-size: 10px; flex-shrink: 0; }
+
+    .morph {
+      display: inline-flex; align-items: stretch; height: 26px;
+      background: #eef0f4; border-radius: 999px; overflow: hidden;
+      flex-shrink: 1; min-width: 0; max-width: 280px;
+    }
+    .morph .main-hit {
+      border: 0; background: transparent; cursor: pointer;
+      padding: 0 10px; display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; font-weight: 500; min-width: 0; flex: 1;
+      color: var(--text);
+    }
+    .morph .main-hit:hover { background: #e4e7ed; }
+    .morph.open .main-hit { background: var(--selected-soft); color: var(--accent); }
+    .morph .kind-hit {
+      border: 0; border-left: 1px solid #dde1e8;
+      background: transparent; cursor: pointer;
+      width: 28px; color: var(--muted);
+      display: grid; place-items: center; flex-shrink: 0;
+    }
+    .morph .kind-hit:hover { background: #e4e7ed; color: var(--text); }
+
+    .mr-detail {
+      flex-shrink: 0;
+      margin: 8px 10px 0;
+      padding: 10px 12px;
+      background: #f7f8fb;
+      border-radius: 10px;
+      box-shadow: var(--menu-shadow);
+    }
+    .mr-detail .title { font-size: 13px; font-weight: 600; }
+    .mr-detail .meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .mr-detail .checks {
+      display: flex; gap: 8px; margin-top: 8px; font-size: 11px;
+    }
+    .mr-detail .ok { color: var(--add); }
+    .mr-detail .warn { color: #9a6700; }
+
+    .commits { flex: 1; overflow: auto; padding-bottom: 12px; }
+    .commit {
+      display: grid; grid-template-columns: 16px 1fr; gap: 10px;
+      padding: 10px 14px; cursor: pointer; align-items: start;
+    }
+    .commit:hover { background: #f6f8fb; }
+    .commit.in-range { background: var(--selected-soft); }
+    .commit .check {
+      width: 14px; height: 14px; margin-top: 2px;
+      border: 1.5px solid #98a2b3; border-radius: 3px; background: #fff;
+    }
+    .commit.in-range .check {
+      background: var(--accent); border-color: var(--accent);
+      box-shadow: inset 0 0 0 2px #fff;
+    }
+    .commit .msg { font-size: 13px; font-weight: 500; }
+    .commit .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+    .tree { flex: 1; overflow: auto; padding: 4px 6px 12px; font-size: 12px; }
+    .leaf {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 6px; border-radius: 6px; cursor: pointer;
+    }
+    .leaf:hover { background: #f6f8fb; }
+    .leaf.active { background: var(--selected-soft); }
+    .badge { font-family: "IBM Plex Mono", monospace; font-size: 10px; font-weight: 500; width: 12px; }
+    .badge.M { color: #9a6700; }
+    .badge.A { color: var(--add); }
+    .stats { margin-left: auto; font-size: 10px; color: var(--faint); }
+
+    .overlay {
+      position: absolute; top: calc(var(--chrome) + 4px); left: 8px;
+      width: 300px; max-height: min(360px, 55vh); overflow: auto;
+      background: #fff; border-radius: 10px;
+      box-shadow: var(--menu-shadow);
+      z-index: 20; padding: 6px;
+    }
+    .overlay.kind-menu { width: 200px; }
+    .overlay .head {
+      font-size: 11px; font-weight: 600; color: var(--faint);
+      padding: 6px 8px 4px;
+    }
+    .overlay .row {
+      display: flex; flex-direction: column; gap: 2px;
+      padding: 8px 10px; border-radius: 8px; cursor: pointer;
+    }
+    .overlay .row:hover { background: var(--hover); }
+    .overlay .row.active { background: var(--selected-soft); }
+    .overlay .row .t { font-size: 13px; font-weight: 500; }
+    .overlay .row .s { font-size: 11px; color: var(--muted); }
+    .overlay .empty {
+      padding: 16px 10px; text-align: center;
+      font-size: 12px; color: var(--muted);
+    }
+
+    .hint-banner {
+      margin: 8px 10px 0; padding: 8px 10px;
+      border-radius: 8px; background: #fff8e6;
+      font-size: 11px; color: #7a5b00;
+    }
+
+    #proto-switcher {
+      position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+      z-index: 9999; display: flex; align-items: center; gap: 10px;
+      background: #111827; color: #f9fafb; border-radius: 999px;
+      padding: 8px 14px; box-shadow: 0 8px 28px rgba(0,0,0,.35);
+      font-size: 13px; user-select: none;
+    }
+    #proto-switcher button {
+      background: #374151; color: #fff; border: 0;
+      width: 28px; height: 28px; border-radius: 50%; cursor: pointer;
+    }
+    #proto-switcher .label { min-width: 280px; text-align: center; }
+    #proto-switcher .hint { color: #9ca3af; font-size: 11px; }
+    .state-dump {
+      position: fixed; right: 10px; bottom: 58px; z-index: 9998;
+      width: 280px; max-height: 40vh; overflow: auto;
+      background: #0f172a; color: #e2e8f0;
+      font-family: "IBM Plex Mono", monospace; font-size: 10px;
+      padding: 10px; border-radius: 8px; opacity: 0.92; white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="proto-root"><div class="desk" id="desk"></div></div>
+  <pre class="state-dump" id="stateDump"></pre>
+  <div id="proto-switcher">
+    <button type="button" id="prevVar" aria-label="previous variant">‹</button>
+    <div class="label">
+      <div id="varLabel">A</div>
+      <div class="hint">← → · A chosen · A3 parked (affordance)</div>
+    </div>
+    <button type="button" id="nextVar" aria-label="next variant">›</button>
+  </div>
+
+  <script>
+    /**
+     * Three variants of Entry-kind chrome switch, switchable via ?variant=,
+     * mounted on the accepted Beads-rail shell (not a vacuum page).
+     */
+    const VARIANTS = [
+      { key: "A", name: "Capsule-track + value pill (chosen)" },
+      { key: "A3", name: "Unified capsule shell (parked)" },
+      { key: "A2", name: "Peer capsules (parked)" },
+      { key: "B", name: "Morphing pill + kind menu (parked)" },
+      { key: "C", name: "Sidebar Entry sections (parked)" },
+    ];
+
+    const MOCK = {
+      branch: "feature/mr",
+      branches: ["feature/mr", "main", "release/0.1"],
+      lastMrIid: 42,
+      mrs: [
+        { iid: 42, title: "MR Entry chrome + diff_refs Comparison", author: "alan", source: "feature/mr", target: "main", pipeline: "passed", approvals: "1/2" },
+        { iid: 39, title: "Readonly GitLab Entry (no publish)", author: "alan", source: "feature/gitlab-ro", target: "main", pipeline: "running", approvals: "0/2" },
+        { iid: 28, title: "Beads-rail shell from prototype A", author: "mei", source: "ui/shell-a", target: "main", pipeline: "passed", approvals: "2/2" },
+      ],
+      branchCommits: [
+        { sha: "a1b2c3d", msg: "Separate Branch / MR chrome", author: "you", time: "now", inRange: true },
+        { sha: "e4f5a6b", msg: "Wire MR picker overlay", author: "you", time: "2h", inRange: true },
+        { sha: "c7d8e9f", msg: "Workspace persists MrEntryLabel", author: "you", time: "1d", inRange: false },
+        { sha: "0123456", msg: "Accept Beads-rail shell", author: "mei", time: "3d", inRange: false },
+      ],
+      mrCommits: [
+        { sha: "f0e1d2c", msg: "Fetch diff_refs then git fetch", author: "alan", time: "3h", inRange: true },
+        { sha: "b9a8c7d", msg: "MR detail island above commits", author: "alan", time: "5h", inRange: true },
+        { sha: "88aabb1", msg: "Open MR by list (URL deferred)", author: "alan", time: "1d", inRange: false },
+      ],
+      comparisonBranch: { base: "c7d8e9f", head: "a1b2c3d" },
+      comparisonMr: { base: "88aabb1", head: "f0e1d2c" },
+      files: [
+        { path: "src/ui/app_view.rs", name: "app_view.rs", status: "M", plus: 40, minus: 12 },
+        { path: "src/workspace_store.rs", name: "workspace_store.rs", status: "M", plus: 8, minus: 1 },
+        { path: "CONTEXT.md", name: "CONTEXT.md", status: "M", plus: 6, minus: 0 },
+      ],
+    };
+
+    /** In-memory prototype state — wiped on reload. */
+    const state = {
+      variant: "A",
+      entryKind: "branch", // hard exclusive: branch | mr
+      branch: MOCK.branch,
+      mrIid: /** @type {number|null} */ (null),
+      rememberedMrIid: MOCK.lastMrIid,
+      picker: /** @type {null|"branch"|"mr"|"kind"} */ (null),
+      reposCollapsed: false,
+    };
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+      );
+    }
+    function sidebarToggleIcon() {
+      return `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+        <rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6.5 2.5v11"/>
+      </svg>`;
+    }
+    function branchIcon() {
+      return `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="14" height="14">
+        <circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="8" r="1.5"/>
+        <path d="M4.5 5v5.5M4.5 8h5.5"/>
+      </svg>`;
+    }
+    function mrIcon() {
+      return `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" width="14" height="14">
+        <circle cx="4" cy="4" r="1.5"/><circle cx="4" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/>
+        <path d="M4 5.5v5M12 10.5V7.5A3 3 0 0 0 9 4.5H7"/>
+      </svg>`;
+    }
+
+    function currentMr() {
+      return MOCK.mrs.find((m) => m.iid === state.mrIid) || null;
+    }
+    function comparison() {
+      return state.entryKind === "mr" && state.mrIid
+        ? MOCK.comparisonMr
+        : MOCK.comparisonBranch;
+    }
+    function commits() {
+      return state.entryKind === "mr" && state.mrIid ? MOCK.mrCommits : MOCK.branchCommits;
+    }
+
+    function setEntryKind(kind) {
+      if (kind === state.entryKind) return;
+      state.picker = null;
+      if (kind === "mr") {
+        state.entryKind = "mr";
+        // Q6 recommendation: silently restore last MR if remembered
+        state.mrIid = state.rememberedMrIid;
+        if (!state.mrIid) state.picker = "mr";
+      } else {
+        if (state.mrIid) state.rememberedMrIid = state.mrIid;
+        state.entryKind = "branch";
+        state.mrIid = null;
+      }
+      render();
+    }
+
+    function dumpState() {
+      const mr = currentMr();
+      const cmp = comparison();
+      document.getElementById("stateDump").textContent = JSON.stringify(
+        {
+          variant: state.variant,
+          entryKind: state.entryKind,
+          branch: state.branch,
+          mrIid: state.mrIid,
+          rememberedMrIid: state.rememberedMrIid,
+          picker: state.picker,
+          comparison: cmp,
+          mrTitle: mr ? mr.title : null,
+          note: "Branch + MR chrome never co-appear within a variant",
+        },
+        null,
+        2
+      );
+    }
+
+    function renderRepos(showEntryNav) {
+      const collapsed = state.reposCollapsed ? "collapsed" : "";
+      const entryNav = showEntryNav
+        ? `<div class="side-nav">
+            <div class="side-label">Entry</div>
+            <button type="button" class="side-nav-btn ${state.entryKind === "branch" ? "active" : ""}" data-act="kind" data-kind="branch">
+              Branches
+              <span class="sub">${esc(state.branch)}</span>
+            </button>
+            <button type="button" class="side-nav-btn ${state.entryKind === "mr" ? "active" : ""}" data-act="kind" data-kind="mr">
+              Merge requests
+              <span class="sub">${state.entryKind === "mr" && state.mrIid ? "!" + state.mrIid : "pick an MR"}</span>
+            </button>
+          </div>`
+        : "";
+      return `<aside class="side ${collapsed}">
+        <div class="side-chrome">
+          <div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+          <button type="button" class="icon-btn" data-act="toggle-side" title="Collapse">${sidebarToggleIcon()}</button>
+        </div>
+        <div class="side-body">
+          ${entryNav}
+          <div class="side-label">Repositories</div>
+          <div class="repo active"><div class="name">ReviewFox</div><div class="path truncate">~/Dev/ReviewFox</div></div>
+          <div class="repo"><div class="name">BeadsViewer</div><div class="path truncate">~/Dev/BeadsViewer</div></div>
+        </div>
+      </aside>`;
+    }
+
+    function valuePill(kind, open) {
+      if (kind === "branch") {
+        return `<button type="button" class="pill ${open ? "open" : ""}" data-act="toggle-picker" data-picker="branch">
+          ${branchIcon()}<span class="truncate">${esc(state.branch)}</span><span class="chev">▾</span>
+        </button>`;
+      }
+      if (state.mrIid) {
+        return `<button type="button" class="pill mr ${open ? "open" : ""}" data-act="toggle-picker" data-picker="mr">
+          ${mrIcon()}<span class="truncate">!${state.mrIid}</span><span class="chev">▾</span>
+        </button>`;
+      }
+      return `<button type="button" class="pill mr ${open ? "open" : ""}" data-act="toggle-picker" data-picker="mr">
+        ${mrIcon()}<span class="truncate">Select MR…</span><span class="chev">▾</span>
+      </button>`;
+    }
+
+    function kindButtons(kind) {
+      return `
+        <button type="button" class="${kind === "branch" ? "on" : ""}" data-act="kind" data-kind="branch">
+          ${branchIcon()}Branch
+        </button>
+        <button type="button" class="${kind === "mr" ? "on" : ""}" data-act="kind" data-kind="mr">
+          ${mrIcon()}MR
+        </button>`;
+    }
+
+    function chromeA() {
+      const kind = state.entryKind;
+      const open = state.picker === kind;
+      return `<div class="seg-track" title="Entry kind">${kindButtons(kind)}</div>${valuePill(kind, open)}`;
+    }
+
+    function chromeA2() {
+      const kind = state.entryKind;
+      const open = state.picker === kind;
+      return `<div class="seg-peers" title="Entry kind">${kindButtons(kind)}</div>${valuePill(kind, open)}`;
+    }
+
+    function chromeA3() {
+      const kind = state.entryKind;
+      const open = state.picker === kind;
+      const label =
+        kind === "branch"
+          ? esc(state.branch)
+          : state.mrIid
+            ? `!${state.mrIid}`
+            : "Select MR…";
+      const icon = kind === "branch" ? branchIcon() : mrIcon();
+      return `
+        <div class="seg-shell ${open ? "open" : ""}" title="Entry kind + value">
+          <div class="kinds">${kindButtons(kind)}</div>
+          <div class="divider"></div>
+          <button type="button" class="value" data-act="toggle-picker" data-picker="${kind}">
+            ${icon}<span class="truncate">${label}</span><span class="chev">▾</span>
+          </button>
+        </div>`;
+    }
+
+    function chromeB() {
+      const kind = state.entryKind;
+      const pickerOpen = state.picker === kind;
+      const kindOpen = state.picker === "kind";
+      const label =
+        kind === "branch"
+          ? esc(state.branch)
+          : state.mrIid
+            ? `!${state.mrIid} · ${esc((currentMr() || {}).title || "").slice(0, 28)}`
+            : "Select MR…";
+      const icon = kind === "branch" ? branchIcon() : mrIcon();
+      return `
+        <div class="morph ${pickerOpen || kindOpen ? "open" : ""}">
+          <button type="button" class="main-hit" data-act="toggle-picker" data-picker="${kind}">
+            ${icon}<span class="truncate">${label}</span>
+          </button>
+          <button type="button" class="kind-hit" data-act="toggle-picker" data-picker="kind" title="Switch Entry kind">▾</button>
+        </div>`;
+    }
+
+    function chromeC() {
+      // Kind lives in sidebar; titlebar only shows the active value pill.
+      const kind = state.entryKind;
+      const open = state.picker === kind;
+      if (kind === "branch") {
+        return `<button type="button" class="pill ${open ? "open" : ""}" data-act="toggle-picker" data-picker="branch">
+          ${branchIcon()}<span class="truncate">${esc(state.branch)}</span><span class="chev">▾</span>
+        </button>
+        <span class="meta" style="font-size:11px;color:var(--faint)">kind via sidebar</span>`;
+      }
+      return `<button type="button" class="pill mr ${open ? "open" : ""}" data-act="toggle-picker" data-picker="mr">
+        ${mrIcon()}<span class="truncate">${state.mrIid ? "!" + state.mrIid : "Select MR…"}</span><span class="chev">▾</span>
+      </button>
+      <span class="meta" style="font-size:11px;color:var(--faint)">kind via sidebar</span>`;
+    }
+
+    function renderOverlay() {
+      if (!state.picker) return "";
+      if (state.picker === "kind") {
+        return `<div class="overlay kind-menu">
+          <div class="head">Entry kind</div>
+          <div class="row ${state.entryKind === "branch" ? "active" : ""}" data-act="kind" data-kind="branch">
+            <div class="t">Branch Browser</div>
+            <div class="s">Local commits → Comparison</div>
+          </div>
+          <div class="row ${state.entryKind === "mr" ? "active" : ""}" data-act="kind" data-kind="mr">
+            <div class="t">Merge Request</div>
+            <div class="s">Forge list → diff_refs</div>
+          </div>
+        </div>`;
+      }
+      if (state.picker === "branch") {
+        return `<div class="overlay">
+          <div class="head">Branches</div>
+          ${MOCK.branches
+            .map(
+              (b) => `<div class="row ${b === state.branch ? "active" : ""}" data-act="pick-branch" data-branch="${esc(b)}">
+              <div class="t">${esc(b)}</div>
+            </div>`
+            )
+            .join("")}
+        </div>`;
+      }
+      return `<div class="overlay">
+        <div class="head">Open merge requests</div>
+        ${MOCK.mrs
+          .map(
+            (m) => `<div class="row ${m.iid === state.mrIid ? "active" : ""}" data-act="pick-mr" data-iid="${m.iid}">
+            <div class="t">!${m.iid} · ${esc(m.title)}</div>
+            <div class="s">${esc(m.source)} → ${esc(m.target)} · ${esc(m.author)}</div>
+          </div>`
+          )
+          .join("")}
+      </div>`;
+    }
+
+    function renderMrDetail() {
+      const mr = currentMr();
+      if (state.entryKind !== "mr") return "";
+      if (!mr) {
+        return `<div class="hint-banner">MR Entry active, nothing selected — open the picker.</div>`;
+      }
+      return `<div class="mr-detail">
+        <div class="title">!${mr.iid} ${esc(mr.title)}</div>
+        <div class="meta">${esc(mr.source)} → ${esc(mr.target)} · ${esc(mr.author)}</div>
+        <div class="checks">
+          <span class="${mr.pipeline === "passed" ? "ok" : "warn"}">pipeline ${esc(mr.pipeline)}</span>
+          <span class="warn">approvals ${esc(mr.approvals)}</span>
+        </div>
+      </div>`;
+    }
+
+    function renderCommits() {
+      return commits()
+        .map(
+          (c) => `<div class="commit ${c.inRange ? "in-range" : ""}">
+          <div class="check"></div>
+          <div>
+            <div class="msg">${esc(c.msg)}</div>
+            <div class="sub mono">${esc(c.sha)} · ${esc(c.author)} · ${esc(c.time)}</div>
+          </div>
+        </div>`
+        )
+        .join("");
+    }
+
+    function renderFiles() {
+      return MOCK.files
+        .map(
+          (f, i) => `<div class="leaf ${i === 0 ? "active" : ""}">
+          <span class="badge ${esc(f.status)}">${esc(f.status)}</span>
+          <span class="truncate">${esc(f.name)}</span>
+          <span class="stats">+${f.plus} −${f.minus}</span>
+        </div>`
+        )
+        .join("");
+    }
+
+    function chromeForVariant() {
+      if (state.variant === "A") return chromeA();
+      if (state.variant === "A2") return chromeA2();
+      if (state.variant === "A3") return chromeA3();
+      if (state.variant === "B") return chromeB();
+      return chromeC();
+    }
+
+    function render() {
+      const v = VARIANTS.find((x) => x.key === state.variant) || VARIANTS[0];
+      document.getElementById("varLabel").textContent = `${v.key} (${v.name})`;
+      const cmp = comparison();
+      const showSideNav = state.variant === "C";
+      document.getElementById("desk").innerHTML = `
+        <div class="win">
+          ${renderRepos(showSideNav)}
+          <div class="main">
+            <section class="center">
+              <div class="center-chrome">
+                ${chromeForVariant()}
+                <span class="cmp">${esc(cmp.base)}..${esc(cmp.head)}</span>
+              </div>
+              ${renderMrDetail()}
+              <div class="commits">${renderCommits()}</div>
+              ${renderOverlay()}
+            </section>
+            <section class="files">
+              <div class="files-chrome">Changes · ${MOCK.files.length}</div>
+              <div class="tree">${renderFiles()}</div>
+            </section>
+          </div>
+        </div>`;
+      dumpState();
+    }
+
+    function setVariant(key) {
+      state.variant = key;
+      state.picker = null;
+      // Reset to default Branch when flipping variants so each starts clean.
+      state.entryKind = "branch";
+      state.mrIid = null;
+      const url = new URL(location.href);
+      url.searchParams.set("variant", key);
+      history.replaceState(null, "", url);
+      render();
+    }
+
+    function cycle(delta) {
+      const i = VARIANTS.findIndex((v) => v.key === state.variant);
+      const next = VARIANTS[(i + delta + VARIANTS.length) % VARIANTS.length];
+      setVariant(next.key);
+    }
+
+    document.getElementById("prevVar").addEventListener("click", () => cycle(-1));
+    document.getElementById("nextVar").addEventListener("click", () => cycle(1));
+    document.addEventListener("keydown", (e) => {
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (e.key === "ArrowLeft") cycle(-1);
+      if (e.key === "ArrowRight") cycle(1);
+      if (e.key === "Escape") {
+        state.picker = null;
+        render();
+      }
+    });
+
+    document.getElementById("desk").addEventListener("click", (e) => {
+      const el = e.target.closest("[data-act]");
+      if (!el) {
+        if (state.picker) {
+          state.picker = null;
+          render();
+        }
+        return;
+      }
+      const act = el.getAttribute("data-act");
+      if (act === "toggle-side") {
+        state.reposCollapsed = !state.reposCollapsed;
+        render();
+        return;
+      }
+      if (act === "kind") {
+        setEntryKind(el.getAttribute("data-kind"));
+        return;
+      }
+      if (act === "toggle-picker") {
+        const p = el.getAttribute("data-picker");
+        state.picker = state.picker === p ? null : p;
+        render();
+        return;
+      }
+      if (act === "pick-branch") {
+        state.branch = el.getAttribute("data-branch");
+        state.picker = null;
+        // Switching branch while on MR would clear MR in product; here kind is already branch.
+        render();
+        return;
+      }
+      if (act === "pick-mr") {
+        state.mrIid = Number(el.getAttribute("data-iid"));
+        state.rememberedMrIid = state.mrIid;
+        state.entryKind = "mr";
+        state.picker = null;
+        render();
+        return;
+      }
+    });
+
+    const initial = new URL(location.href).searchParams.get("variant") || "A";
+    state.variant = VARIANTS.some((v) => v.key === initial) ? initial : "A";
+    render();
+  </script>
+</body>
+</html>

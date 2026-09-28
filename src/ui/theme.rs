@@ -134,15 +134,15 @@ pub fn sidebar() -> Rgba {
 pub fn hover() -> Rgba {
     rgb(0xe9ebef)
 }
-/// Chrome pill fill (branch / MR toggles) — white on the frosted desk.
+/// Chrome pill fill (branch / value toggles) — white on the frosted desk.
 pub fn capsule() -> Rgba {
     white()
 }
-/// Unified Entry capsule hull (prototype A3 track behind kind + value hits).
+/// Capsule-track fill behind Branch | MR kind hits (prototype A).
 pub fn capsule_track() -> Rgba {
     rgb(0xeef0f4)
 }
-/// Hover fill on the A3 value hit (prototype `--capsule-bg-hover`).
+/// Hover fill on capsule chrome (prototype `--capsule-bg-hover`).
 pub fn capsule_track_hover() -> Rgba {
     rgb(0xe4e7ed)
 }

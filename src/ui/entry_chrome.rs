@@ -1,8 +1,8 @@
-//! Exclusive Entry chrome decisions (ADR-0011, prototype A3).
+//! Exclusive Entry chrome decisions (ADR-0011, prototype A).
 //!
 //! Pure seam: which Entry kind is active, what a kind hit does, empty-MR /
-//! open-picker-on-enter, and whether titlebar shows the unified capsule vs the
-//! Branch-only pill. Rendering stays in `app_view`.
+//! open-picker-on-enter, and whether titlebar shows the two-piece GitLab chrome
+//! (kind track + value pill) vs the Branch-only pill. Rendering stays in `app_view`.
 
 use crate::workspace_store::MrEntryLabel;
 
@@ -18,11 +18,11 @@ pub enum EntryKind {
 pub enum EntryChromeMode {
     /// No GitLab chrome — Branch Browser pill only.
     BranchPillOnly,
-    /// GitLab chrome — unified A3 capsule (kind hits + value hit).
-    UnifiedCapsule,
+    /// GitLab chrome — capsule-track kind switch beside a separate value pill.
+    KindTrackAndValuePill,
 }
 
-/// Result of clicking a kind hit in the unified capsule.
+/// Result of clicking a kind hit on the kind track.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KindSwitchAction {
     /// Already on that kind.
@@ -57,10 +57,15 @@ pub fn active_entry_kind(mr_selected: bool, empty_mr: bool) -> EntryKind {
 /// Chrome layout from whether GitLab host matching applies.
 pub fn chrome_mode(gitlab_visible: bool) -> EntryChromeMode {
     if gitlab_visible {
-        EntryChromeMode::UnifiedCapsule
+        EntryChromeMode::KindTrackAndValuePill
     } else {
         EntryChromeMode::BranchPillOnly
     }
+}
+
+/// While a picker is open, hide only the value pill (kind track stays usable).
+pub fn value_pill_hidden(picker_open: bool) -> bool {
+    picker_open
 }
 
 /// What the kind switch should do (hard-exclusive; never co-selects Branch+MR).
@@ -121,9 +126,18 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_visible_uses_unified_capsule_otherwise_branch_pill() {
-        assert_eq!(chrome_mode(true), EntryChromeMode::UnifiedCapsule);
+    fn gitlab_visible_uses_kind_track_and_value_pill() {
+        assert_eq!(
+            chrome_mode(true),
+            EntryChromeMode::KindTrackAndValuePill
+        );
         assert_eq!(chrome_mode(false), EntryChromeMode::BranchPillOnly);
+    }
+
+    #[test]
+    fn value_pill_hides_only_while_picker_open() {
+        assert!(!value_pill_hidden(false));
+        assert!(value_pill_hidden(true));
     }
 
     #[test]
