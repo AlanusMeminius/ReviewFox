@@ -48,7 +48,7 @@ Scrolling up reverses the same three steps.
 Settled 2026-09-29. A toggle in the Fold / ViewOptions capsule, persisted in settings, default off. It is a pane display preference, not a ViewOptions member: it never changes Alignment or Hunks.
 
 - Wrap width is the code column of each pane; resizing the window or a splitter rewraps.
-- Break rules (Zed's, plus one): a run of word chars (letters, digits, `- _ . ' $ % @ # ^ ~ , = :`) stays whole; a break may fall before a word that follows a space, or before a non-word, non-space char (so CJK breaks per char). Never inside the leading indent. Never between two consecutive non-word, non-space chars, so `->`, `<<`, `>>=`, `&&`, `//`, `/*` stay whole. A piece with no break point is split at a char. No language-specific rules.
+- Break rules (Zed's, plus one): a run of word chars (letters, digits, `- _ . ' $ % @ # ^ ~ , = :`) stays whole; a break may fall before a word that follows a space, or before a non-word, non-space char (so CJK breaks per char). Never inside the leading indent. Never between two consecutive non-word, non-space chars, nor inside `->`, `::`, `<=`, `>=`, `!=`, `==`, `<<=`, `>>=` (whose chars Zed counts as word chars), so operators like `->`, `<<`, `>>=`, `&&`, `//`, `/*` stay whole. A piece with no break point is split at a char, but never inside those operators; an operator wider than the whole wrap width stays on one row. No language-specific rules.
 - Widths are real glyph widths (tabs expanded to their stops), so wrapped text never overflows the pane.
 - Continuation rows keep the logical line's leading indent; when that indent is more than half the wrap width, they start at column 0.
 - Line number on the first visual row only; continuation rows show none and no wrap marker.
