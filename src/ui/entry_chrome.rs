@@ -1,8 +1,8 @@
 //! Exclusive Entry chrome decisions (ADR-0011, prototype A3).
 //!
-//! Pure seam: which Entry kind is active, what a kind hit does, and whether
-//! titlebar shows the unified capsule vs the Branch-only pill. Rendering stays
-//! in `app_view`; ticket 03 owns empty-MR / open-picker-on-enter.
+//! Pure seam: which Entry kind is active, what a kind hit does, empty-MR /
+//! open-picker-on-enter, and whether titlebar shows the unified capsule vs the
+//! Branch-only pill. Rendering stays in `app_view`.
 
 use crate::workspace_store::MrEntryLabel;
 
@@ -30,14 +30,24 @@ pub enum KindSwitchAction {
     /// Select Branch Browser; clear selected MR Entry (keep last-MR memory).
     SelectBranch,
     /// Restore MR Entry from last-MR memory via the existing restore path.
+    /// Does not auto-open the picker.
     RestoreMr(MrEntryLabel),
-    /// No last-MR to restore — stay on Branch (ticket 03 opens the picker).
-    StayOnBranchNoMemory,
+    /// No last-MR to restore — hold empty MR kind and open the picker.
+    EnterEmptyMr,
 }
 
-/// Active kind from whether an MR Entry is currently selected.
-pub fn active_entry_kind(mr_selected: bool) -> EntryKind {
-    if mr_selected {
+/// What chrome should do when restoring a last-MR label fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreFailureAction {
+    /// Keep the MR Entry and show the failure in detail (picker select path).
+    KeepFailedDetail,
+    /// Clear the phantom Entry, hold empty MR kind, open the picker.
+    EnterEmptyMrOpenPicker,
+}
+
+/// Active kind: MR when an Entry is selected or empty-MR chrome is held.
+pub fn active_entry_kind(mr_selected: bool, empty_mr: bool) -> EntryKind {
+    if mr_selected || empty_mr {
         EntryKind::Mr
     } else {
         EntryKind::Branch
@@ -66,18 +76,27 @@ pub fn kind_switch_action(
         EntryKind::Branch => KindSwitchAction::SelectBranch,
         EntryKind::Mr => match last_mr {
             Some(label) => KindSwitchAction::RestoreMr(label.clone()),
-            None => KindSwitchAction::StayOnBranchNoMemory,
+            None => KindSwitchAction::EnterEmptyMr,
         },
     }
 }
 
-/// Value-hit label for the active kind (ticket 03 may replace empty MR copy).
+/// Failed restore from a kind-switch opens empty MR + picker; picker-select keeps detail.
+pub fn restore_failure_action(from_kind_switch: bool) -> RestoreFailureAction {
+    if from_kind_switch {
+        RestoreFailureAction::EnterEmptyMrOpenPicker
+    } else {
+        RestoreFailureAction::KeepFailedDetail
+    }
+}
+
+/// Value-hit label for the active kind.
 pub fn value_label(kind: EntryKind, branch: &str, mr_iid: Option<u64>) -> String {
     match kind {
         EntryKind::Branch => branch.to_string(),
         EntryKind::Mr => match mr_iid {
             Some(iid) => format!("!{iid}"),
-            None => "Merge requests".into(),
+            None => "Select MR…".into(),
         },
     }
 }
@@ -94,9 +113,11 @@ mod tests {
     }
 
     #[test]
-    fn active_kind_follows_whether_mr_entry_is_selected() {
-        assert_eq!(active_entry_kind(false), EntryKind::Branch);
-        assert_eq!(active_entry_kind(true), EntryKind::Mr);
+    fn active_kind_follows_mr_entry_or_empty_mr_hold() {
+        assert_eq!(active_entry_kind(false, false), EntryKind::Branch);
+        assert_eq!(active_entry_kind(true, false), EntryKind::Mr);
+        assert_eq!(active_entry_kind(false, true), EntryKind::Mr);
+        assert_eq!(active_entry_kind(true, true), EntryKind::Mr);
     }
 
     #[test]
@@ -135,15 +156,27 @@ mod tests {
     }
 
     #[test]
-    fn switching_to_mr_without_last_mr_stays_on_branch_until_ticket_03() {
+    fn switching_to_mr_without_last_mr_enters_empty_mr() {
         assert_eq!(
             kind_switch_action(EntryKind::Branch, EntryKind::Mr, None),
-            KindSwitchAction::StayOnBranchNoMemory
+            KindSwitchAction::EnterEmptyMr
         );
     }
 
     #[test]
-    fn value_label_shows_branch_or_mr_iid() {
+    fn kind_switch_restore_failure_opens_empty_mr_picker() {
+        assert_eq!(
+            restore_failure_action(true),
+            RestoreFailureAction::EnterEmptyMrOpenPicker
+        );
+        assert_eq!(
+            restore_failure_action(false),
+            RestoreFailureAction::KeepFailedDetail
+        );
+    }
+
+    #[test]
+    fn value_label_shows_branch_mr_iid_or_select_prompt() {
         assert_eq!(
             value_label(EntryKind::Branch, "feature/mr", None),
             "feature/mr"
@@ -151,6 +184,10 @@ mod tests {
         assert_eq!(
             value_label(EntryKind::Mr, "feature/mr", Some(42)),
             "!42"
+        );
+        assert_eq!(
+            value_label(EntryKind::Mr, "feature/mr", None),
+            "Select MR…"
         );
     }
 }

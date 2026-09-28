@@ -22,7 +22,9 @@ use crate::settings_store;
 use crate::window_geometry_store::{self, DiffReopen};
 use crate::workspace_store::{self, MrEntryLabel, WorkspaceEntry, WorkspaceStore};
 use super::diff_window::{DiffSnapshot, DiffView};
-use super::entry_chrome::{self, EntryChromeMode, EntryKind, KindSwitchAction};
+use super::entry_chrome::{
+    self, EntryChromeMode, EntryKind, KindSwitchAction, RestoreFailureAction,
+};
 use super::file_tree::{self, TreeRow};
 use super::file_tree_rows;
 use super::gitlab_connection::{self, GitLabConnection};
@@ -54,6 +56,10 @@ pub struct AppView {
     mr_toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// In-memory MR Entry (list = GitLab commits; Comparison = diff_refs).
     mr_entry: Option<MrEntry>,
+    /// MR kind held with no selected Entry (`Select MR…`); Comparison stays on Branch Browser.
+    empty_mr: bool,
+    /// Kind-switch restore in flight — failure clears to empty MR + picker.
+    pending_kind_restore: bool,
     repo_menu: Option<RepoContextMenu>,
     activation_sub: Option<gpui::Subscription>,
     bounds_sub: Option<gpui::Subscription>,
@@ -122,6 +128,8 @@ impl AppView {
             branch_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_entry: None,
+            empty_mr: false,
+            pending_kind_restore: false,
             repo_menu: None,
             activation_sub: None,
             bounds_sub: None,
@@ -284,6 +292,8 @@ impl AppView {
             return;
         }
         let iid = label.iid;
+        self.empty_mr = false;
+        self.pending_kind_restore = true;
         self.mr_entry = Some(MrEntry {
             summary: MergeRequestSummary {
                 iid,
@@ -309,24 +319,45 @@ impl AppView {
             .and_then(|e| e.last_mr.clone())
     }
 
+    /// Open MR picker if closed (kind-switch empty enter / failed restore).
+    fn ensure_mr_picker_open(&mut self, cx: &mut Context<Self>) {
+        if self.mr_picker.is_none() {
+            self.toggle_mr_picker(cx);
+        }
+    }
+
+    /// Hold empty MR kind (`Select MR…`) and open the picker.
+    fn enter_empty_mr(&mut self, cx: &mut Context<Self>) {
+        self.branch_picker = None;
+        self.mr_entry = None;
+        self.empty_mr = true;
+        self.pending_kind_restore = false;
+        self.ensure_mr_picker_open(cx);
+    }
+
     /// Hard-exclusive Entry kind switch (unified capsule kind hits).
     fn select_entry_kind(&mut self, target: EntryKind, cx: &mut Context<Self>) {
         if !gitlab_chrome_visible(self) {
             return;
         }
-        let current = entry_chrome::active_entry_kind(self.mr_entry.is_some());
+        let current = entry_chrome::active_entry_kind(self.mr_entry.is_some(), self.empty_mr);
         let last_mr = self.current_last_mr();
         match entry_chrome::kind_switch_action(current, target, last_mr.as_ref()) {
-            KindSwitchAction::Stay | KindSwitchAction::StayOnBranchNoMemory => {}
+            KindSwitchAction::Stay => {}
             KindSwitchAction::SelectBranch => {
                 self.branch_picker = None;
                 self.mr_picker = None;
+                self.empty_mr = false;
+                self.pending_kind_restore = false;
                 self.clear_mr_entry(cx);
             }
             KindSwitchAction::RestoreMr(label) => {
                 self.branch_picker = None;
                 self.mr_picker = None;
                 self.begin_restore_mr(label, cx);
+            }
+            KindSwitchAction::EnterEmptyMr => {
+                self.enter_empty_mr(cx);
             }
         }
         cx.notify();
@@ -358,6 +389,8 @@ impl AppView {
                 self.branch_picker = None;
                 self.mr_picker = None;
                 self.mr_entry = None;
+                self.empty_mr = false;
+                self.pending_kind_restore = false;
             }
             Err(_) => {
                 // Stale entry already dropped by open_workspace; keep current Ready if any.
@@ -482,6 +515,8 @@ impl AppView {
 
     fn select_mr(&mut self, mr: MergeRequestSummary, cx: &mut Context<Self>) {
         let iid = mr.iid;
+        self.empty_mr = false;
+        self.pending_kind_restore = false;
         self.mr_entry = Some(MrEntry {
             summary: mr,
             detail: MrDetailState::Loading,
@@ -523,8 +558,7 @@ impl AppView {
                 ResolveProjectResult::Err(e) => {
                     let msg = ErrorNote::resolve_project(&e);
                     let _ = this.update(cx, |view, cx| {
-                        finish_mr_activate(view, iid, Err(msg));
-                        cx.notify();
+                        apply_mr_activate_finish(view, iid, Err(msg), cx);
                     });
                     return;
                 }
@@ -535,8 +569,7 @@ impl AppView {
                 Err(e) => {
                     let msg = ErrorNote::resolve_project(&e);
                     let _ = this.update(cx, |view, cx| {
-                        finish_mr_activate(view, iid, Err(msg));
-                        cx.notify();
+                        apply_mr_activate_finish(view, iid, Err(msg), cx);
                     });
                     return;
                 }
@@ -561,8 +594,7 @@ impl AppView {
                         e.settings_fix(),
                     );
                     let _ = this.update(cx, |view, cx| {
-                        finish_mr_activate(view, iid, Err(msg));
-                        cx.notify();
+                        apply_mr_activate_finish(view, iid, Err(msg), cx);
                     });
                     return;
                 }
@@ -588,8 +620,7 @@ impl AppView {
                         e.settings_fix(),
                     );
                     let _ = this.update(cx, |view, cx| {
-                        finish_mr_activate(view, iid, Err(msg));
-                        cx.notify();
+                        apply_mr_activate_finish(view, iid, Err(msg), cx);
                     });
                     return;
                 }
@@ -613,8 +644,7 @@ impl AppView {
                 .await
             {
                 let _ = this.update(cx, |view, cx| {
-                    finish_mr_activate(view, iid, Err(ErrorNote::plain(e.0)));
-                    cx.notify();
+                    apply_mr_activate_finish(view, iid, Err(ErrorNote::plain(e.0)), cx);
                 });
                 return;
             }
@@ -642,15 +672,14 @@ impl AppView {
                 Ok(infos) => infos,
                 Err(e) => {
                     let _ = this.update(cx, |view, cx| {
-                        finish_mr_activate(view, iid, Err(ErrorNote::plain(e.0)));
-                        cx.notify();
+                        apply_mr_activate_finish(view, iid, Err(ErrorNote::plain(e.0)), cx);
                     });
                     return;
                 }
             };
 
             let _ = this.update(cx, |view, cx| {
-                finish_mr_activate(
+                apply_mr_activate_finish(
                     view,
                     iid,
                     Ok(MrActivateReady {
@@ -658,8 +687,8 @@ impl AppView {
                         project: path,
                         commit_infos,
                     }),
+                    cx,
                 );
-                cx.notify();
             });
         })
         .detach();
@@ -667,6 +696,8 @@ impl AppView {
 
     fn clear_mr_entry(&mut self, cx: &mut Context<Self>) {
         self.mr_entry = None;
+        self.empty_mr = false;
+        self.pending_kind_restore = false;
         self.clear_selected_mr_label();
         self.restore_branch_commits();
         cx.notify();
@@ -687,6 +718,8 @@ impl AppView {
 
     fn open_branch(&mut self, name: &str, cx: &mut Context<Self>) {
         self.mr_entry = None;
+        self.empty_mr = false;
+        self.pending_kind_restore = false;
         let result = match &mut self.state {
             MainState::Ready(bb) => bb.switch_branch(name),
             MainState::Empty | MainState::Error(_) => return,
@@ -741,6 +774,8 @@ impl AppView {
             self.branch_picker = None;
             self.mr_picker = None;
             self.mr_entry = None;
+            self.empty_mr = false;
+            self.pending_kind_restore = false;
         }
         cx.notify();
     }
@@ -872,6 +907,8 @@ impl AppView {
                     Ok(bb) => {
                         this.state = MainState::Ready(bb);
                         this.mr_entry = None;
+                        this.empty_mr = false;
+                        this.pending_kind_restore = false;
                         this.mr_picker = None;
                         this.remember_current();
                     }
@@ -1510,7 +1547,7 @@ fn render_unified_entry_capsule(
     branch: &str,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    let kind = entry_chrome::active_entry_kind(view.mr_entry.is_some());
+    let kind = entry_chrome::active_entry_kind(view.mr_entry.is_some(), view.empty_mr);
     let mr_iid = view.mr_entry.as_ref().map(|e| e.summary.iid);
     let value = entry_chrome::value_label(kind, branch, mr_iid);
     let picker_open = view.branch_picker.is_some() || view.mr_picker.is_some();
@@ -1871,15 +1908,17 @@ fn finish_mr_activate(
     view: &mut AppView,
     iid: u64,
     result: Result<MrActivateReady, ErrorNote>,
-) {
+) -> bool {
     let Some(entry) = view.mr_entry.as_mut() else {
-        return;
+        return false;
     };
     if entry.summary.iid != iid {
-        return;
+        return false;
     }
     match result {
         Ok(ready) => {
+            view.pending_kind_restore = false;
+            view.empty_mr = false;
             entry.summary = MergeRequestSummary {
                 iid: ready.detail.iid,
                 title: ready.detail.title.clone(),
@@ -1896,11 +1935,36 @@ fn finish_mr_activate(
                 }
             }
             view.remember_current();
+            false
         }
         Err(msg) => {
-            entry.detail = MrDetailState::Failed(msg);
+            match entry_chrome::restore_failure_action(view.pending_kind_restore) {
+                RestoreFailureAction::KeepFailedDetail => {
+                    view.pending_kind_restore = false;
+                    entry.detail = MrDetailState::Failed(msg);
+                    false
+                }
+                RestoreFailureAction::EnterEmptyMrOpenPicker => {
+                    view.pending_kind_restore = false;
+                    view.mr_entry = None;
+                    view.empty_mr = true;
+                    true
+                }
+            }
         }
     }
+}
+
+fn apply_mr_activate_finish(
+    view: &mut AppView,
+    iid: u64,
+    result: Result<MrActivateReady, ErrorNote>,
+    cx: &mut Context<AppView>,
+) {
+    if finish_mr_activate(view, iid, result) {
+        view.ensure_mr_picker_open(cx);
+    }
+    cx.notify();
 }
 
 /// Show MR picker only when a remote host matches Settings.
