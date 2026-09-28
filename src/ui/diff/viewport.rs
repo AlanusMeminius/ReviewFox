@@ -25,6 +25,8 @@ pub struct PlacedBridge {
 pub struct AnchorCap {
     pub side: Side,
     pub ln: u32,
+    /// Row on `side` that was on the anchor when captured.
+    pub visual_row: u32,
     pub view_y: f32,
 }
 
@@ -224,6 +226,7 @@ impl<'a> Viewport<'a> {
         let cap = |side: Side, row: u32, ln: u32| AnchorCap {
             side,
             ln,
+            visual_row: row,
             view_y: row as f32 * self.row_h - self.top(side),
         };
         for (side, hit) in hits {
@@ -497,6 +500,25 @@ pub fn s_for_anchor(
     Some(clamp_s(layout, s, view_h, row_h))
 }
 
+/// Rewrap / width / font / toggle: hold the logical line's first visual row on
+/// the anchor (§3.1.1), even when capture was on a continuation row.
+#[allow(dead_code)] // 05 rewrap / resize / toggle
+pub fn s_for_rewrap(
+    layout: &Layout,
+    cap: AnchorCap,
+    view_h: f32,
+    row_h: f32,
+    current_s: f32,
+) -> Option<f32> {
+    let row = layout.side(cap.side).row_of_line(cap.ln)?;
+    Some(clamp_s(
+        layout,
+        s_for_content(layout, cap.side, row as f32 * row_h, row_h, current_s),
+        view_h,
+        row_h,
+    ))
+}
+
 pub fn clamp_s(layout: &Layout, s: f32, view_h: f32, row_h: f32) -> f32 {
     let (lo, hi) = s_range(layout, view_h, row_h);
     s.clamp(lo, hi)
@@ -692,7 +714,7 @@ fn subtract_span(span: (f32, f32), cover: (f32, f32)) -> Vec<(f32, f32)> {
 mod tests {
     use super::super::layout::tests::{build, eq, lines};
     use super::*;
-    use crate::domain::{AlignmentOp, FoldState, LineSpan};
+    use crate::domain::{Alignment, AlignmentOp, FoldState, LineSpan};
 
     const ROW_H: f32 = 20.;
     const VIEW_H: f32 = 300.;
@@ -993,6 +1015,22 @@ mod tests {
         layout.side(side).row_of_line(ln).unwrap() as f32 * ROW_H - vp.top(side)
     }
 
+    fn wrap_layout(old: &str, new: &str, ops: Vec<AlignmentOp>, width: f32) -> Layout {
+        use super::super::visual_wrap::{WrapPlan, WrapSide};
+        use std::sync::Arc;
+        let alignment = Alignment { ops };
+        let old_t: Arc<str> = old.into();
+        let new_t: Arc<str> = new.into();
+        let mut layout = build(old, new, alignment.ops.clone(), None);
+        let plan = WrapPlan {
+            old: WrapSide { width_px: width },
+            new: WrapSide { width_px: width },
+        };
+        let mut cw = |_: char| 10.0f32;
+        layout.apply_wrap(old_t, new_t, &alignment, None, plan, &mut cw);
+        layout
+    }
+
     #[test]
     fn anchor_line_keeps_its_place_across_expand_and_collapse() {
         let (old, new, ops) = folded_case();
@@ -1216,5 +1254,70 @@ mod tests {
         assert_ne!(g_short.thumb_left, per_side_short.thumb_left);
         let travel = g_short.track_width - g_short.thumb_width;
         assert!((x_at(&g_short, travel) - shared).abs() < 0.01);
+    }
+
+    #[test]
+    fn hit_on_continuation_row_maps_to_logical_line() {
+        use super::super::layout::LinePart;
+        let text = "a".repeat(25);
+        let layout = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 100.);
+        let vp = Viewport::new(&layout, 0., VIEW_H, ROW_H);
+        let Some(Row::Line(l)) = vp.hit(Side::Old, ROW_H + 2.) else {
+            panic!("continuation row");
+        };
+        assert_eq!((l.ln, l.part), (1, LinePart::Continuation));
+    }
+
+    #[test]
+    fn rewrap_pins_logical_line_first_visual_row() {
+        let text = "a".repeat(25);
+        let layout = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 100.);
+        let s = s_for_content(&layout, Side::Old, 0., ROW_H, 0.);
+        let before = view_y(&layout, s, Side::Old, 1);
+        let cap = Viewport::new(&layout, s, VIEW_H, ROW_H)
+            .capture_anchor()
+            .expect("anchor");
+        let mut layout2 = build(&text, &text, vec![eq(1, 1, 1)], None);
+        let plan = super::super::visual_wrap::WrapPlan {
+            old: super::super::visual_wrap::WrapSide { width_px: 50. },
+            new: super::super::visual_wrap::WrapSide { width_px: 50. },
+        };
+        let alignment = Alignment { ops: vec![eq(1, 1, 1)] };
+        let old_t: std::sync::Arc<str> = text.as_str().into();
+        let mut cw = |_: char| 10.0f32;
+        layout2.apply_wrap(
+            std::sync::Arc::clone(&old_t),
+            old_t,
+            &alignment,
+            None,
+            plan,
+            &mut cw,
+        );
+        let s2 = s_for_rewrap(&layout2, cap, VIEW_H, ROW_H, s).unwrap();
+        assert_eq!(view_y(&layout2, s2, Side::Old, 1), before);
+    }
+
+    #[test]
+    fn hunk_target_lands_on_first_visual_row_when_wrapped() {
+        const H: f32 = 60.;
+        let old = "a\n";
+        let new = format!("a\n{}", "b".repeat(25));
+        let layout = wrap_layout(
+            old,
+            &new,
+            vec![
+                eq(1, 1, 1),
+                AlignmentOp::Insert {
+                    after_old: 1,
+                    news: span(2, 1),
+                },
+            ],
+            100.,
+        );
+        let target = layout.hunk_lands[0].target;
+        let s = s_for_target(&layout, target, ROW_H, 0.).unwrap();
+        let vp = Viewport::new(&layout, s, H, ROW_H);
+        let row = layout.new.row_of_line(2).unwrap() as f32;
+        assert!((row * ROW_H - vp.top(Side::New) - H / 3.).abs() < 0.01);
     }
 }

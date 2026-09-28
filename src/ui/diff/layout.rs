@@ -3,11 +3,12 @@
 //! never on the per-frame path. See docs/diffview-architecture.md §3.
 
 use std::cell::OnceCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
 use super::tabs::display_columns;
+use super::visual_wrap::{AppliedWrap, WrapCtx, WrapPlan};
 
 use crate::domain::{
     Alignment, AlignmentOp, Anchor, EQUAL_CONTEXT, FoldState, HunkJumpTarget, LineSpan, Side,
@@ -23,6 +24,16 @@ pub enum LineKind {
     Replace,
 }
 
+/// Which slice of a logical line a visual row shows (§3.1.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LinePart {
+    #[default]
+    First,
+    Continuation,
+    /// Blank row beside a longer Equal partner; no line number, no hatch.
+    EqualPad,
+}
+
 /// One visual line on one side. Not a shared old+new row. Text is a byte
 /// range into that side's shared text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +42,7 @@ pub struct LineRow {
     pub kind: LineKind,
     /// Visual row index on this side (omission separators count as rows).
     pub row: u32,
+    pub part: LinePart,
     bytes: Range<usize>,
     /// Index into [`Layout::bridges`] of the Replace block holding this line.
     block: Option<u32>,
@@ -284,10 +296,31 @@ impl SideLayout {
         })
     }
 
-    /// Visual row of line `ln`, if that line is shown (not folded away).
+    /// Visual row of the first row of logical line `ln` (§3.5 hunk / match land).
     pub fn row_of_line(&self, ln: u32) -> Option<u32> {
-        let i = self.lines.partition_point(|l| l.ln < ln);
-        self.lines.get(i).filter(|l| l.ln == ln).map(|l| l.row)
+        self.lines
+            .iter()
+            .find(|l| l.ln == ln && l.part == LinePart::First)
+            .map(|l| l.row)
+    }
+
+    pub(crate) fn push_visual_line(
+        &mut self,
+        ln: u32,
+        kind: LineKind,
+        part: LinePart,
+        bytes: Range<usize>,
+        block: Option<u32>,
+    ) {
+        let row = self.rows() as u32;
+        self.lines.push(LineRow {
+            ln,
+            kind,
+            row,
+            part,
+            bytes,
+            block,
+        });
     }
 
     /// Last line row above visual row `row`.
@@ -327,6 +360,7 @@ impl SideLayout {
                 ln,
                 kind,
                 row,
+                part: LinePart::First,
                 bytes,
                 block,
             });
@@ -365,6 +399,9 @@ pub struct Layout {
     max_ln: u32,
     /// Lazy word marks, one cell per bridge (only Replace cells are filled).
     marks: Vec<OnceCell<BlockMarks>>,
+    /// Set by [`Self::apply_wrap`]; `None` when wrap is off (N = 1 everywhere).
+    #[allow(dead_code)] // 05 reads breaks for paint
+    pub wrap: Option<AppliedWrap>,
 }
 
 impl Layout {
@@ -382,8 +419,67 @@ impl Layout {
         alignment: &Alignment,
         fold: Option<&FoldState>,
     ) -> Self {
-        let old_ranges = line_ranges(&old_text);
-        let new_ranges = line_ranges(&new_text);
+        Self::project(old_text, new_text, alignment, fold, None)
+    }
+
+    /// Expand logical lines to N visual rows per side (§3.1.1). Rebuilds rows,
+    /// knots, bridges and hunk lands; keeps shared text. With wrap off, do not call.
+    #[allow(dead_code)] // 05 calls on toggle / resize
+    pub fn apply_wrap(
+        &mut self,
+        old_text: Arc<str>,
+        new_text: Arc<str>,
+        alignment: &Alignment,
+        fold: Option<&FoldState>,
+        plan: WrapPlan,
+        char_width: &mut impl FnMut(char) -> f32,
+    ) {
+        let mut ctx = WrapCtx {
+            plan,
+            old_w: plan.old.width_px,
+            new_w: plan.new.width_px,
+            cw: char_width,
+            old_breaks: HashMap::new(),
+            new_breaks: HashMap::new(),
+        };
+        let commented = (
+            self.old.commented.clone(),
+            self.new.commented.clone(),
+        );
+        *self = Self::project(old_text, new_text, alignment, fold, Some(&mut ctx));
+        self.old.commented = commented.0;
+        self.new.commented = commented.1;
+    }
+
+    /// Visual row of a match byte in `ln` after wrap (§3.5).
+    #[allow(dead_code)] // 05 match jump
+    pub fn row_of_match_byte(&self, side: Side, ln: u32, byte: usize) -> Option<u32> {
+        let breaks = self.wrap.as_ref()?.breaks(side, ln)?;
+        let first = self.side(side).row_of_line(ln)?;
+        let mut row = first;
+        for &b in &breaks.breaks {
+            if byte >= b {
+                row += 1;
+            } else {
+                break;
+            }
+        }
+        Some(row)
+    }
+
+    fn project(
+        old_text: Arc<str>,
+        new_text: Arc<str>,
+        alignment: &Alignment,
+        fold: Option<&FoldState>,
+        mut wrap: Option<&mut WrapCtx<'_>>,
+    ) -> Self {
+        let old_keep = Arc::clone(&old_text);
+        let new_keep = Arc::clone(&new_text);
+        let old_str = old_keep.as_ref();
+        let new_str = new_keep.as_ref();
+        let old_ranges = line_ranges(old_str);
+        let new_ranges = line_ranges(new_str);
         let mut old = SideLayout::new(old_text);
         let mut new = SideLayout::new(new_text);
         let mut bridges = Vec::new();
@@ -414,39 +510,68 @@ impl Layout {
                     if collapse {
                         let head = EQUAL_CONTEXT;
                         let tail = EQUAL_CONTEXT;
-                        old.push_lines(&old_ranges, span(o.start, head), LineKind::Equal, None);
-                        new.push_lines(&new_ranges, span(n.start, head), LineKind::Equal, None);
-                        advance(&mut knots, head, head);
+                        push_equal_span(
+                            &mut old,
+                            &mut new,
+                            old_str,
+                            new_str,
+                            &old_ranges,
+                            &new_ranges,
+                            o.start,
+                            n.start,
+                            head,
+                            &mut knots,
+                            wrap.as_deref_mut(),
+                        );
 
                         old.push_omit(op_idx, o.start + head, o.start + count - tail - 1);
                         new.push_omit(op_idx, n.start + head, n.start + count - tail - 1);
                         advance(&mut knots, 1, 1);
 
-                        old.push_lines(
+                        push_equal_span(
+                            &mut old,
+                            &mut new,
+                            old_str,
+                            new_str,
                             &old_ranges,
-                            span(o.start + count - tail, tail),
-                            LineKind::Equal,
-                            None,
-                        );
-                        new.push_lines(
                             &new_ranges,
-                            span(n.start + count - tail, tail),
-                            LineKind::Equal,
-                            None,
+                            o.start + count - tail,
+                            n.start + count - tail,
+                            tail,
+                            &mut knots,
+                            wrap.as_deref_mut(),
                         );
-                        advance(&mut knots, tail, tail);
                     } else {
-                        old.push_lines(&old_ranges, span(o.start, count), LineKind::Equal, None);
-                        new.push_lines(&new_ranges, span(n.start, count), LineKind::Equal, None);
-                        advance(&mut knots, count, count);
+                        push_equal_span(
+                            &mut old,
+                            &mut new,
+                            old_str,
+                            new_str,
+                            &old_ranges,
+                            &new_ranges,
+                            o.start,
+                            n.start,
+                            count,
+                            &mut knots,
+                            wrap.as_deref_mut(),
+                        );
                     }
                 }
                 AlignmentOp::Insert { after_old, news } => {
                     max_ln = max_ln.max(span_end(news, news.count));
                     let old_seam = old.rows() as u32;
                     let new_from = new.rows() as u32;
-                    new.push_lines(&new_ranges, news, LineKind::Insert, None);
-                    advance(&mut knots, 0, news.count);
+                    let d_new = push_side_span(
+                        &mut new,
+                        new_str,
+                        &new_ranges,
+                        news,
+                        LineKind::Insert,
+                        None,
+                        wrap.as_deref_mut(),
+                        Side::New,
+                    );
+                    advance(&mut knots, 0, d_new);
                     old.seams.push(old_seam);
                     bridges.push(Bridge::Insert {
                         after_old,
@@ -460,8 +585,17 @@ impl Layout {
                     max_ln = max_ln.max(span_end(olds, olds.count));
                     let old_from = old.rows() as u32;
                     let new_seam = new.rows() as u32;
-                    old.push_lines(&old_ranges, olds, LineKind::Delete, None);
-                    advance(&mut knots, olds.count, 0);
+                    let d_old = push_side_span(
+                        &mut old,
+                        old_str,
+                        &old_ranges,
+                        olds,
+                        LineKind::Delete,
+                        None,
+                        wrap.as_deref_mut(),
+                        Side::Old,
+                    );
+                    advance(&mut knots, d_old, 0);
                     new.seams.push(new_seam);
                     bridges.push(Bridge::Delete {
                         olds,
@@ -478,12 +612,37 @@ impl Layout {
                     let block = Some(bridges.len() as u32);
                     let old_from = old.rows() as u32;
                     let new_from = new.rows() as u32;
-                    old.push_lines(&old_ranges, olds, LineKind::Replace, block);
-                    new.push_lines(&new_ranges, news, LineKind::Replace, block);
-                    let common = olds.count.min(news.count);
-                    advance(&mut knots, common, common);
-                    advance(&mut knots, olds.count - common, 0);
-                    advance(&mut knots, 0, news.count - common);
+                    if wrap.is_some() {
+                        let (old_counts, new_counts) = push_replace_block(
+                            &mut old,
+                            &mut new,
+                            old_str,
+                            new_str,
+                            &old_ranges,
+                            &new_ranges,
+                            olds,
+                            news,
+                            block,
+                            wrap.as_deref_mut(),
+                        );
+                        let common = olds.count.min(news.count) as usize;
+                        for i in 0..common {
+                            advance(&mut knots, old_counts[i], new_counts[i]);
+                        }
+                        for i in common..old_counts.len() {
+                            advance(&mut knots, old_counts[i], 0);
+                        }
+                        for i in common..new_counts.len() {
+                            advance(&mut knots, 0, new_counts[i]);
+                        }
+                    } else {
+                        old.push_lines(&old_ranges, olds, LineKind::Replace, block);
+                        new.push_lines(&new_ranges, news, LineKind::Replace, block);
+                        let common = olds.count.min(news.count);
+                        advance(&mut knots, common, common);
+                        advance(&mut knots, olds.count - common, 0);
+                        advance(&mut knots, 0, news.count - common);
+                    }
                     bridges.push(Bridge::Replace {
                         olds,
                         news,
@@ -498,6 +657,11 @@ impl Layout {
         old.finish_seams();
         new.finish_seams();
         let marks = bridges.iter().map(|_| OnceCell::new()).collect();
+        let wrap = wrap.map(|ctx| AppliedWrap {
+            plan: ctx.plan,
+            old_breaks: std::mem::take(&mut ctx.old_breaks),
+            new_breaks: std::mem::take(&mut ctx.new_breaks),
+        });
 
         Self {
             old,
@@ -508,6 +672,7 @@ impl Layout {
             hunk_count: alignment.hunks().len(),
             max_ln,
             marks,
+            wrap,
         }
     }
 
@@ -533,6 +698,8 @@ impl Layout {
     pub fn marks(&self, side: Side, line: &LineRow) -> Option<&[TokenPart]> {
         let block = line.block? as usize;
         let Bridge::Replace {
+            olds,
+            news,
             old_from,
             old_to,
             new_from,
@@ -543,17 +710,17 @@ impl Layout {
             return None;
         };
         let marks = self.marks[block].get_or_init(|| {
-            let olds = self.block_texts(Side::Old, old_from, old_to);
-            let news = self.block_texts(Side::New, new_from, new_to);
-            let (old, new) = replace_marks(&olds, &news);
+            let old_texts = self.block_texts(Side::Old, old_from, old_to);
+            let new_texts = self.block_texts(Side::New, new_from, new_to);
+            let (old, new) = replace_marks(&old_texts, &new_texts);
             BlockMarks { old, new }
         });
-        let (parts, from) = match side {
-            Side::Old => (&marks.old, old_from),
-            Side::New => (&marks.new, new_from),
+        let (parts, line_span) = match side {
+            Side::Old => (&marks.old, olds),
+            Side::New => (&marks.new, news),
         };
         parts
-            .get(line.row.checked_sub(from)? as usize)
+            .get(line.ln.checked_sub(line_span.start)? as usize)
             .map(Vec::as_slice)
     }
 
@@ -565,12 +732,17 @@ impl Layout {
 
     fn block_texts(&self, side: Side, from: u32, to: u32) -> Vec<&str> {
         let s = self.side(side);
-        (from..to)
-            .filter_map(|r| match s.row(r as usize) {
-                Some(Row::Line(l)) => Some(s.text(l)),
-                _ => None,
-            })
-            .collect()
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for r in from..to {
+            let Some(Row::Line(l)) = s.row(r as usize) else {
+                continue;
+            };
+            if l.part == LinePart::First && seen.insert(l.ln) {
+                out.push(s.text(l));
+            }
+        }
+        out
     }
 
     /// Rebuild the comment row index. Call after a rebuild and when comments change.
@@ -610,6 +782,131 @@ fn span_end(span: LineSpan, count: u32) -> u32 {
         0
     } else {
         span.start + count - 1
+    }
+}
+
+fn line_bytes(ranges: &[Range<usize>], ln: u32) -> Range<usize> {
+    ranges
+        .get(ln.saturating_sub(1) as usize)
+        .cloned()
+        .unwrap_or(0..0)
+}
+
+fn push_equal_span(
+    old: &mut SideLayout,
+    new: &mut SideLayout,
+    old_str: &str,
+    new_str: &str,
+    old_ranges: &[Range<usize>],
+    new_ranges: &[Range<usize>],
+    o_start: u32,
+    n_start: u32,
+    count: u32,
+    knots: &mut Vec<ScrollKnot>,
+    wrap: Option<&mut WrapCtx<'_>>,
+) {
+    if let Some(w) = wrap {
+        for i in 0..count {
+            let o_ln = o_start + i;
+            let n_ln = n_start + i;
+            let d = w.push_equal_pair(
+                old,
+                new,
+                old_str,
+                new_str,
+                line_bytes(old_ranges, o_ln),
+                line_bytes(new_ranges, n_ln),
+                o_ln,
+                n_ln,
+                LineKind::Equal,
+            );
+            advance(knots, d, d);
+        }
+    } else {
+        old.push_lines(old_ranges, span(o_start, count), LineKind::Equal, None);
+        new.push_lines(new_ranges, span(n_start, count), LineKind::Equal, None);
+        advance(knots, count, count);
+    }
+}
+
+fn push_side_span(
+    side: &mut SideLayout,
+    side_str: &str,
+    ranges: &[Range<usize>],
+    span_lines: LineSpan,
+    kind: LineKind,
+    block: Option<u32>,
+    wrap: Option<&mut WrapCtx<'_>>,
+    which: Side,
+) -> u32 {
+    if let Some(w) = wrap {
+        let mut total = 0u32;
+        for i in 0..span_lines.count {
+            let ln = span_lines.start + i;
+            total += w.push_line_rows(
+                side,
+                side_str,
+                line_bytes(ranges, ln),
+                ln,
+                kind,
+                block,
+                which,
+            );
+        }
+        total
+    } else {
+        side.push_lines(ranges, span_lines, kind, block);
+        span_lines.count
+    }
+}
+
+fn push_replace_block(
+    old: &mut SideLayout,
+    new: &mut SideLayout,
+    old_str: &str,
+    new_str: &str,
+    old_ranges: &[Range<usize>],
+    new_ranges: &[Range<usize>],
+    olds: LineSpan,
+    news: LineSpan,
+    block: Option<u32>,
+    wrap: Option<&mut WrapCtx<'_>>,
+) -> (Vec<u32>, Vec<u32>) {
+    if let Some(w) = wrap {
+        let mut old_counts = Vec::with_capacity(olds.count as usize);
+        for i in 0..olds.count {
+            let ln = olds.start + i;
+            old_counts.push(w.push_line_rows(
+                old,
+                old_str,
+                line_bytes(old_ranges, ln),
+                ln,
+                LineKind::Replace,
+                block,
+                Side::Old,
+            ));
+        }
+        let mut new_counts = Vec::with_capacity(news.count as usize);
+        for i in 0..news.count {
+            let ln = news.start + i;
+            new_counts.push(w.push_line_rows(
+                new,
+                new_str,
+                line_bytes(new_ranges, ln),
+                ln,
+                LineKind::Replace,
+                block,
+                Side::New,
+            ));
+        }
+        (old_counts, new_counts)
+    } else {
+        old.push_lines(old_ranges, olds, LineKind::Replace, block);
+        new.push_lines(new_ranges, news, LineKind::Replace, block);
+        (
+            vec![1; olds.count as usize],
+            vec![1; news.count as usize],
+        )
     }
 }
 
@@ -653,6 +950,8 @@ fn land_from_op(op: &AlignmentOp) -> Option<HunkJumpTarget> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use super::super::visual_wrap::{WrapPlan, WrapSide};
+    use std::sync::Arc;
 
     pub(crate) fn build(
         old: &str,
@@ -1272,5 +1571,71 @@ ab	c
     fn crlf_lines_are_byte_ranges_without_the_terminator() {
         let layout = build("a\r\nbb\r\n", "a\r\nbb\r\n", vec![eq(1, 1, 2)], None);
         assert_eq!(dump(&layout.old), ["1 a Equal", "2 bb Equal"]);
+    }
+
+    fn wrap_layout(
+        old: &str,
+        new: &str,
+        ops: Vec<AlignmentOp>,
+        width: f32,
+    ) -> Layout {
+        let alignment = Alignment { ops };
+        let old_t: Arc<str> = old.into();
+        let new_t: Arc<str> = new.into();
+        let mut layout = Layout::build(Arc::clone(&old_t), Arc::clone(&new_t), &alignment, None);
+        let plan = WrapPlan {
+            old: WrapSide { width_px: width },
+            new: WrapSide { width_px: width },
+        };
+        let mut cw = |_: char| 10.0f32;
+        layout.apply_wrap(old_t, new_t, &alignment, None, plan, &mut cw);
+        layout
+    }
+
+    #[test]
+    fn equal_wrap_two_vs_three_rows_stays_collinear_and_keeps_gap() {
+        let old = "a".repeat(25);
+        let new = "b".repeat(15);
+        let wrapped = wrap_layout(&old, &new, vec![eq(1, 1, 1)], 100.);
+        assert_eq!(wrapped.old.rows(), 3);
+        assert_eq!(wrapped.new.rows(), 3);
+        assert!(wrapped.new.lines()[2].is_equal_padding());
+        let end = wrapped.knots.last().unwrap();
+        assert_eq!(end.old_y, end.new_y, "Equal pair stays collinear");
+    }
+
+    #[test]
+    fn replace_one_wrapped_line_against_two_logical_lines() {
+        let old = "o".repeat(30);
+        let new = format!("{}\n{}", "n".repeat(10), "m".repeat(10));
+        let layout = wrap_layout(
+            &old,
+            &new,
+            vec![AlignmentOp::Replace {
+                olds: span(1, 1),
+                news: span(1, 2),
+            }],
+            100.,
+        );
+        assert_eq!(layout.old.rows(), 3);
+        assert_eq!(layout.new.rows(), 2);
+        let end = layout.knots.last().unwrap();
+        assert_eq!((end.old_y, end.new_y), (3, 2));
+    }
+
+    #[test]
+    fn row_of_match_byte_picks_visual_row() {
+        let text = "a".repeat(25);
+        let layout = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 100.);
+        assert_eq!(layout.row_of_match_byte(Side::Old, 1, 0), Some(0));
+        let b = layout
+            .wrap
+            .as_ref()
+            .unwrap()
+            .old_breaks
+            .get(&1)
+            .unwrap()
+            .breaks[0];
+        assert_eq!(layout.row_of_match_byte(Side::Old, 1, b), Some(1));
     }
 }
