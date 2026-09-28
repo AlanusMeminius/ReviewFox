@@ -1,5 +1,7 @@
 //! Visual tokens aligned with BeadsViewer + accepted prototype A.
 
+use std::sync::LazyLock;
+
 #[cfg(target_os = "windows")]
 use gpui::rgba;
 use gpui::{BoxShadow, Hsla, Pixels, Rgba, hsla, point, px, rgb};
@@ -242,4 +244,178 @@ pub fn error_border() -> Rgba {
 /// [`capsule`] that marks the selected row, so hover never reads as selection.
 pub fn settings_nav_hover() -> Rgba {
     Rgba { a: 0.55, ..white() }
+}
+
+// --- Diff syntax palette (ADR-0010, issue 02) ---------------------------------
+// Not painted until issue 03 wires DualPane / shape_row.
+
+/// Capture-name → color, re-typed from Zed One Light `syntax` roles and tuned
+/// so each stays ≥ [`SYNTAX_MIN_CONTRAST`] against add/del/mod/chg backgrounds.
+/// Every name the v1 queries emit has an explicit row (including bare
+/// `delimiter`, which drop-last-segment cannot map to `punctuation`).
+#[allow(dead_code)] // used by resolve; table itself only read from tests until 03
+const SYNTAX_PALETTE: &[(&str, u32)] = &[
+    ("attribute", 0x526bcb),
+    ("comment", 0x717274),
+    ("comment.documentation", 0x6f7178),
+    ("constant", 0x966600),
+    ("constant.builtin", 0x966600),
+    ("constructor", 0x526bcb),
+    ("delimiter", 0x4d4f52),
+    ("escape", 0x6f7178),
+    ("function", 0x516ccc),
+    ("function.macro", 0x516ccc),
+    ("function.method", 0x516ccc),
+    ("function.special", 0x516ccc),
+    ("keyword", 0xa449ab),
+    ("label", 0x526bcb),
+    ("number", 0x9f6522),
+    ("operator", 0x3377a8),
+    ("property", 0xb55243),
+    ("punctuation.bracket", 0x4d4f52),
+    ("punctuation.delimiter", 0x4d4f52),
+    ("string", 0x4d7c43),
+    ("type", 0x3377a8),
+    ("type.builtin", 0x3377a8),
+    ("variable", 0x242529),
+    ("variable.builtin", 0x242529),
+    ("variable.parameter", 0xb55243),
+];
+
+/// WCAG contrast floor for syntax fg on Diff row / word-mark backgrounds.
+#[allow(dead_code)] // asserted in tests; kept next to the palette
+const SYNTAX_MIN_CONTRAST: f32 = 3.0;
+
+/// Exact name, then drop the last dotted segment repeatedly; else [`text`].
+#[allow(dead_code)] // wired in issue 03
+pub fn resolve_syntax_color(name: &str) -> Rgba {
+    let mut key = name;
+    loop {
+        if let Some((_, hex)) = SYNTAX_PALETTE.iter().find(|(n, _)| *n == key) {
+            return rgb(*hex);
+        }
+        match key.rsplit_once('.') {
+            Some((prefix, _)) => key = prefix,
+            None => return text(),
+        }
+    }
+}
+
+/// Colors indexed by [`crate::syntax::CaptureId`], matching [`crate::syntax::capture_names`].
+///
+/// Resolved lazily on first call — do not touch from theme build or first paint
+/// on the UI thread. Compiling the highlight queries (~50–150 ms) happens when
+/// `capture_names()` runs; call this beside the first highlight result (or on
+/// the background path) instead.
+#[allow(dead_code)] // wired in issue 03
+pub fn syntax_colors() -> &'static [Rgba] {
+    &SYNTAX_COLORS
+}
+
+#[allow(dead_code)] // wired in issue 03
+pub fn syntax_color(id: crate::syntax::CaptureId) -> Rgba {
+    syntax_colors()[usize::from(id.0)]
+}
+
+// LazyLock runs its closure only on first deref, not at module init.
+#[allow(dead_code)] // wired in issue 03
+static SYNTAX_COLORS: LazyLock<Vec<Rgba>> = LazyLock::new(|| {
+    crate::syntax::capture_names()
+        .iter()
+        .map(|name| resolve_syntax_color(name))
+        .collect()
+});
+
+#[cfg(test)]
+mod syntax_palette_tests {
+    use super::*;
+    use crate::syntax::{self, CaptureId};
+
+    fn rgba_u8(c: Rgba) -> (u8, u8, u8) {
+        (
+            (c.r * 255.).round() as u8,
+            (c.g * 255.).round() as u8,
+            (c.b * 255.).round() as u8,
+        )
+    }
+
+    fn relative_luminance(c: Rgba) -> f32 {
+        let channel = |v: f32| {
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+    }
+
+    fn contrast_ratio(fg: Rgba, bg: Rgba) -> f32 {
+        let (a, b) = (relative_luminance(fg), relative_luminance(bg));
+        let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn fallback_drops_dotted_segments_then_text() {
+        assert_eq!(
+            rgba_u8(resolve_syntax_color("function.method.call")),
+            rgba_u8(resolve_syntax_color("function"))
+        );
+        assert_eq!(
+            rgba_u8(resolve_syntax_color("no.such.capture")),
+            rgba_u8(text())
+        );
+        assert_eq!(rgba_u8(resolve_syntax_color("unknown")), rgba_u8(text()));
+    }
+
+    #[test]
+    fn every_capture_name_has_an_explicit_palette_entry() {
+        let names = syntax::capture_names();
+        assert!(
+            !names.is_empty(),
+            "queries should emit at least one capture name"
+        );
+        for name in names {
+            assert!(
+                SYNTAX_PALETTE.iter().any(|(n, _)| *n == name.as_str()),
+                "missing deliberate palette entry for {name:?} (would only reach color via fallback)"
+            );
+        }
+        assert!(
+            SYNTAX_PALETTE.iter().any(|(n, _)| *n == "delimiter"),
+            "bare delimiter must be explicit; drop-last-segment never reaches punctuation"
+        );
+    }
+
+    #[test]
+    fn resolved_vector_matches_capture_ids() {
+        let names = syntax::capture_names();
+        let colors = syntax_colors();
+        assert_eq!(colors.len(), names.len());
+        for (i, name) in names.iter().enumerate() {
+            let id = CaptureId(i as u16);
+            assert_eq!(
+                rgba_u8(syntax_color(id)),
+                rgba_u8(resolve_syntax_color(name)),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn palette_colors_meet_contrast_on_diff_backgrounds() {
+        let bgs = [add_bg(), del_bg(), mod_bg(), mod_chg()];
+        let bg_names = ["add_bg", "del_bg", "mod_bg", "mod_chg"];
+        for &(name, hex) in SYNTAX_PALETTE {
+            let fg = rgb(hex);
+            for (bg, bg_name) in bgs.iter().zip(bg_names) {
+                let ratio = contrast_ratio(fg, *bg);
+                assert!(
+                    ratio >= SYNTAX_MIN_CONTRAST,
+                    "{name} on {bg_name}: contrast {ratio:.2} < {SYNTAX_MIN_CONTRAST}"
+                );
+            }
+        }
+    }
 }
