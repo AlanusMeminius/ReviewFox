@@ -24,7 +24,9 @@ use crate::domain::{
     match_jump_plan,
 };
 use crate::git::FileDiff;
+use crate::syntax::{self, Span};
 use crate::ui::{scrollbar, theme};
+use std::path::Path;
 
 /// What the shell (DiffView) hears from the pane. Hunk index and hover copy
 /// are emitted only when they change.
@@ -49,6 +51,9 @@ pub struct DualPane {
     /// View projection of `file` under `fold`. Rebuilt on file / fold /
     /// Alignment change, never per frame.
     layout: Option<Layout>,
+    /// Per-side syntax spans over the side's full text. Kept across
+    /// `rebuild_layout` (fold / ignore-whitespace); cleared on file open.
+    highlights: [Option<Arc<[Span]>>; 2],
     /// Shaped text per (side, visual row), visible ± one screen.
     shapes: ShapeCache,
     /// Anchors of the selected path's DraftComments (comment index).
@@ -98,6 +103,7 @@ impl DualPane {
             file: None,
             fold: FoldState::collapsed(),
             layout: None,
+            highlights: [None, None],
             shapes: ShapeCache::default(),
             comments: Vec::new(),
             drafting: None,
@@ -119,7 +125,13 @@ impl DualPane {
     }
 
     /// Open a file at its start with everything folded.
-    pub fn open(&mut self, file: &FileDiff, comments: Vec<Anchor>, cx: &mut Context<Self>) {
+    pub fn open(
+        &mut self,
+        path: &str,
+        file: &FileDiff,
+        comments: Vec<Anchor>,
+        cx: &mut Context<Self>,
+    ) {
         self.file = match file {
             FileDiff::Text {
                 alignment,
@@ -132,6 +144,18 @@ impl DualPane {
             }),
             _ => None,
         };
+        self.highlights = [None, None];
+        if let Some(file) = self.file.as_ref() {
+            let first = first_line(&file.new_text).or_else(|| first_line(&file.old_text));
+            if let Some(lang) = syntax::detect(Path::new(path), first.unwrap_or("")) {
+                // Resolve palette with the first highlight (not at theme build).
+                let _ = theme::syntax_colors();
+                self.highlights = [
+                    Some(Arc::from(syntax::highlight(lang, &file.old_text))),
+                    Some(Arc::from(syntax::highlight(lang, &file.new_text))),
+                ];
+            }
+        }
         self.comments = comments;
         self.fold = FoldState::collapsed();
         self.set_hunk_index(None, cx);
@@ -609,6 +633,7 @@ impl DualPane {
         let mut frame = build_frame(
             FrameInput {
                 layout,
+                highlights: &self.highlights,
                 vp: &vp,
                 geom,
                 row_h,
@@ -776,6 +801,14 @@ fn side_ix(side: Side) -> usize {
     match side {
         Side::Old => 0,
         Side::New => 1,
+    }
+}
+
+fn first_line(text: &str) -> Option<&str> {
+    if text.is_empty() {
+        None
+    } else {
+        text.lines().next()
     }
 }
 

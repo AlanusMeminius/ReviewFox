@@ -247,13 +247,11 @@ pub fn settings_nav_hover() -> Rgba {
 }
 
 // --- Diff syntax palette (ADR-0010, issue 02) ---------------------------------
-// Not painted until issue 03 wires DualPane / shape_row.
 
 /// Capture-name → color, re-typed from Zed One Light `syntax` roles and tuned
 /// so each stays ≥ [`SYNTAX_MIN_CONTRAST`] against add/del/mod/chg backgrounds.
 /// Every name the v1 queries emit has an explicit row (including bare
 /// `delimiter`, which drop-last-segment cannot map to `punctuation`).
-#[allow(dead_code)] // used by resolve; table itself only read from tests until 03
 const SYNTAX_PALETTE: &[(&str, u32)] = &[
     ("attribute", 0x526bcb),
     ("comment", 0x717274),
@@ -283,11 +281,9 @@ const SYNTAX_PALETTE: &[(&str, u32)] = &[
 ];
 
 /// WCAG contrast floor for syntax fg on Diff row / word-mark backgrounds.
-#[allow(dead_code)] // asserted in tests; kept next to the palette
 const SYNTAX_MIN_CONTRAST: f32 = 3.0;
 
 /// Exact name, then drop the last dotted segment repeatedly; else [`text`].
-#[allow(dead_code)] // wired in issue 03
 pub fn resolve_syntax_color(name: &str) -> Rgba {
     let mut key = name;
     loop {
@@ -307,18 +303,15 @@ pub fn resolve_syntax_color(name: &str) -> Rgba {
 /// on the UI thread. Compiling the highlight queries (~50–150 ms) happens when
 /// `capture_names()` runs; call this beside the first highlight result (or on
 /// the background path) instead.
-#[allow(dead_code)] // wired in issue 03
 pub fn syntax_colors() -> &'static [Rgba] {
     &SYNTAX_COLORS
 }
 
-#[allow(dead_code)] // wired in issue 03
 pub fn syntax_color(id: crate::syntax::CaptureId) -> Rgba {
     syntax_colors()[usize::from(id.0)]
 }
 
 // LazyLock runs its closure only on first deref, not at module init.
-#[allow(dead_code)] // wired in issue 03
 static SYNTAX_COLORS: LazyLock<Vec<Rgba>> = LazyLock::new(|| {
     crate::syntax::capture_names()
         .iter()

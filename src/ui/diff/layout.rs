@@ -36,6 +36,13 @@ pub struct LineRow {
     block: Option<u32>,
 }
 
+impl LineRow {
+    /// Byte range of this line in the side's shared text (no trailing `\n`/`\r`).
+    pub fn bytes(&self) -> Range<usize> {
+        self.bytes.clone()
+    }
+}
+
 /// One side's view of one collapsed Equal span (§3.3). Takes a visual row but
 /// is not a line; the old and new separators of a span share `id`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -668,6 +675,28 @@ pub(crate) mod tests {
             .map(|i| format!("{prefix}{i}"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// `str::lines` (and thus Layout) drops a trailing `\r`, same as word-mark
+    /// text — so a highlight span that ate `\r`/`\n` clips away at the line end.
+    #[test]
+    fn line_ranges_exclude_crlf_terminators() {
+        let text = "// c\r\nfn x\n";
+        let ranges = line_ranges(text);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(&text[ranges[0].clone()], "// c");
+        assert_eq!(&text[ranges[1].clone()], "fn x");
+        let layout = build(
+            text,
+            text,
+            vec![AlignmentOp::Equal {
+                old: span(1, 2),
+                new: span(1, 2),
+            }],
+            None,
+        );
+        assert_eq!(layout.old.text(&layout.old.lines()[0]), "// c");
+        assert_eq!(layout.old.lines()[0].bytes(), ranges[0]);
     }
 
     /// Rows as `ln text Kind` / `~id from-to`, for table-style asserts.

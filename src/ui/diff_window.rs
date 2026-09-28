@@ -169,8 +169,9 @@ impl DiffView {
             return;
         };
         let file = snap.file.clone();
+        let path = snap.selected_path.clone();
         let comments = self.path_anchors();
-        self.with_pane(cx, |pane, cx| pane.open(&file, comments, cx));
+        self.with_pane(cx, |pane, cx| pane.open(&path, &file, comments, cx));
     }
 
     fn refresh_comments(&mut self, cx: &mut Context<Self>) {

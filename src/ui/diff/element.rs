@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use gpui::{
     App, Bounds, ContentMask, CursorStyle, DispatchPhase, Element, ElementId, Entity,
@@ -21,6 +22,7 @@ use super::tabs::TabExpansion;
 use super::trace::{self, FrameStats};
 use super::viewport::{Viewport, route_wheel, snap};
 use crate::domain::Side;
+use crate::syntax::Span;
 use crate::ui::scrollbar::{self, ThumbGeom};
 use crate::ui::theme;
 
@@ -233,6 +235,8 @@ pub struct Frame {
 
 pub(super) struct FrameInput<'a> {
     pub layout: &'a Layout,
+    /// Per-side highlight spans; `None` means plain text (no language).
+    pub highlights: &'a [Option<Arc<[Span]>>; 2],
     pub vp: &'a Viewport<'a>,
     pub geom: Geom,
     pub row_h: f32,
@@ -251,6 +255,7 @@ pub(super) fn build_frame(
 ) -> Frame {
     let FrameInput {
         layout,
+        highlights,
         vp,
         geom,
         row_h,
@@ -275,13 +280,14 @@ pub(super) fn build_frame(
         let drafting = decorations
             .drafting
             .and_then(|(s, ln)| (s == side).then_some(ln));
+        let side_spans = highlights[side_ix(side)].as_deref();
         let mut out = Vec::with_capacity(visible.len());
         let mut widest = 0f32;
         for i in visible {
             let Some(row) = rows.row(i) else { continue };
             let shape = shapes.rows.entry((side, i as u32)).or_insert_with(|| {
                 let t = trace::start();
-                let shape = shape_row(layout, side, row, font_px, window);
+                let shape = shape_row(layout, side, row, side_spans, font_px, window);
                 stats.shaped += 1;
                 stats.shape += trace::since(t);
                 shape
@@ -401,6 +407,7 @@ fn shape_row(
     layout: &Layout,
     side: Side,
     row: Row<'_>,
+    spans: Option<&[Span]>,
     font_px: f32,
     window: &mut Window,
 ) -> RowShape {
@@ -415,13 +422,21 @@ fn shape_row(
     let tabs = (!text.is_empty()).then(|| TabExpansion::new(text));
     RowShape {
         text: tabs.as_ref().map(|t| {
-            shape(
-                window,
-                SharedString::from(t.text.clone()),
-                theme::code_font(),
-                font_px,
-                theme::text(),
-            )
+            let display = SharedString::from(t.text.clone());
+            match spans {
+                Some(spans) => {
+                    let line_spans: Vec<_> = crate::syntax::spans_in(spans, line.bytes()).collect();
+                    let runs = runs_for_line(text, &line_spans, t, theme::syntax_colors(), theme::text());
+                    shape_runs(window, display, theme::code_font(), font_px, &runs)
+                }
+                None => shape(
+                    window,
+                    display,
+                    theme::code_font(),
+                    font_px,
+                    theme::text(),
+                ),
+            }
         }),
         tabs,
         label: Some(shape(
@@ -452,6 +467,82 @@ fn shape(
     window
         .text_system()
         .shape_line(text, px(font_px), &[run], None)
+}
+
+fn shape_runs(
+    window: &mut Window,
+    text: SharedString,
+    family: &'static str,
+    font_px: f32,
+    runs: &[(usize, Rgba)],
+) -> ShapedLine {
+    let face = font(family);
+    let text_runs: Vec<TextRun> = runs
+        .iter()
+        .filter(|&&(len, _)| len > 0)
+        .map(|&(len, color)| TextRun {
+            len,
+            font: face.clone(),
+            color: color.into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        })
+        .collect();
+    window
+        .text_system()
+        .shape_line(text, px(font_px), &text_runs, None)
+}
+
+/// Display-byte `(len, color)` runs for one line: `spans` are byte ranges into
+/// `line_text` (as from [`crate::syntax::spans_in`]), mapped through `tabs`.
+/// Gaps use `default`; `palette` is indexed by [`CaptureId`].
+fn runs_for_line(
+    line_text: &str,
+    spans: &[(Range<usize>, crate::syntax::CaptureId)],
+    tabs: &TabExpansion,
+    palette: &[Rgba],
+    default: Rgba,
+) -> Vec<(usize, Rgba)> {
+    let display_len = tabs.text.len();
+    if display_len == 0 {
+        return Vec::new();
+    }
+    if spans.is_empty() {
+        return vec![(display_len, default)];
+    }
+    let color = |id: crate::syntax::CaptureId| {
+        palette
+            .get(usize::from(id.0))
+            .copied()
+            .unwrap_or(default)
+    };
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    for (range, capture) in spans {
+        let start = range.start.min(line_text.len());
+        let end = range.end.min(line_text.len());
+        if end <= start {
+            continue;
+        }
+        let d0 = tabs.display_offset(start).min(display_len);
+        let d1 = tabs.display_offset(end).min(display_len);
+        if d1 <= d0 {
+            continue;
+        }
+        if d0 > cursor {
+            out.push((d0 - cursor, default));
+        }
+        let from = d0.max(cursor);
+        if d1 > from {
+            out.push((d1 - from, color(*capture)));
+        }
+        cursor = cursor.max(d1);
+    }
+    if cursor < display_len {
+        out.push((display_len - cursor, default));
+    }
+    out
 }
 
 /// x spans of highlight runs (byte ranges into the original line text,
@@ -1075,5 +1166,46 @@ mod tests {
     fn line_number_column_fits_the_digits() {
         assert_eq!(ln_col_width(2), 2. * LN_DIGIT_PX + LN_PAD);
         assert_eq!(ln_col_width(5), 5. * LN_DIGIT_PX + LN_PAD);
+    }
+
+    fn rgba(c: Rgba) -> (u8, u8, u8) {
+        (
+            (c.r * 255.).round() as u8,
+            (c.g * 255.).round() as u8,
+            (c.b * 255.).round() as u8,
+        )
+    }
+
+    #[test]
+    fn runs_for_line_table() {
+        use crate::syntax::CaptureId;
+        let kw = rgb(0xaa00aa);
+        let str_c = rgb(0x00aa00);
+        let def = theme::text();
+        let palette = [kw, str_c];
+        let got = |line: &str, spans: &[(Range<usize>, CaptureId)]| {
+            let tabs = TabExpansion::new(line);
+            runs_for_line(line, spans, &tabs, &palette, def)
+                .into_iter()
+                .map(|(len, c)| (len, rgba(c)))
+                .collect::<Vec<_>>()
+        };
+        let kw_c = rgba(kw);
+        let str_rgb = rgba(str_c);
+        let def_c = rgba(def);
+
+        // Tabs before a token: "\tfn" → four spaces then "fn".
+        assert_eq!(
+            got("\tfn", &[(1..3, CaptureId(0))]),
+            [(4, def_c), (2, kw_c)]
+        );
+        // Token spanning the whole line.
+        assert_eq!(got("fn", &[(0..2, CaptureId(0))]), [(2, kw_c)]);
+        // Line with no spans → single default run.
+        assert_eq!(got("plain", &[]), [(5, def_c)]);
+        // Multibyte chars inside a string span.
+        let line = "\"中文\"";
+        assert_eq!(line.len(), 8);
+        assert_eq!(got(line, &[(0..8, CaptureId(1))]), [(8, str_rgb)]);
     }
 }
