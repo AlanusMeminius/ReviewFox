@@ -1,5 +1,6 @@
-; Placeholder: comments and strings only. The full query is issue 05
-; (.scratch/code-highlighting/issues/05-cmake-highlights-query.md).
+; Repo-owned CMake highlights for tree-sitter-cmake 0.7.5.
+; Capture names must match the Diff syntax palette (issue 02).
+; No Neovim predicates (#lua-match?, @spell, @none).
 
 [
   (line_comment)
@@ -10,3 +11,38 @@
   (quoted_argument)
   (bracket_argument)
 ] @string
+
+(escape_sequence) @escape
+
+(variable_ref) @variable
+
+((unquoted_argument) @constant
+  (#match? @constant "^[A-Z@][A-Z0-9_]+$"))
+
+(normal_command
+  (identifier) @function)
+
+[
+  (if)
+  (elseif)
+  (else)
+  (endif)
+  (foreach)
+  (endforeach)
+  (while)
+  (endwhile)
+  (function)
+  (endfunction)
+  (macro)
+  (endmacro)
+] @keyword
+
+; After the general @function so it wins as the innermost capture.
+(normal_command
+  (identifier) @keyword
+  (#match? @keyword "^[Rr][Ee][Tt][Uu][Rr][Nn]$"))
+
+[
+  "("
+  ")"
+] @punctuation.bracket

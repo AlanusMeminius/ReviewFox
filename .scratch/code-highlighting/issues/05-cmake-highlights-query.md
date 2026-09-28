@@ -1,6 +1,6 @@
 # Repo-owned CMake highlights query
 
-Status: ready-for-agent
+Status: resolved
 
 Blocked by: 01
 
@@ -24,3 +24,11 @@ Via the 01 module: a sample `CMakeLists.txt` yields the expected capture for eac
 - Harden first: all three queries compile inside one shared `LazyLock` (`src/syntax/mod.rs`), so an invalid CMake query panics and poisons it for Rust/C++ too. Keep compile errors per Language (e.g. `Option<HighlightConfiguration>` + `log::warn!`) so a bad query makes only that language plain; keep a test that every bundled/repo query compiles.
 - Small cleanups in the same module: `from_interpreter` collapses to `None` with the doc comment (drop the unused digit stripping); `Registry::config` indexes by `lang as usize` instead of a linear search; `log::debug!` where highlighter errors are dropped.
 - Replace the `cmake_placeholder_query_compiles` test with the per-category test.
+
+## Comments
+
+- Wrote repo-owned `assets/queries/cmake/highlights.scm` for tree-sitter-cmake 0.7.5: comments, strings, `@function` command names, control-flow + `return` as `@keyword`, `variable_ref` as `@variable`, ALL_CAPS unquoted args as `@constant`, `escape_sequence` / parens. Only `#match?` and palette-known captures.
+- Generator expressions `$<...>` are not a grammar node in 0.7.5 — left uncolored (issue allowed this).
+- Registry: `Option<HighlightConfiguration>` per Language + `log::warn!` on compile failure; index by `lang as usize`; `log::debug!` on highlighter errors; `from_interpreter` is always `None`.
+- Replaced `cmake_placeholder_query_compiles` with `cmake_highlights_each_category`; added `every_bundled_query_compiles`.
+- Verify: `cargo test --bin reviewfox` → 173 passed, 1 ignored.

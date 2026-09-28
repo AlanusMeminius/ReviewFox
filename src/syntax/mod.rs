@@ -8,9 +8,6 @@
 //! the union of all queries' names, so a [`CaptureId`] means the same name
 //! whatever the Language and a palette can resolve it once per id.
 
-// Not wired into the Diff pane until issue 03.
-#![allow(dead_code)]
-
 use std::ops::Range;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -19,10 +16,11 @@ use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter}
 
 /// A language with a compiled-in grammar and highlights query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum Language {
-    Rust,
-    Cpp,
-    CMake,
+    Rust = 0,
+    Cpp = 1,
+    CMake = 2,
 }
 
 /// A highlight capture, e.g. `keyword` or `function.method`; an index into
@@ -40,9 +38,9 @@ pub struct Span {
 impl Language {
     const ALL: [Language; 3] = [Language::Rust, Language::Cpp, Language::CMake];
 
-    /// Grammar and highlights query, compiled. Called once per Language by
-    /// [`Registry::new`].
-    fn config(self) -> HighlightConfiguration {
+    /// Grammar and highlights query. `None` if the query fails to compile;
+    /// that Language then stays plain without poisoning the others.
+    fn config(self) -> Option<HighlightConfiguration> {
         let (grammar, query) = match self {
             Language::Rust => (
                 tree_sitter_rust::LANGUAGE.into(),
@@ -64,14 +62,21 @@ impl Language {
                 include_str!("../../assets/queries/cmake/highlights.scm").to_string(),
             ),
         };
-        HighlightConfiguration::new(grammar, format!("{self:?}"), &query, "", "")
-            .unwrap_or_else(|e| panic!("{self:?} highlights query: {e}"))
+        match HighlightConfiguration::new(grammar, format!("{self:?}"), &query, "", "") {
+            Ok(c) => Some(c),
+            Err(e) => {
+                log::warn!("{self:?} highlights query: {e}");
+                None
+            }
+        }
     }
 }
 
 /// Compiled queries for every Language plus the shared capture-name list.
 struct Registry {
-    configs: Vec<HighlightConfiguration>,
+    /// Indexed by [`Language`] as `usize`. `None` means that Language's query
+    /// failed to compile; highlighting falls back to plain text.
+    configs: Vec<Option<HighlightConfiguration>>,
     names: Vec<String>,
 }
 
@@ -83,6 +88,7 @@ impl Registry {
         // `_`-prefixed captures are query-internal (predicate helpers).
         let mut names: Vec<String> = configs
             .iter()
+            .flatten()
             .flat_map(|c| c.names())
             .filter(|n| !n.starts_with('_'))
             .map(|n| n.to_string())
@@ -94,15 +100,14 @@ impl Registry {
             "too many capture names"
         );
         // Every capture is in `names`, so each resolves to exactly itself.
-        for c in &mut configs {
+        for c in configs.iter_mut().flatten() {
             c.configure(&names);
         }
         Self { configs, names }
     }
 
-    fn config(&self, lang: Language) -> &HighlightConfiguration {
-        let i = Language::ALL.iter().position(|&l| l == lang).unwrap();
-        &self.configs[i]
+    fn config(&self, lang: Language) -> Option<&HighlightConfiguration> {
+        self.configs[lang as usize].as_ref()
     }
 }
 
@@ -118,11 +123,15 @@ pub fn capture_name(id: CaptureId) -> &'static str {
 /// Highlight all of `text` as `lang`: sorted, non-overlapping byte ranges;
 /// where captures nest, the innermost wins. Adjacent ranges with the same
 /// capture are merged. Broken syntax still yields spans (tree-sitter recovers);
-/// a highlighter error keeps the spans found so far.
+/// a highlighter error keeps the spans found so far. Unknown / failed query
+/// Languages yield no spans (plain text).
 pub fn highlight(lang: Language, text: &str) -> Vec<Span> {
+    let Some(config) = REGISTRY.config(lang) else {
+        return Vec::new();
+    };
     let mut highlighter = Highlighter::new();
-    let config = REGISTRY.config(lang);
     let Ok(events) = highlighter.highlight(config, text.as_bytes(), None, None, |_| None) else {
+        log::debug!("highlighter failed for {lang:?}");
         return Vec::new();
     };
     let mut spans: Vec<Span> = Vec::new();
@@ -147,7 +156,10 @@ pub fn highlight(lang: Language, text: &str) -> Vec<Span> {
                     }),
                 }
             }
-            Err(_) => break,
+            Err(e) => {
+                log::debug!("highlight event error for {lang:?}: {e}");
+                break;
+            }
         }
     }
     spans
@@ -206,13 +218,10 @@ fn shebang_interpreter(first_line: &str) -> Option<&str> {
     words.find(|w| !w.starts_with('-'))
 }
 
-/// Shebang interpreter → Language. The spec's hook covers `bash` / `sh` /
-/// `python` / `node`, none of which has a v1 grammar, so nothing resolves yet.
-fn from_interpreter(name: &str) -> Option<Language> {
-    match name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.') {
-        "bash" | "sh" | "python" | "node" => None,
-        _ => None,
-    }
+/// Shebang interpreter → Language. Spec hook for `bash` / `sh` / `python` /
+/// `node`; none have a v1 grammar yet, so every name resolves to `None`.
+fn from_interpreter(_name: &str) -> Option<Language> {
+    None
 }
 
 #[cfg(test)]
@@ -231,6 +240,16 @@ mod tests {
         named(text, spans)
             .iter()
             .any(|(t, c)| t == token && *c == capture)
+    }
+
+    #[test]
+    fn every_bundled_query_compiles() {
+        for lang in Language::ALL {
+            assert!(
+                REGISTRY.config(lang).is_some(),
+                "{lang:?} highlights query failed to compile"
+            );
+        }
     }
 
     #[test]
@@ -276,19 +295,59 @@ mod tests {
     }
 
     #[test]
-    fn cmake_placeholder_query_compiles() {
-        let text = "# top\nproject(x \"q\")\n";
+    fn cmake_highlights_each_category() {
+        // Covers comments, strings, functions, control-flow keywords, variable
+        // refs, and ALL_CAPS constants. Generator expressions `$<...>` are not
+        // a grammar node in tree-sitter-cmake 0.7.5, so they stay uncolored.
+        let text = "\
+# line comment
+#[[bracket comment]]
+project(x \"quoted\" [=[bracket]=])
+if(ON)
+  set(V ${FOO} $ENV{PATH} $CACHE{BAR})
+  target_link_libraries(t PUBLIC req)
+endif()
+foreach(i)
+endforeach()
+while(0)
+endwhile()
+function(f)
+  return()
+endfunction()
+macro(m)
+endmacro()
+";
         let spans = highlight(Language::CMake, text);
-        assert!(
-            has(text, &spans, "# top", "comment"),
-            "{:?}",
-            named(text, &spans)
-        );
-        assert!(
-            has(text, &spans, "\"q\"", "string"),
-            "{:?}",
-            named(text, &spans)
-        );
+        let got = named(text, &spans);
+        for (token, capture) in [
+            ("# line comment", "comment"),
+            ("#[[bracket comment]]", "comment"),
+            ("\"quoted\"", "string"),
+            ("[=[bracket]=]", "string"),
+            ("project", "function"),
+            ("set", "function"),
+            ("target_link_libraries", "function"),
+            ("if", "keyword"),
+            ("endif", "keyword"),
+            ("foreach", "keyword"),
+            ("endforeach", "keyword"),
+            ("while", "keyword"),
+            ("endwhile", "keyword"),
+            ("function", "keyword"),
+            ("endfunction", "keyword"),
+            ("macro", "keyword"),
+            ("endmacro", "keyword"),
+            ("return", "keyword"),
+            ("${FOO}", "variable"),
+            ("$ENV{PATH}", "variable"),
+            ("$CACHE{BAR}", "variable"),
+            ("PUBLIC", "constant"),
+        ] {
+            assert!(
+                has(text, &spans, token, capture),
+                "{token}@{capture}: {got:?}"
+            );
+        }
     }
 
     /// Byte range of each line of `text`, without the `\n`.
