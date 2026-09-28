@@ -19,6 +19,8 @@ use gpui::{
 use super::layout::{Layout, LineKind, Row};
 use super::pane::DualPane;
 use super::tabs::TabExpansion;
+use super::wrap::{clip_runs_to_display_segment, display_row_segments};
+use super::visual_wrap::WrapSide;
 use super::trace::{self, FrameStats};
 use super::viewport::{Viewport, route_wheel, snap};
 use crate::domain::Side;
@@ -34,15 +36,18 @@ const LN_DIGIT_PX: f32 = 8.;
 const LN_PAD: f32 = 4.;
 const BRIDGE_COL: f32 = 24.;
 /// Code text inset from the pane's inner edge.
-const TEXT_PAD: f32 = 12.;
+pub(super) const TEXT_PAD: f32 = 12.;
 /// Left bar on a commented line; the text moves right by the same amount.
-const COMMENT_BAR: f32 = 2.;
+pub(super) const COMMENT_BAR: f32 = 2.;
 const SEAM_H: f32 = 2.;
 const DRAFTING_BG: u32 = 0xdbe4ff;
+const SEARCH_HIT_BG: u32 = 0xfff59d;
 
 /// State that changes without touching Layout or the shaped-line cache.
 pub(super) struct Decorations {
     pub drafting: Option<(Side, u32)>,
+    /// Case-insensitive query for in-file search highlights on visible rows.
+    pub search_query: Option<Arc<str>>,
 }
 
 /// Shaped text and line number per `(side, visual row)`. Cleared on Layout
@@ -59,6 +64,7 @@ struct RowShape {
     /// Maps byte ranges into the original line onto `text`.
     tabs: Option<TabExpansion>,
     label: Option<ShapedLine>,
+    text_leading: f32,
 }
 
 impl ShapeCache {
@@ -77,13 +83,26 @@ impl ShapeCache {
 pub(super) struct BarState {
     pub visible: bool,
     pub hovered: [bool; 2],
-    /// Side being dragged and the grab offset inside the thumb.
+    /// Vertical: side being dragged and grab offset inside the thumb.
     pub drag: Option<(Side, f32)>,
+    pub h_hovered: [bool; 2],
+    /// Horizontal: side being dragged and grab offset inside the thumb.
+    pub h_drag: Option<(Side, f32)>,
 }
 
 impl BarState {
     fn shown(&self, side: Side) -> bool {
         self.visible || self.hovered[side_ix(side)] || self.drag.is_some_and(|(s, _)| s == side)
+    }
+
+    pub(super) fn h_shown(&self, side: Side) -> bool {
+        self.visible
+            || self.h_hovered[side_ix(side)]
+            || self.h_drag.is_some_and(|(s, _)| s == side)
+    }
+
+    pub(super) fn any_drag(&self) -> bool {
+        self.drag.is_some() || self.h_drag.is_some()
     }
 }
 
@@ -143,6 +162,19 @@ impl Geom {
             size(px(scrollbar::TRACK_WIDTH), px(h)),
         )
     }
+
+    /// Horizontal track along the bottom of the code column (overlay, §3.1.2).
+    pub fn h_track(&self, side: Side) -> Bounds<Pixels> {
+        let pane = self.pane(side);
+        let w = (f32::from(pane.size.width) - scrollbar::PAD * 2.).max(0.);
+        Bounds::new(
+            point(
+                px(f32::from(pane.left()) + scrollbar::PAD),
+                px(f32::from(pane.bottom()) - scrollbar::TRACK_WIDTH - scrollbar::PAD),
+            ),
+            size(px(w), px(scrollbar::TRACK_WIDTH)),
+        )
+    }
 }
 
 /// Thumb geometry for a side whose top is `top` of `max_top` in a `view_h` pane.
@@ -159,6 +191,22 @@ pub(super) fn top_at(geom: &ThumbGeom, thumb_top: f32) -> f32 {
 /// inset, comment bar room, the text, and the same inset after it.
 pub(super) fn text_extent(line_w: f32) -> f32 {
     TEXT_PAD + COMMENT_BAR + line_w + TEXT_PAD
+}
+
+/// Usable width for soft-wrap breaks in a code column (§3.1.1).
+pub(super) fn code_wrap_width_px(pane_w: f32) -> f32 {
+    (pane_w - TEXT_PAD * 2. - COMMENT_BAR).max(0.)
+}
+
+pub(super) fn wrap_plan_for_panes(old_w: f32, new_w: f32) -> super::layout::WrapPlan {
+    super::layout::WrapPlan {
+        old: WrapSide {
+            width_px: code_wrap_width_px(old_w),
+        },
+        new: WrapSide {
+            width_px: code_wrap_width_px(new_w),
+        },
+    }
 }
 
 pub(super) fn line_number_digits(layout: &Layout) -> u32 {
@@ -183,9 +231,14 @@ struct RowPaint {
     bg: Rgba,
     commented: bool,
     text: Option<ShapedLine>,
+    /// Extra x before shaped text (continuation indent when wrapped).
+    text_leading: f32,
     /// Word-mark runs, x relative to the text origin; one rect per run.
     marks: Vec<(f32, f32)>,
+    /// Search-hit runs, x relative to the text origin.
+    search: Vec<(f32, f32)>,
     label: Option<ShapedLine>,
+    show_label: bool,
 }
 
 struct SideFrame {
@@ -197,6 +250,7 @@ struct SideFrame {
     seams: Vec<(f32, bool)>,
     empty_seam: Option<f32>,
     thumb: Option<Thumb>,
+    h_thumb: Option<Thumb>,
     /// Widest shaped text among this frame's rows.
     widest: f32,
     /// Horizontal scroll of the code text, device-pixel snapped. Set after
@@ -225,9 +279,10 @@ struct WinBridge {
 pub struct Frame {
     geom: Geom,
     row_h: f32,
-    hitbox: Hitbox,
-    code: [Hitbox; 2],
-    tracks: [Option<Hitbox>; 2],
+    pub(super) hitbox: Hitbox,
+    pub(super) code: [Hitbox; 2],
+    pub(super) tracks: [Option<Hitbox>; 2],
+    pub(super) h_tracks: [Option<Hitbox>; 2],
     sides: [SideFrame; 2],
     bridges: Vec<WinBridge>,
     /// Omission separator joins: (old y, new y), window.
@@ -255,7 +310,6 @@ pub(super) struct FrameInput<'a> {
 pub(super) fn build_frame(
     input: FrameInput<'_>,
     shapes: &mut ShapeCache,
-    hitboxes: (Hitbox, [Hitbox; 2], [Option<Hitbox>; 2]),
     window: &mut Window,
 ) -> Frame {
     let FrameInput {
@@ -286,6 +340,7 @@ pub(super) fn build_frame(
         let drafting = decorations
             .drafting
             .and_then(|(s, ln)| (s == side).then_some(ln));
+        let search_query = decorations.search_query.as_deref();
         let side_spans = highlights[side_ix(side)].as_deref();
         let mut out = Vec::with_capacity(visible.len());
         let mut widest = 0f32;
@@ -293,29 +348,76 @@ pub(super) fn build_frame(
             let Some(row) = rows.row(i) else { continue };
             let shape = shapes.rows.entry((side, i as u32)).or_insert_with(|| {
                 let t = trace::start();
-                let shape = shape_row(layout, side, row, side_spans, font_px, code_family, window);
+                let shape = shape_row(
+                    layout,
+                    side,
+                    row,
+                    side_spans,
+                    font_px,
+                    code_family,
+                    window,
+                );
                 stats.shaped += 1;
                 stats.shape += trace::since(t);
                 shape
             });
-            let (kind, commented, drafting_here, marks) = match row {
-                Row::Line(l) => {
-                    let marks = match (layout.mark_runs(side, l), &shape.text, &shape.tabs) {
-                        (Some(runs), Some(text), Some(tabs)) => mark_spans(&runs, tabs, text),
-                        _ => Vec::new(),
-                    };
-                    (
-                        Some(l.kind),
-                        rows.has_comment(l.ln),
-                        drafting == Some(l.ln),
-                        marks,
-                    )
-                }
-                Row::Omit(_) => (None, false, false, Vec::new()),
-            };
+            let (kind, commented, drafting_here, marks, search, show_label, leading) = match row {
+                    Row::Line(l) => {
+                        let marks = match (layout.mark_runs(side, l), &shape.text, &shape.tabs) {
+                            (Some(runs), Some(text), Some(tabs)) => {
+                                if layout.wrap.is_some() {
+                                    let (seg, _) =
+                                        wrap_segment(layout, side, l, tabs, layout.side(side));
+                                    let clipped =
+                                        clip_runs_to_display_segment(&runs, tabs, seg);
+                                    run_spans(&clipped, text)
+                                } else {
+                                    mark_spans(&runs, tabs, text)
+                                }
+                            }
+                            _ => Vec::new(),
+                        };
+                        let pad = l.is_equal_padding();
+                        let search = if pad {
+                            Vec::new()
+                        } else {
+                            shape
+                                .text
+                                .as_ref()
+                                .zip(shape.tabs.as_ref())
+                                .map(|(text, tabs)| {
+                                    let line_text = layout.side(side).text(l);
+                                    let ranges: Vec<_> = search_query
+                                        .map(|q| {
+                                            crate::domain::match_byte_ranges(line_text, q)
+                                                .into_iter()
+                                                .map(|r| (r.start, r.end))
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .unwrap_or_default();
+                                    let (seg, _) =
+                                        wrap_segment(layout, side, l, tabs, layout.side(side));
+                                    let clipped =
+                                        clip_runs_to_display_segment(&ranges, tabs, seg);
+                                    run_spans(&clipped, text)
+                                })
+                                .unwrap_or_default()
+                        };
+                        (
+                            Some(l.kind),
+                            !pad && rows.has_comment(l.ln),
+                            !pad && drafting == Some(l.ln),
+                            marks,
+                            search,
+                            l.shows_line_number(),
+                            shape.text_leading,
+                        )
+                    }
+                    Row::Omit(_) => (None, false, false, Vec::new(), Vec::new(), false, 0.),
+                };
             let kind_bg = kind_bg(kind);
             if let Some(text) = &shape.text {
-                widest = widest.max(f32::from(text.width));
+                widest = widest.max(shape.text_leading + f32::from(text.width));
             }
             out.push(RowPaint {
                 y0: y_of(i),
@@ -328,8 +430,11 @@ pub(super) fn build_frame(
                 },
                 commented,
                 text: shape.text.clone(),
+                text_leading: leading,
                 marks,
+                search,
                 label: shape.label.clone(),
+                show_label,
             });
         }
         let n = rows.rows();
@@ -362,6 +467,7 @@ pub(super) fn build_frame(
                 .is_empty()
                 .then(|| snap(top + vp.empty_seam(side), scale)),
             thumb,
+            h_thumb: None,
             widest,
             x_offset: 0.,
         }
@@ -394,14 +500,17 @@ pub(super) fn build_frame(
         (Vec::new(), Vec::new())
     };
 
-    let (hitbox, code, tracks) = hitboxes;
+    let hitbox = window.insert_hitbox(geom.bounds, HitboxBehavior::Normal);
+    let code = [Side::Old, Side::New]
+        .map(|side| window.insert_hitbox(geom.pane(side), HitboxBehavior::Normal));
     stats.build = trace::since(t_build);
     Frame {
         geom,
         row_h,
         hitbox,
         code,
-        tracks,
+        tracks: [None, None],
+        h_tracks: [None, None],
         sides,
         bridges,
         waves,
@@ -423,32 +532,137 @@ fn shape_row(
             text: None,
             tabs: None,
             label: None,
+            text_leading: 0.,
         };
     };
-    let text = layout.side(side).text(line);
-    let tabs = (!text.is_empty()).then(|| TabExpansion::new(text));
+    if line.is_equal_padding() {
+        return RowShape {
+            text: None,
+            tabs: None,
+            label: None,
+            text_leading: 0.,
+        };
+    }
+    let side_layout = layout.side(side);
+    let text = side_layout.text(line);
+    let tabs = TabExpansion::new(text);
+    let (segment, text_leading) = wrap_segment(layout, side, line, &tabs, side_layout);
     RowShape {
-        text: tabs.as_ref().map(|t| {
-            let display = SharedString::from(t.text.clone());
+        text: Some({
+            let segment_text = tabs.text[segment.clone()].to_string();
+            let display = SharedString::from(segment_text);
             match spans {
                 Some(spans) => {
                     let line_spans: Vec<_> = crate::syntax::spans_in(spans, line.bytes()).collect();
-                    let runs =
-                        runs_for_line(text, &line_spans, t, theme::syntax_colors(), theme::text());
+                    let runs = runs_for_segment(
+                        text,
+                        &line_spans,
+                        &tabs,
+                        segment,
+                        theme::syntax_colors(),
+                        theme::text(),
+                    );
                     shape_runs(window, display, family.clone(), font_px, &runs)
                 }
                 None => shape(window, display, family.clone(), font_px, theme::text()),
             }
         }),
-        tabs,
-        label: Some(shape(
-            window,
-            SharedString::from(line.ln.to_string()),
-            family.clone(),
-            LN_FONT_PX,
-            theme::faint(),
-        )),
+        tabs: Some(tabs),
+        label: line.shows_line_number().then(|| {
+            shape(
+                window,
+                SharedString::from(line.ln.to_string()),
+                family.clone(),
+                LN_FONT_PX,
+                theme::faint(),
+            )
+        }),
+        text_leading,
     }
+}
+
+fn wrap_segment(
+    layout: &Layout,
+    side: Side,
+    line: &super::layout::LineRow,
+    tabs: &TabExpansion,
+    side_layout: &super::layout::SideLayout,
+) -> (Range<usize>, f32) {
+    let full = 0..tabs.text.len();
+    let Some(applied) = layout.wrap.as_ref() else {
+        return (full, 0.);
+    };
+    let Some(breaks) = applied.breaks(side, line.ln) else {
+        return (full, 0.);
+    };
+    let segs = display_row_segments(tabs.text.len(), &breaks.breaks);
+    let ix = line.segment_index(side_layout).min(segs.len().saturating_sub(1));
+    let leading = if ix > 0 {
+        breaks.continuation_indent_px
+    } else {
+        0.
+    };
+    (segs[ix].clone(), leading)
+}
+
+fn runs_for_segment(
+    line_text: &str,
+    spans: &[(Range<usize>, crate::syntax::CaptureId)],
+    tabs: &TabExpansion,
+    segment: Range<usize>,
+    palette: &[Rgba],
+    default: Rgba,
+) -> Vec<(usize, Rgba)> {
+    let display_len = segment.len();
+    if display_len == 0 {
+        return Vec::new();
+    }
+    if spans.is_empty() {
+        return vec![(display_len, default)];
+    }
+    let color = |id: crate::syntax::CaptureId| {
+        palette
+            .get(usize::from(id.0))
+            .copied()
+            .unwrap_or(default)
+    };
+    let mut display_runs = Vec::new();
+    for (range, capture) in spans {
+        let start = range.start.min(line_text.len());
+        let end = range.end.min(line_text.len());
+        if end <= start {
+            continue;
+        }
+        let d0 = tabs.display_offset(start);
+        let d1 = tabs.display_offset(end);
+        if d1 <= d0 {
+            continue;
+        }
+        display_runs.push((d0, d1, color(*capture)));
+    }
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    for (d0, d1, color) in display_runs {
+        let start = d0.max(segment.start);
+        let end = d1.min(segment.end);
+        if end <= start {
+            continue;
+        }
+        let rel0 = start - segment.start;
+        let rel1 = end - segment.start;
+        if rel0 > cursor {
+            out.push((rel0 - cursor, default));
+        }
+        let from = rel0.max(cursor);
+        if rel1 > from {
+            out.push((rel1 - from, color));
+        }
+        cursor = cursor.max(rel1);
+    }
+    if cursor < display_len {
+        out.push((display_len - cursor, default));
+    }
+    out
 }
 
 fn shape(
@@ -496,57 +710,6 @@ fn shape_runs(
         .shape_line(text, px(font_px), &text_runs, None)
 }
 
-/// Display-byte `(len, color)` runs for one line: `spans` are byte ranges into
-/// `line_text` (as from [`crate::syntax::spans_in`]), mapped through `tabs`.
-/// Gaps use `default`; `palette` is indexed by [`CaptureId`].
-fn runs_for_line(
-    line_text: &str,
-    spans: &[(Range<usize>, crate::syntax::CaptureId)],
-    tabs: &TabExpansion,
-    palette: &[Rgba],
-    default: Rgba,
-) -> Vec<(usize, Rgba)> {
-    let display_len = tabs.text.len();
-    if display_len == 0 {
-        return Vec::new();
-    }
-    if spans.is_empty() {
-        return vec![(display_len, default)];
-    }
-    let color = |id: crate::syntax::CaptureId| {
-        palette
-            .get(usize::from(id.0))
-            .copied()
-            .unwrap_or(default)
-    };
-    let mut out = Vec::new();
-    let mut cursor = 0usize;
-    for (range, capture) in spans {
-        let start = range.start.min(line_text.len());
-        let end = range.end.min(line_text.len());
-        if end <= start {
-            continue;
-        }
-        let d0 = tabs.display_offset(start).min(display_len);
-        let d1 = tabs.display_offset(end).min(display_len);
-        if d1 <= d0 {
-            continue;
-        }
-        if d0 > cursor {
-            out.push((d0 - cursor, default));
-        }
-        let from = d0.max(cursor);
-        if d1 > from {
-            out.push((d1 - from, color(*capture)));
-        }
-        cursor = cursor.max(d1);
-    }
-    if cursor < display_len {
-        out.push((display_len - cursor, default));
-    }
-    out
-}
-
 /// x spans of highlight runs (byte ranges into the original line text,
 /// mapped through the tab expansion `text` was shaped from).
 fn mark_spans(runs: &[(usize, usize)], tabs: &TabExpansion, text: &ShapedLine) -> Vec<(f32, f32)> {
@@ -555,6 +718,18 @@ fn mark_spans(runs: &[(usize, usize)], tabs: &TabExpansion, text: &ShapedLine) -
         .map(|(a, b)| (a.min(text.len()), b.min(text.len())))
         .filter(|(a, b)| b > a)
         .map(|(a, b)| {
+            (
+                f32::from(text.x_for_index(a)),
+                f32::from(text.x_for_index(b)),
+            )
+        })
+        .collect()
+}
+
+fn run_spans(runs: &[(usize, usize)], text: &ShapedLine) -> Vec<(f32, f32)> {
+    runs.iter()
+        .filter(|&&(a, b)| b > a)
+        .map(|&(a, b)| {
             (
                 f32::from(text.x_for_index(a)),
                 f32::from(text.x_for_index(b)),
@@ -600,6 +775,25 @@ impl Frame {
         self.sides[side_ix(side)].x_offset = x;
     }
 
+    pub(super) fn set_h_thumb(
+        &mut self,
+        side: Side,
+        geom: super::viewport::HThumbGeom,
+        bars: &BarState,
+    ) {
+        let track = self.geom.h_track(side);
+        let inset = (scrollbar::TRACK_WIDTH - scrollbar::THUMB_WIDTH) / 2.;
+        let rect = Bounds::new(
+            point(track.left() + px(geom.thumb_left), track.top() + px(inset)),
+            size(px(geom.thumb_width), px(scrollbar::THUMB_WIDTH)),
+        );
+        self.sides[side_ix(side)].h_thumb = Some(Thumb {
+            rect,
+            shown: bars.h_shown(side),
+            dragging: bars.h_drag.is_some_and(|(s, _)| s == side),
+        });
+    }
+
     fn paint(&self, window: &mut Window, cx: &mut App) {
         let geom = self.geom;
         window.paint_quad(fill(geom.bounds, theme::white()));
@@ -616,17 +810,21 @@ impl Frame {
         );
         paint_omit_waves(window, geom, &self.waves);
         for frame in &self.sides {
-            let Some(thumb) = frame.thumb.as_ref().filter(|t| t.shown) else {
-                continue;
-            };
-            let color = if thumb.dragging {
-                scrollbar::THUMB_ACTIVE
-            } else {
-                scrollbar::THUMB_IDLE
-            };
-            window.paint_quad(
-                fill(thumb.rect, rgb(color)).corner_radii(px(scrollbar::THUMB_WIDTH / 2.)),
-            );
+            for thumb in frame
+                .thumb
+                .iter()
+                .chain(frame.h_thumb.iter())
+                .filter(|t| t.shown)
+            {
+                let color = if thumb.dragging {
+                    scrollbar::THUMB_ACTIVE
+                } else {
+                    scrollbar::THUMB_IDLE
+                };
+                window.paint_quad(
+                    fill(thumb.rect, rgb(color)).corner_radii(px(scrollbar::THUMB_WIDTH / 2.)),
+                );
+            }
         }
     }
 
@@ -643,9 +841,18 @@ impl Frame {
                 // Row backgrounds span the pane and do not scroll; text and
                 // word marks move by the side's `x_offset`.
                 window.paint_quad(fill(hline(x0, x1, row.y0, row.y1 - row.y0), row.bg));
-                let mut text_x = x0 + TEXT_PAD - frame.x_offset;
+                let mut text_x = x0 + TEXT_PAD - frame.x_offset + row.text_leading;
                 if row.commented {
                     text_x += COMMENT_BAR;
+                }
+                for &(a, b) in &row.search {
+                    let rect = hline(
+                        text_x + a,
+                        text_x + b,
+                        row.y0 + (self.row_h - mark_h) / 2.,
+                        mark_h,
+                    );
+                    window.paint_quad(fill(rect, rgb(SEARCH_HIT_BG)).corner_radii(px(2.)));
                 }
                 for &(a, b) in &row.marks {
                     let rect = hline(
@@ -708,6 +915,9 @@ impl Frame {
         for side in [Side::Old, Side::New] {
             let (c0, c1) = cols[side_ix(side)];
             for row in &self.sides[side_ix(side)].rows {
+                if !row.show_label {
+                    continue;
+                }
                 let Some(label) = &row.label else { continue };
                 // Old numbers hug the gutter's inner edge from the left column's
                 // right; new numbers start at the right column's left.
@@ -1014,7 +1224,12 @@ impl Element for DualPaneElement {
         for code in &frame.code {
             window.set_cursor_style(CursorStyle::PointingHand, code);
         }
-        for track in frame.tracks.iter().flatten() {
+        for track in frame
+            .tracks
+            .iter()
+            .chain(frame.h_tracks.iter())
+            .flatten()
+        {
             window.set_cursor_style(CursorStyle::Arrow, track);
         }
         register_listeners(&self.pane, frame, window);
@@ -1024,21 +1239,22 @@ impl Element for DualPaneElement {
     }
 }
 
-/// Insert the element's hitboxes (prepaint only): the whole element for the
-/// wheel, each code pane for clicks, each scrollbar track (when it scrolls).
-pub(super) fn insert_hitboxes(
+/// Vertical and horizontal scrollbar tracks when that side overflows.
+pub(super) fn insert_scrollbar_hitboxes(
     geom: &Geom,
-    tracks: [bool; 2],
+    v_tracks: [bool; 2],
+    h_tracks: [bool; 2],
     window: &mut Window,
-) -> (Hitbox, [Hitbox; 2], [Option<Hitbox>; 2]) {
-    let whole = window.insert_hitbox(geom.bounds, HitboxBehavior::Normal);
-    let code = [Side::Old, Side::New]
-        .map(|side| window.insert_hitbox(geom.pane(side), HitboxBehavior::Normal));
+) -> ([Option<Hitbox>; 2], [Option<Hitbox>; 2]) {
     let tracks = [Side::Old, Side::New].map(|side| {
-        tracks[side_ix(side)]
+        v_tracks[side_ix(side)]
             .then(|| window.insert_hitbox(geom.track(side), HitboxBehavior::Normal))
     });
-    (whole, code, tracks)
+    let h_tracks = [Side::Old, Side::New].map(|side| {
+        h_tracks[side_ix(side)]
+            .then(|| window.insert_hitbox(geom.h_track(side), HitboxBehavior::Normal))
+    });
+    (tracks, h_tracks)
 }
 
 fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Window) {
@@ -1046,6 +1262,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
     let hitbox = frame.hitbox.clone();
     let code = frame.code.clone();
     let tracks = frame.tracks.clone();
+    let h_tracks = frame.h_tracks.clone();
 
     let entity = pane.clone();
     let wheel_hitbox = hitbox.clone();
@@ -1081,6 +1298,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
     let entity = pane.clone();
     let down_code = code.clone();
     let down_tracks = tracks.clone();
+    let down_h_tracks = h_tracks.clone();
     window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
         if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
             return;
@@ -1095,6 +1313,24 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                 let track = geom.track(side);
                 let local = f32::from(event.position.y - track.top());
                 entity.update(cx, |pane, cx| pane.press_track(side, local, cx));
+                return;
+            }
+        }
+        for side in [Side::Old, Side::New] {
+            let ix = side_ix(side);
+            if down_h_tracks[ix]
+                .as_ref()
+                .is_some_and(|t| t.is_hovered(window))
+            {
+                let track = geom.h_track(side);
+                let local = f32::from(event.position.x - track.left());
+                entity.update(cx, |pane, cx| {
+                    if pane.h_bar_shown(side) {
+                        pane.press_h_track(side, local, cx);
+                    } else {
+                        pane.press_row(side, y);
+                    }
+                });
                 return;
             }
         }
@@ -1129,11 +1365,25 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                 .as_ref()
                 .is_some_and(|t| t.is_hovered(window))
         });
+        let h_hovered = [Side::Old, Side::New].map(|side| {
+            h_tracks[side_ix(side)]
+                .as_ref()
+                .is_some_and(|t| t.is_hovered(window))
+        });
         let in_gutter = hitbox.is_hovered(window) && geom.gutter.contains(&pos);
         let y = f32::from(pos.y) - geom.top();
         let track_y = [Side::Old, Side::New].map(|side| f32::from(pos.y - geom.track(side).top()));
+        let h_track_x =
+            [Side::Old, Side::New].map(|side| f32::from(pos.x - geom.h_track(side).left()));
         entity.update(cx, |pane, cx| {
-            pane.mouse_moved(hovered, in_gutter.then_some(y), track_y, cx)
+            pane.mouse_moved(
+                hovered,
+                h_hovered,
+                in_gutter.then_some(y),
+                track_y,
+                h_track_x,
+                cx,
+            )
         });
     });
 }
@@ -1182,7 +1432,7 @@ mod tests {
     }
 
     #[test]
-    fn runs_for_line_table() {
+    fn runs_for_segment_table() {
         use crate::syntax::CaptureId;
         let kw = rgb(0xaa00aa);
         let str_c = rgb(0x00aa00);
@@ -1190,7 +1440,8 @@ mod tests {
         let palette = [kw, str_c];
         let got = |line: &str, spans: &[(Range<usize>, CaptureId)]| {
             let tabs = TabExpansion::new(line);
-            runs_for_line(line, spans, &tabs, &palette, def)
+            let segment = 0..tabs.text.len();
+            runs_for_segment(line, spans, &tabs, segment, &palette, def)
                 .into_iter()
                 .map(|(len, c)| (len, rgba(c)))
                 .collect::<Vec<_>>()

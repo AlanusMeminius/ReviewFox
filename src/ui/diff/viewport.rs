@@ -497,6 +497,43 @@ pub fn s_for_anchor(
     Some(clamp_s(layout, s, view_h, row_h))
 }
 
+/// Rewrap / width / font / toggle: hold the logical line's first visual row on
+/// the anchor (§3.1.1), even when capture was on a continuation row.
+pub fn s_for_rewrap(
+    layout: &Layout,
+    cap: AnchorCap,
+    view_h: f32,
+    row_h: f32,
+    _current_s: f32,
+) -> Option<f32> {
+    let row = layout.side(cap.side).row_of_line(cap.ln)?;
+    Some(clamp_s(
+        layout,
+        s_for_content(layout, cap.side, row as f32 * row_h, row_h, 0.),
+        view_h,
+        row_h,
+    ))
+}
+
+/// Match jump: land the visual row that contains `byte` on the anchor (§3.1.1).
+pub fn s_for_match_byte(
+    layout: &Layout,
+    side: Side,
+    ln: u32,
+    byte: usize,
+    row_h: f32,
+    current_s: f32,
+) -> Option<f32> {
+    let row = layout.row_of_match_byte(side, ln, byte)?;
+    Some(s_for_content(
+        layout,
+        side,
+        row as f32 * row_h,
+        row_h,
+        current_s,
+    ))
+}
+
 pub fn clamp_s(layout: &Layout, s: f32, view_h: f32, row_h: f32) -> f32 {
     let (lo, hi) = s_range(layout, view_h, row_h);
     s.clamp(lo, hi)
@@ -561,6 +598,67 @@ pub fn max_x(text_extent: f32, pane_w: f32) -> f32 {
 /// Keep a side's `x_offset` inside `0..=max`.
 pub fn clamp_x(x: f32, max: f32) -> f32 {
     x.clamp(0., max.max(0.))
+}
+
+/// Horizontal scrollbar thumb geometry (matches `scrollbar.rs` insets/sizing).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HThumbGeom {
+    pub thumb_width: f32,
+    pub thumb_left: f32,
+    track_width: f32,
+    max_x: f32,
+}
+
+const H_TRACK_PAD: f32 = 4.;
+const H_MIN_THUMB: f32 = 24.;
+
+/// Thumb along the bottom of a code pane when `max_x > 0`.
+pub fn h_thumb_for(view_w: f32, max_x: f32, x_offset: f32) -> Option<HThumbGeom> {
+    let track_width = (view_w - H_TRACK_PAD * 2.).max(0.);
+    if max_x <= 0. || track_width <= 0. {
+        return None;
+    }
+    let content = view_w + max_x;
+    let thumb_width = (track_width * (view_w / content)).max(H_MIN_THUMB);
+    let travel = (track_width - thumb_width).max(0.);
+    let ratio = (x_offset / max_x).clamp(0., 1.);
+    Some(HThumbGeom {
+        thumb_width,
+        thumb_left: travel * ratio,
+        track_width,
+        max_x,
+    })
+}
+
+/// `x_offset` that puts the thumb's leading edge at `thumb_left` in the track.
+pub fn x_at(geom: &HThumbGeom, thumb_left: f32) -> f32 {
+    let travel = (geom.track_width - geom.thumb_width).max(0.);
+    let ratio = if travel > 0. {
+        (thumb_left / travel).clamp(0., 1.)
+    } else {
+        0.
+    };
+    geom.max_x * ratio
+}
+
+/// Horizontal travel when both panes share one offset (§3.1.2).
+pub fn max_x_synced(max_per_side: [f32; 2]) -> f32 {
+    max_per_side[0].max(max_per_side[1]).max(0.)
+}
+
+/// Clamp a shared horizontal offset to [`max_x_synced`].
+pub fn clamp_x_synced(x: f32, max_per_side: [f32; 2]) -> f32 {
+    clamp_x(x, max_x_synced(max_per_side))
+}
+
+/// Offset both sides should use when sync is turned on: the side last scrolled,
+/// or old when neither side has been scrolled yet.
+pub fn shared_x_on_sync_enable(offsets: [f32; 2], last_scrolled: Option<Side>) -> f32 {
+    let ix = match last_scrolled {
+        Some(Side::Old) | None => 0,
+        Some(Side::New) => 1,
+    };
+    offsets[ix]
 }
 
 /// Round logical pixel `v` to the device pixel grid at `scale`.
@@ -629,9 +727,9 @@ fn subtract_span(span: (f32, f32), cover: (f32, f32)) -> Vec<(f32, f32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::layout::tests::{build, eq, lines};
+    use super::super::layout::tests::{build, eq, lines, ten_then_insert};
     use super::*;
-    use crate::domain::{AlignmentOp, FoldState, LineSpan};
+    use crate::domain::{Alignment, AlignmentOp, FoldState, LineSpan};
 
     const ROW_H: f32 = 20.;
     const VIEW_H: f32 = 300.;
@@ -932,6 +1030,30 @@ mod tests {
         layout.side(side).row_of_line(ln).unwrap() as f32 * ROW_H - vp.top(side)
     }
 
+    fn wrap_layout(
+        old: &str,
+        new: &str,
+        ops: Vec<AlignmentOp>,
+        width: f32,
+        fold: Option<&FoldState>,
+    ) -> Layout {
+        use super::super::layout::Layout;
+        use super::super::visual_wrap::{WrapPlan, WrapSide};
+        let alignment = Alignment { ops };
+        let plan = WrapPlan {
+            old: WrapSide { width_px: width },
+            new: WrapSide { width_px: width },
+        };
+        let mut cw = |_: char| 10.0f32;
+        Layout::build(
+            old.into(),
+            new.into(),
+            &alignment,
+            fold,
+            Some((&plan, &mut cw)),
+        )
+    }
+
     #[test]
     fn anchor_line_keeps_its_place_across_expand_and_collapse() {
         let (old, new, ops) = folded_case();
@@ -1090,5 +1212,215 @@ mod tests {
         // A pane that grew past its text snaps back to the start.
         assert_eq!(clamp_x(80., 0.), 0.);
         assert_eq!(clamp_x(80., -3.), 0.);
+    }
+
+    #[test]
+    fn synced_horizontal_bound_is_the_larger_side() {
+        assert_eq!(max_x_synced([80., 120.]), 120.);
+        assert_eq!(max_x_synced([200., 50.]), 200.);
+        assert_eq!(clamp_x_synced(150., [80., 120.]), 120.);
+        assert_eq!(clamp_x_synced(150., [200., 50.]), 150.);
+        assert_eq!(clamp_x_synced(-10., [30., 40.]), 0.);
+    }
+
+    #[test]
+    fn enabling_sync_picks_last_scrolled_side_or_old() {
+        assert_eq!(shared_x_on_sync_enable([10., 90.], None), 10.);
+        assert_eq!(shared_x_on_sync_enable([10., 90.], Some(Side::Old)), 10.);
+        assert_eq!(shared_x_on_sync_enable([10., 90.], Some(Side::New)), 90.);
+    }
+
+    #[test]
+    fn h_thumb_none_without_overflow() {
+        assert!(h_thumb_for(400., 0., 0.).is_none());
+        assert!(h_thumb_for(0., 100., 0.).is_none());
+    }
+
+    #[test]
+    fn h_thumb_at_left_and_right() {
+        let left = h_thumb_for(400., 500., 0.).unwrap();
+        assert_eq!(left.thumb_left, 0.);
+
+        let right = h_thumb_for(400., 500., 500.).unwrap();
+        let travel = right.track_width - right.thumb_width;
+        assert!((right.thumb_left - travel).abs() < 0.01);
+    }
+
+    #[test]
+    fn h_thumb_drag_round_trips_x_offset() {
+        let view_w = 400.;
+        let max = 800.;
+        for x in [0., 1., 200., 799., 800.] {
+            let geom = h_thumb_for(view_w, max, x).unwrap();
+            let back = x_at(&geom, geom.thumb_left);
+            assert!((back - x).abs() < 0.01, "x {x} came back as {back}");
+        }
+    }
+
+    #[test]
+    fn h_thumb_drag_clamps_to_travel() {
+        let geom = h_thumb_for(400., 800., 200.).unwrap();
+        assert_eq!(x_at(&geom, -40.), 0.);
+        assert_eq!(x_at(&geom, 10_000.), 800.);
+    }
+
+    #[test]
+    fn synced_h_thumbs_use_shared_max_for_geometry() {
+        let view_w = 400.;
+        let max_per_side = [200., 600.];
+        let shared = max_x_synced(max_per_side);
+        let x_offset = 300.;
+        let g_short = h_thumb_for(view_w, shared, x_offset).unwrap();
+        let g_long = h_thumb_for(view_w, shared, x_offset).unwrap();
+        assert_eq!(g_short.thumb_left, g_long.thumb_left);
+        let per_side_short = h_thumb_for(view_w, max_per_side[0], x_offset).unwrap();
+        assert_ne!(g_short.thumb_left, per_side_short.thumb_left);
+        let travel = g_short.track_width - g_short.thumb_width;
+        assert!((x_at(&g_short, travel) - shared).abs() < 0.01);
+    }
+
+    #[test]
+    fn hit_on_continuation_row_maps_to_logical_line() {
+        use super::super::layout::LinePart;
+        let text = "a".repeat(25);
+        let layout = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 100., None);
+        let vp = Viewport::new(&layout, 0., VIEW_H, ROW_H);
+        let Some(Row::Line(l)) = vp.hit(Side::Old, ROW_H + 2.) else {
+            panic!("continuation row");
+        };
+        assert_eq!((l.ln, l.part), (1, LinePart::Continuation));
+    }
+
+    #[test]
+    fn rewrap_pins_logical_line_first_visual_row() {
+        let text = "a".repeat(25);
+        let layout = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 100., None);
+        let s = s_for_content(&layout, Side::Old, 0., ROW_H, 0.);
+        let before = view_y(&layout, s, Side::Old, 1);
+        let cap = Viewport::new(&layout, s, VIEW_H, ROW_H)
+            .capture_anchor()
+            .expect("anchor");
+        let layout2 = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 50., None);
+        let s2 = s_for_rewrap(&layout2, cap, VIEW_H, ROW_H, s).unwrap();
+        assert_eq!(view_y(&layout2, s2, Side::Old, 1), before);
+    }
+
+    #[test]
+    fn rewrap_from_continuation_row_pins_first_visual_row() {
+        use super::super::layout::LinePart;
+        const H: f32 = 60.;
+        let long = "a".repeat(50);
+        let text = format!("head\n{long}");
+        let ops = vec![eq(1, 1, 1), eq(2, 2, 1)];
+        let layout = wrap_layout(&text, &text, ops.clone(), 100., None);
+        assert!(layout.old.rows() >= 4);
+        let first = layout.old.row_of_line(2).unwrap();
+        assert!(first > 0, "wrapped line not at content y 0");
+        let s = s_for_content(&layout, Side::Old, (first + 1) as f32 * ROW_H, ROW_H, 0.);
+        let cap = Viewport::new(&layout, s, H, ROW_H)
+            .capture_anchor()
+            .expect("anchor on continuation");
+        assert_eq!(cap.ln, 2);
+        let layout2 = wrap_layout(&text, &text, ops, 50., None);
+        assert!(layout2.old.rows() > layout.old.rows());
+        let vp1 = Viewport::new(&layout, s, H, ROW_H);
+        let Some(Row::Line(at_cap)) = vp1.hit(Side::Old, H / 3.) else {
+            panic!("setup: row on anchor");
+        };
+        assert_eq!(at_cap.part, LinePart::Continuation);
+
+        let s2 = s_for_rewrap(&layout2, cap, H, ROW_H, s).unwrap();
+        let vp2 = Viewport::new(&layout2, s2, H, ROW_H);
+        let Some(Row::Line(l)) = vp2.hit(Side::Old, H / 3.) else {
+            panic!("first row on anchor");
+        };
+        assert_eq!((l.ln, l.part), (2, LinePart::First));
+    }
+
+    #[test]
+    fn hit_on_equal_pad_row_returns_logical_line() {
+        let old = "a".repeat(25);
+        let new = "b".repeat(15);
+        let layout = wrap_layout(&old, &new, vec![eq(1, 1, 1)], 100., None);
+        let pad_row = layout.new.lines()[2].row as usize;
+        let vp = Viewport::new(&layout, 0., VIEW_H, ROW_H);
+        let Some(Row::Line(l)) = vp.hit(Side::New, pad_row as f32 * ROW_H + 1.) else {
+            panic!("padding row");
+        };
+        assert!(l.is_equal_padding());
+        assert_eq!(l.ln, 1);
+    }
+
+    #[test]
+    fn match_on_continuation_row_lands_on_anchor() {
+        const H: f32 = 60.;
+        let text = "a".repeat(25);
+        let layout = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 100., None);
+        let b = layout
+            .wrap
+            .as_ref()
+            .unwrap()
+            .old_breaks
+            .get(&1)
+            .unwrap()
+            .breaks[0];
+        let row = layout.row_of_match_byte(Side::Old, 1, b).unwrap();
+        let s = s_for_content(&layout, Side::Old, row as f32 * ROW_H, ROW_H, 0.);
+        let vp = Viewport::new(&layout, s, H, ROW_H);
+        assert!((row as f32 * ROW_H - vp.top(Side::Old) - H / 3.).abs() < 0.01);
+    }
+
+    #[test]
+    fn anchor_keeps_place_across_expand_with_wrap() {
+        let pad = "x".repeat(30);
+        let (old, new, ops) = ten_then_insert();
+        let old: String = old
+            .lines()
+            .map(|l| format!("{l}{pad}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new: String = new
+            .lines()
+            .map(|l| format!("{l}{pad}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut fold = FoldState::collapsed();
+        let collapsed = wrap_layout(&old, &new, ops.clone(), 40., Some(&fold));
+        assert!(collapsed.old.rows() > 12, "lines should wrap");
+        let row = collapsed.old.row_of_line(8).unwrap() as f32;
+        let s = s_for_content(&collapsed, Side::Old, row * ROW_H, ROW_H, 0.);
+        let cap = Viewport::new(&collapsed, s, VIEW_H, ROW_H)
+            .capture_anchor()
+            .expect("anchor");
+        let before = view_y(&collapsed, s, Side::Old, 8);
+        fold.expand(0);
+        let expanded = wrap_layout(&old, &new, ops, 40., Some(&fold));
+        let s2 = s_for_anchor(&expanded, cap, VIEW_H, ROW_H, s).unwrap();
+        assert_eq!(view_y(&expanded, s2, Side::Old, 8), before);
+    }
+
+    #[test]
+    fn hunk_target_lands_on_first_visual_row_when_wrapped() {
+        const H: f32 = 60.;
+        let old = "a\n";
+        let new = format!("a\n{}", "b".repeat(25));
+        let layout = wrap_layout(
+            old,
+            &new,
+            vec![
+                eq(1, 1, 1),
+                AlignmentOp::Insert {
+                    after_old: 1,
+                    news: span(2, 1),
+                },
+            ],
+            100.,
+            None,
+        );
+        let target = layout.hunk_lands[0].target;
+        let s = s_for_target(&layout, target, ROW_H, 0.).unwrap();
+        let vp = Viewport::new(&layout, s, H, ROW_H);
+        let row = layout.new.row_of_line(2).unwrap() as f32;
+        assert!((row * ROW_H - vp.top(Side::New) - H / 3.).abs() < 0.01);
     }
 }

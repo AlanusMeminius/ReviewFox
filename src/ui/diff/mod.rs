@@ -6,7 +6,10 @@ pub mod layout;
 pub mod pane;
 mod tabs;
 mod trace;
+mod visual_wrap;
+mod wrap;
 pub mod viewport;
+
 
 #[cfg(test)]
 mod perf;

@@ -41,7 +41,28 @@ Scrolling up reverses the same three steps.
 - Side-by-side: Old | center gutter | New
 - Each pane has its own vertical scrollbar. The old pane’s bar is on the outer left; the new pane’s bar is on the outer right.
 - Independent line numbers (two columns in the center gutter, CLion-like)
-- Per-pane horizontal scroll if a line overflows
+- Horizontal scroll if a line overflows (§3.1.2); none while soft wrap is on
+
+#### 3.1.1 Soft wrap
+
+Settled 2026-09-29. A toggle in the Fold / ViewOptions capsule, persisted in settings, default off. It is a pane display preference, not a ViewOptions member: it never changes Alignment or Hunks.
+
+- Wrap width is the code column of each pane; resizing the window or a splitter rewraps.
+- Break rules (Zed's, plus one): a run of word chars (letters, digits, `- _ . ' $ % @ # ^ ~ , = :`) stays whole; a break may fall before a word that follows a space, or before a non-word, non-space char (so CJK breaks per char). Never inside the leading indent. Never between two consecutive non-word, non-space chars, nor inside `->`, `::`, `<=`, `>=`, `!=`, `==`, `<<=`, `>>=` (whose chars Zed counts as word chars), so operators like `->`, `<<`, `>>=`, `&&`, `//`, `/*` stay whole. A piece with no break point is split at a char, but never inside those operators; an operator wider than the whole wrap width stays on one row. No language-specific rules.
+- Widths are real glyph widths (tabs expanded to their stops), so wrapped text never overflows the pane.
+- Continuation rows keep the logical line's leading indent; when that indent is more than half the wrap width, they start at column 0.
+- Line number on the first visual row only; continuation rows show none and no wrap marker.
+- An Equal pair whose sides wrap to different row counts takes the larger count on both sides, the shorter side padded with blank rows (no hatch), so paired lines stay on one row and Equal never changes the §3.1 gap. Insert, Delete and Replace use each side's own row count.
+- Toggling wrap, resizing and font size changes keep the viewport-anchor line in place (its first visual row when the anchor is on a continuation row); the other side is recomputed per §3.1.
+- Everything on a continuation row belongs to its logical line: clicking starts a draft on that line, the comment bar spans all its rows, bridges and hatch span every visual row of the Hunk. Search hits and word marks crossing a break are drawn as one piece per row; a match jump puts the hit's visual row on the viewport anchor.
+- While wrap is on, horizontal offset is 0 and horizontal scrollbars are hidden.
+
+#### 3.1.2 Horizontal scroll
+
+Settled 2026-09-29.
+
+- **Sync** toggle in the Fold / ViewOptions capsule, persisted in settings, default on. Synced: one shared horizontal offset, bounded by the larger of the two sides' max; horizontal input over either pane moves both; the side with shorter lines just shows blank. Unsynced: each side keeps its own offset, moved only by input over that pane.
+- Each pane has a horizontal scrollbar along the bottom of its code column (not under the gutter), shown only when that side overflows, drawn as a thin overlay in the vertical bars' style. Dragging either thumb while synced moves both sides.
 
 ### 3.2 Change coloring
 

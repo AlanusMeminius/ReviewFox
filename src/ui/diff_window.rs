@@ -91,6 +91,10 @@ pub struct DiffView {
     window_vibrancy: Option<ColumnVibrancy>,
     /// Diff-computation knobs; does not change Comparison identity.
     view_options: ViewOptions,
+    /// §3.1.2; persisted in `settings.json`.
+    sync_horizontal_scroll: bool,
+    /// §3.1.1; persisted in `settings.json`.
+    soft_wrap: bool,
     /// In-file search query; empty = no hits.
     search_query: String,
     search_scope: SearchScope,
@@ -154,11 +158,19 @@ impl DiffView {
             #[cfg(target_os = "macos")]
             window_vibrancy: None,
             view_options: ViewOptions::default(),
+            sync_horizontal_scroll: crate::settings_store::sync_horizontal_scroll(
+                &crate::settings_store::load_file(),
+            ),
+            soft_wrap: crate::settings_store::soft_wrap(&crate::settings_store::load_file()),
             search_query: String::new(),
             search_scope: SearchScope::Both,
             searching: false,
             bounds_sub: None,
         };
+        this.with_pane(cx, |pane, cx| {
+            pane.set_sync_horizontal(this.sync_horizontal_scroll, cx);
+            pane.set_soft_wrap(this.soft_wrap, cx);
+        });
         this.open_in_pane(cx);
         this
     }
@@ -229,6 +241,31 @@ impl DiffView {
             self.with_pane(cx, |pane, cx| pane.set_alignment(alignment, cx));
         }
         cx.notify();
+    }
+
+    fn toggle_sync_horizontal_scroll(&mut self, cx: &mut Context<Self>) {
+        self.sync_horizontal_scroll = !self.sync_horizontal_scroll;
+        let mut file = crate::settings_store::load_file();
+        file.sync_horizontal_scroll = Some(self.sync_horizontal_scroll);
+        crate::settings_store::save_file(&file).ok();
+        self.with_pane(cx, |pane, cx| {
+            pane.set_sync_horizontal(self.sync_horizontal_scroll, cx);
+        });
+        cx.notify();
+    }
+
+    fn toggle_soft_wrap(&mut self, cx: &mut Context<Self>) {
+        self.soft_wrap = !self.soft_wrap;
+        let mut file = crate::settings_store::load_file();
+        file.soft_wrap = Some(self.soft_wrap);
+        crate::settings_store::save_file(&file).ok();
+        self.with_pane(cx, |pane, cx| pane.set_soft_wrap(self.soft_wrap, cx));
+        cx.notify();
+    }
+
+    fn sync_search_to_pane(&mut self, cx: &mut Context<Self>) {
+        let q = SharedString::from(self.search_query.clone());
+        self.with_pane(cx, |pane, cx| pane.set_search_query(q, cx));
     }
 
     fn jump_hunk(&mut self, dir: i32, cx: &mut Context<Self>) {
@@ -436,6 +473,7 @@ impl DiffView {
                 }
                 "backspace" => {
                     self.search_query.pop();
+                    self.sync_search_to_pane(cx);
                     cx.notify();
                 }
                 "tab" => self.cycle_search_scope(cx),
@@ -446,6 +484,7 @@ impl DiffView {
                     }
                     if let Some(ch) = &event.keystroke.key_char {
                         self.search_query.push_str(ch);
+                        self.sync_search_to_pane(cx);
                         cx.notify();
                     }
                 }
@@ -808,6 +847,24 @@ fn render_titlebar(
                             true,
                             view.view_options.ignore_whitespace,
                             cx.listener(|this, _, _, cx| this.toggle_ignore_whitespace(cx)),
+                        ))
+                        .child(nav_button(
+                            "sync-h-scroll",
+                            "chevrons_left.svg",
+                            "Sync Horizontal Scroll",
+                            None,
+                            true,
+                            view.sync_horizontal_scroll,
+                            cx.listener(|this, _, _, cx| this.toggle_sync_horizontal_scroll(cx)),
+                        ))
+                        .child(nav_button(
+                            "soft-wrap",
+                            "chevrons_up_down.svg",
+                            "Soft Wrap",
+                            None,
+                            true,
+                            view.soft_wrap,
+                            cx.listener(|this, _, _, cx| this.toggle_soft_wrap(cx)),
                         )),
                 )
                 .child(font_size_group(view.pane.read(cx).font_px(), cx))

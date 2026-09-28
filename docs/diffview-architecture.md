@@ -25,7 +25,7 @@ Split by change frequency. Lower-frequency data never sits on the per-frame path
 
 | Layer | File | Inputs | Outputs | Rebuilt when |
 |---|---|---|---|---|
-| **Layout** (pure) | `src/ui/diff/layout.rs` | `Arc<str>` old/new text, `Alignment`, `FoldState` | Per-side visual lines (line rows and omit separators modeled separately, not a `RowKind`), bridges, knots, hunk lands, seam and comment row indices, lazy per-Replace word marks. Line text is a byte range into the shared text. | Alignment / fold / ignore-whitespace change |
+| **Layout** (pure) | `src/ui/diff/layout.rs` | `Arc<str>` old/new text, `Alignment`, `FoldState`, optional soft wrap (per-side width + char width fn) | Per-side visual rows (a logical line may span several when wrapped; Equal pairs padded to the same count) (line rows and omit separators modeled separately, not a `RowKind`), bridges, knots, hunk lands, seam and comment row indices, lazy per-Replace word marks. Line text is a byte range into the shared text. | Alignment / fold / ignore-whitespace change; with wrap on, also wrap width / font change |
 | **Viewport** (pure) | `src/ui/diff/viewport.rs` | Layout, `scroll_s`, `view_h`, `row_h`, device scale (the per-side `x_offset` is applied at paint; `route_wheel` / `max_x` / `clamp_x` are free fns here) | `s_range`, per-side top (device-pixel snapped), visible row ranges, pixel bridges / gaps / omit links, hit testing `hit(side, y)` / `bridge_at(y)` | Every frame (cheap, visible-only) |
 | **Render** | `src/ui/diff/element.rs`, `pane.rs` | Layout, Viewport, `Decorations` | Paint only | — |
 
@@ -44,7 +44,8 @@ Computed lazily per Replace block the first time it becomes visible, memoized on
 - `scroll_s` is the **only** vertical scroll source. Wheel / trackpad (incl. momentum), scrollbar drag, hunk jump, match jump, anchor restore after fold all write `scroll_s`. No native `ScrollHandle` on the panes; `applied_*`, `scroll_nudge` go away.
 - `scroll_s` is clamped to `Viewport::s_range()`: lower bound = first `s` where either side's top leaves 0; upper bound = first `s` where both sides sit at their max. Outside that range the picture is identical, so clamping changes nothing visible and removes the dead zone.
 - Each side's top is snapped to device pixels; bridge endpoints follow.
-- Horizontal: per-side `x_offset`, independent, driven only by horizontal input over that pane (shift+wheel / trackpad X). One axis per wheel event (`viewport::route_wheel`: shift with no X maps Y→X, else the dominant axis wins), so a horizontal swipe never moves `scroll_s`. Bound: `0..=max_x`, where the widest line is the whole side's longest shown line (display columns × mono advance, tabs expanded to 4-column stops, raised by any wider shaped line seen), so it does not jump while scrolling. Only code text and word marks shift; row backgrounds, comment bars, line numbers, gutter, gaps, seams, waves and scrollbars stay. Reset on file open; kept and re-clamped on fold, Alignment, font size and resize.
+- Horizontal (updated 2026-09-29, `docs/dual-pane-diff.md` §3.1.2; replaces issue 04's "independent, no scrollbar"): with sync on, one shared offset bounded by the larger side's `max_x`; with sync off, the per-side behavior below. Each side paints a horizontal scrollbar when it overflows. Soft wrap (§3.1.1) forces the offset to 0 and hides the bars.
+- Horizontal, unsynced: per-side `x_offset`, independent, driven only by horizontal input over that pane (shift+wheel / trackpad X). One axis per wheel event (`viewport::route_wheel`: shift with no X maps Y→X, else the dominant axis wins), so a horizontal swipe never moves `scroll_s`. Bound: `0..=max_x`, where the widest line is the whole side's longest shown line (display columns × mono advance, tabs expanded to 4-column stops, raised by any wider shaped line seen), so it does not jump while scrolling. Only code text and word marks shift; row backgrounds, comment bars, line numbers, gutter, gaps, seams, waves and scrollbars stay. Reset on file open; kept and re-clamped on fold, Alignment, font size and resize.
 - Scrollbars are painted by the element: old on the outer left, new on the outer right (ADR-0003). Dragging a side's thumb maps that side's content position back to `scroll_s`; the other side follows §3.1. Styling reuses `scrollbar.rs` theme constants, not its lockstep.
 
 ## 5. Entities and data flow
@@ -75,6 +76,7 @@ DualPaneElement (one Element: old pane | gutter | new pane)
 | Word marks | Replace block index | Layout rebuild |
 | Shaped lines | (side, visual row) | Layout rebuild, font size change, Code Font family change; evicted outside visible ± one screen |
 | Mono advances (code text, line-number digit) | font px / — | Code Font family change (code-text advance also on font size change) |
+| Soft-wrap breaks + visual row counts | part of Layout (one `Layout::build` entry, so a fold rebuild cannot drop wrap) | Layout rebuild, which wrap also triggers: pane width change, font size / family change, wrap toggle |
 | Viewport | — | never cached; recomputed each frame |
 
 ## 7. Verification
@@ -83,6 +85,7 @@ DualPaneElement (one Element: old pane | gutter | new pane)
 - Render layer checked by running the app.
 - `REVIEWFOX_FRAME_TRACE=1` (off by default, `src/ui/diff/trace.rs`) prints to stderr one line per Layout build and one per drawn pane frame: Viewport, frame build, newly shaped rows + shaping time, prepaint, paint, visible rows.
 - Headless: `cargo test --release -- --ignored frame_cost_is_flat_in_file_length --nocapture` (`src/ui/diff/perf.rs`) times Layout build and a full-range scroll of Viewport + visible-row paint list (no shaping) on synthetic 2k and 20k-line files, and asserts the per-frame cost stays flat.
+- Headless: `cargo test --release -- --ignored rewrap_cost_report --nocapture` reports a full soft-wrap `Layout::build` on a synthetic 20k-line file (folded and expanded) against the wrap-off build. Rewrap misses the 8 ms frame budget (~20 ms folded, ~48 ms expanded at 640 px), so a resize drag keeps the previous wrap and rewraps once the width settles.
 
 ## 8. Migration
 

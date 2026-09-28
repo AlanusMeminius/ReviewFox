@@ -53,13 +53,14 @@ pub fn frame(stats: &FrameStats, paint: Duration) {
     );
 }
 
-pub fn layout(took: Duration, rows: [usize; 2], bridges: usize) {
+pub fn layout(took: Duration, rows: [usize; 2], bridges: usize, soft_wrap: bool) {
     eprintln!(
-        "[frame-trace] layout build {:.3}ms rows {}+{} bridges {}",
+        "[frame-trace] layout build {:.3}ms rows {}+{} bridges {}{}",
         ms(took),
         rows[0],
         rows[1],
         bridges,
+        if soft_wrap { " soft-wrap" } else { "" },
     );
 }
 
