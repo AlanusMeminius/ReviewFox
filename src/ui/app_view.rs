@@ -22,6 +22,7 @@ use crate::settings_store;
 use crate::window_geometry_store::{self, DiffReopen};
 use crate::workspace_store::{self, MrEntryLabel, WorkspaceEntry, WorkspaceStore};
 use super::diff_window::{DiffSnapshot, DiffView};
+use super::entry_chrome::{self, EntryChromeMode, EntryKind, KindSwitchAction};
 use super::file_tree::{self, TreeRow};
 use super::file_tree_rows;
 use super::gitlab_connection::{self, GitLabConnection};
@@ -109,7 +110,7 @@ impl AppView {
             cx,
         );
         // ADR-0011: launch defaults to Branch Browser. Persisted `mr` is demoted
-        // in open_workspace; ticket 02 restores from last_mr via chrome.
+        // in open_workspace; chrome restores from last_mr via the kind switch.
         let view = Self {
             focus: cx.focus_handle(),
             repos_collapsed: false,
@@ -277,8 +278,7 @@ impl AppView {
         }
     }
 
-    /// Restore MR Entry from a label (used when chrome selects MR kind; ticket 02).
-    #[allow(dead_code)] // ticket 02: restore from last_mr via chrome
+    /// Restore MR Entry from a label (used when chrome selects MR kind).
     fn begin_restore_mr(&mut self, label: MrEntryLabel, cx: &mut Context<Self>) {
         if !gitlab_chrome_visible(self) {
             return;
@@ -295,6 +295,41 @@ impl AppView {
             project: Some(label.project),
         });
         self.spawn_mr_activate(iid, cx);
+    }
+
+    fn current_last_mr(&self) -> Option<MrEntryLabel> {
+        let MainState::Ready(loaded) = &self.state else {
+            return None;
+        };
+        let path = loaded.comparison.repository.path();
+        self.store
+            .workspaces
+            .iter()
+            .find(|e| e.path == path)
+            .and_then(|e| e.last_mr.clone())
+    }
+
+    /// Hard-exclusive Entry kind switch (unified capsule kind hits).
+    fn select_entry_kind(&mut self, target: EntryKind, cx: &mut Context<Self>) {
+        if !gitlab_chrome_visible(self) {
+            return;
+        }
+        let current = entry_chrome::active_entry_kind(self.mr_entry.is_some());
+        let last_mr = self.current_last_mr();
+        match entry_chrome::kind_switch_action(current, target, last_mr.as_ref()) {
+            KindSwitchAction::Stay | KindSwitchAction::StayOnBranchNoMemory => {}
+            KindSwitchAction::SelectBranch => {
+                self.branch_picker = None;
+                self.mr_picker = None;
+                self.clear_mr_entry(cx);
+            }
+            KindSwitchAction::RestoreMr(label) => {
+                self.branch_picker = None;
+                self.mr_picker = None;
+                self.begin_restore_mr(label, cx);
+            }
+        }
+        cx.notify();
     }
 
     fn select_repo(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -1318,117 +1353,15 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
         MainState::Ready(loaded) => (loaded.branch.clone(), loaded.comparison.label()),
         MainState::Empty | MainState::Error(_) => ("—".into(), "—".into()),
     };
-    let mr_label = view
-        .mr_entry
-        .as_ref()
-        .map(|e| format!("!{}", e.summary.iid))
-        .unwrap_or_else(|| "Merge requests".into());
     let show_gitlab = gitlab_chrome_visible(view);
-
-    let branch_pill = {
-        let track = view.branch_toggle_bounds.clone();
-        let open = view.branch_picker.is_some();
-        div()
-            .id("branch-picker-toggle")
-            .relative()
-            .px_2()
-            .py_1()
-            .rounded_full()
-            .bg(theme::capsule())
-            .flex()
-            .items_center()
-            .gap_1()
-            .min_w(px(0.))
-            .overflow_hidden()
-            .cursor_pointer()
-            .when(open, |d| d.opacity(0.))
-            .when(!open, |d| d.hover(|d| d.bg(theme::hover())))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_branch_picker(cx)))
-            .child(
-                canvas(
-                    move |bounds, _, _| track.set(bounds),
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
-            )
-            .child(
-                svg()
-                    .size(theme::ICON_SIZE)
-                    .flex_none()
-                    .path("branch.svg")
-                    .text_color(theme::muted()),
-            )
-            .child(
-                div()
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .ui_text_size(12., cx)
-                    .text_color(theme::text())
-                    .child(branch),
-            )
+    let entry_chrome = match entry_chrome::chrome_mode(show_gitlab) {
+        EntryChromeMode::BranchPillOnly => {
+            render_branch_pill(view, &branch, cx).into_any_element()
+        }
+        EntryChromeMode::UnifiedCapsule => {
+            render_unified_entry_capsule(view, &branch, cx).into_any_element()
+        }
     };
-
-    let mr_pill = show_gitlab.then(|| {
-        let track = view.mr_toggle_bounds.clone();
-        let open = view.mr_picker.is_some();
-        div()
-            .id("mr-picker-toggle")
-            .relative()
-            .px_2()
-            .py_1()
-            .rounded_full()
-            .bg(theme::capsule())
-            .flex()
-            .items_center()
-            .gap_1()
-            .min_w(px(0.))
-            .overflow_hidden()
-            .cursor_pointer()
-            .when(open, |d| d.opacity(0.))
-            .when(!open, |d| d.hover(|d| d.bg(theme::hover())))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_mr_picker(cx)))
-            .child(
-                canvas(
-                    move |bounds, _, _| track.set(bounds),
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
-            )
-            .child(
-                svg()
-                    .size(theme::ICON_SIZE)
-                    .flex_none()
-                    .path("gitlab.svg")
-                    .text_color(theme::muted()),
-            )
-            .child(
-                // Digits/! have no descenders — same line box as branch
-                // labels sits optically high; 1px down matches "develop".
-                div()
-                    .mt(px(1.))
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .ui_text_size(12., cx)
-                    .text_color(if view.mr_entry.is_some() {
-                        theme::text()
-                    } else {
-                        theme::muted()
-                    })
-                    .child(mr_label),
-            )
-            .when(view.mr_entry.is_some(), |el| {
-                el.on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(|this, _, _, cx| this.clear_mr_entry(cx)),
-                )
-            })
-    });
 
     // Leading zone spans exactly what sits left of the stage, so the pills after it start on
     // the stage's left edge and share a left edge with the islands below.
@@ -1488,8 +1421,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                 .gap(px(theme::CHROME_GAP))
                 // Same inset the islands use, measured from the stage's left edge.
                 .pl(px(theme::CHANGES_INSET))
-                .child(branch_pill)
-                .children(mr_pill)
+                .child(entry_chrome)
                 .child(
                     div()
                         .id("titlebar-drag")
@@ -1519,6 +1451,238 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                 ),
         )
         .children(window_controls(window))
+}
+
+/// Branch-only titlebar pill when GitLab chrome does not apply.
+fn render_branch_pill(
+    view: &AppView,
+    branch: &str,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let track = view.branch_toggle_bounds.clone();
+    let open = view.branch_picker.is_some();
+    div()
+        .id("branch-picker-toggle")
+        .relative()
+        .px_2()
+        .py_1()
+        .rounded_full()
+        .bg(theme::capsule())
+        .flex()
+        .items_center()
+        .gap_1()
+        .min_w(px(0.))
+        .overflow_hidden()
+        .cursor_pointer()
+        .when(open, |d| d.opacity(0.))
+        .when(!open, |d| d.hover(|d| d.bg(theme::hover())))
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_branch_picker(cx)))
+        .child(
+            canvas(
+                move |bounds, _, _| track.set(bounds),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
+        .child(
+            svg()
+                .size(theme::ICON_SIZE)
+                .flex_none()
+                .path("branch.svg")
+                .text_color(theme::muted()),
+        )
+        .child(
+            div()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .ui_text_size(12., cx)
+                .text_color(theme::text())
+                .child(branch.to_string()),
+        )
+}
+
+/// Unified A3 Entry capsule: kind hits (Branch | MR) + value hit in one hull.
+fn render_unified_entry_capsule(
+    view: &AppView,
+    branch: &str,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let kind = entry_chrome::active_entry_kind(view.mr_entry.is_some());
+    let mr_iid = view.mr_entry.as_ref().map(|e| e.summary.iid);
+    let value = entry_chrome::value_label(kind, branch, mr_iid);
+    let picker_open = view.branch_picker.is_some() || view.mr_picker.is_some();
+    let branch_track = view.branch_toggle_bounds.clone();
+    let mr_track = view.mr_toggle_bounds.clone();
+    let value_icon = match kind {
+        EntryKind::Branch => "branch.svg",
+        EntryKind::Mr => "gitlab.svg",
+    };
+
+    div()
+        .id("entry-kind-capsule")
+        .relative()
+        .h(theme::TOGGLE_SIZE)
+        .max_w(px(420.))
+        .min_w(px(0.))
+        .flex()
+        .items_center()
+        .flex_none()
+        .overflow_hidden()
+        .rounded_full()
+        .bg(theme::capsule_track())
+        .when(picker_open, |d| d.opacity(0.))
+        .child(
+            // Both pickers anchor to this hull so islands share its left edge.
+            canvas(
+                move |bounds, _, _| {
+                    branch_track.set(bounds);
+                    mr_track.set(bounds);
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
+        .child(
+            div()
+                .id("entry-kind-hits")
+                .flex()
+                .items_center()
+                .flex_none()
+                .p(px(2.))
+                .gap(px(0.))
+                .child(entry_kind_hit(
+                    "entry-kind-branch",
+                    "Branch",
+                    "branch.svg",
+                    kind == EntryKind::Branch,
+                    EntryKind::Branch,
+                    cx,
+                ))
+                .child(entry_kind_hit(
+                    "entry-kind-mr",
+                    "MR",
+                    "gitlab.svg",
+                    kind == EntryKind::Mr,
+                    EntryKind::Mr,
+                    cx,
+                )),
+        )
+        .child(
+            div()
+                .w(px(1.))
+                .flex_none()
+                .my(px(5.))
+                .bg(theme::line()),
+        )
+        .child(
+            div()
+                .id("entry-value-hit")
+                .flex_1()
+                .min_w(px(0.))
+                .h_full()
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .when(picker_open, |d| d.bg(theme::range()))
+                .when(!picker_open, |d| {
+                    d.hover(|d| d.bg(theme::capsule_track_hover()))
+                })
+                .on_click(cx.listener(move |this, _, _, cx| match kind {
+                    EntryKind::Branch => this.toggle_branch_picker(cx),
+                    EntryKind::Mr => this.toggle_mr_picker(cx),
+                }))
+                .when(kind == EntryKind::Mr && view.mr_entry.is_some(), |el| {
+                    el.on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, _, _, cx| this.clear_mr_entry(cx)),
+                    )
+                })
+                .child(
+                    svg()
+                        .size(theme::ICON_SIZE_SM)
+                        .flex_none()
+                        .path(value_icon)
+                        .text_color(theme::muted()),
+                )
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .ui_text_size(12., cx)
+                        .text_color(theme::text())
+                        .when(kind == EntryKind::Mr, |d| d.mt(px(1.)))
+                        .child(value),
+                )
+                .child(
+                    svg()
+                        .size(theme::ICON_SIZE_SM)
+                        .flex_none()
+                        .path("chevron_down.svg")
+                        .text_color(theme::faint()),
+                ),
+        )
+}
+
+fn entry_kind_hit(
+    id: &'static str,
+    label: &'static str,
+    icon: &'static str,
+    selected: bool,
+    target: EntryKind,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .h(px(f32::from(theme::TOGGLE_SIZE) - 4.))
+        .px(px(10.))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .gap(px(5.))
+        .flex_none()
+        .cursor_pointer()
+        .when(selected, |d| {
+            d.bg(theme::white())
+                .shadow(theme::kind_on_shadow())
+                .text_color(theme::text())
+        })
+        .when(!selected, |d| {
+            d.text_color(theme::muted())
+                .hover(|d| d.text_color(theme::text()))
+        })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.select_entry_kind(target, cx);
+        }))
+        .child(
+            svg()
+                .size(theme::ICON_SIZE_SM)
+                .flex_none()
+                .path(icon)
+                .text_color(if selected {
+                    theme::text()
+                } else {
+                    theme::muted()
+                }),
+        )
+        .child(
+            div()
+                .ui_text_size(12., cx)
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(if selected {
+                    theme::text()
+                } else {
+                    theme::muted()
+                })
+                .child(label),
+        )
 }
 
 /// Width the leading chrome reserves when the sidebar is collapsed. The islands do not follow

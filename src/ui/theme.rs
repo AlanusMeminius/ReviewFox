@@ -138,6 +138,23 @@ pub fn hover() -> Rgba {
 pub fn capsule() -> Rgba {
     white()
 }
+/// Unified Entry capsule hull (prototype A3 track behind kind + value hits).
+pub fn capsule_track() -> Rgba {
+    rgb(0xeef0f4)
+}
+/// Hover fill on the A3 value hit (prototype `--capsule-bg-hover`).
+pub fn capsule_track_hover() -> Rgba {
+    rgb(0xe4e7ed)
+}
+/// Soft lift under the selected kind segment inside [`capsule_track`].
+pub fn kind_on_shadow() -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color: hsla(220. / 360., 0.38, 0.14, 0.10),
+        offset: point(px(0.), px(1.)),
+        blur_radius: px(2.),
+        spread_radius: px(0.),
+    }]
+}
 /// Sidebar active row — same blue as the app icon; chroma survives vibrancy.
 pub fn sidebar_selected() -> Rgba {
     accent()
