@@ -1347,7 +1347,7 @@ fn sidebar_repo_row(
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
-                .ui_text_size(14., cx)
+                .ui_label_size(14., cx)
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(if active {
                     theme::on_sidebar_selected()
@@ -1421,7 +1421,7 @@ fn render_repo_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                             )
                             .child(
                                 div()
-                                    .ui_text_size(14., cx)
+                                    .ui_label_size(14., cx)
                                     .text_color(theme::text())
                                     .child(label),
                             )
@@ -1491,7 +1491,7 @@ fn render_commit_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEle
                         )
                         .child(
                             div()
-                                .ui_text_size(14., cx)
+                                .ui_label_size(14., cx)
                                 .text_color(if can_open {
                                     theme::text()
                                 } else {
@@ -1659,7 +1659,7 @@ fn render_branch_pill(
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
-                .ui_text_size(12., cx)
+                .ui_label_size(12., cx)
                 .text_color(theme::text())
                 .child(branch.to_string()),
         )
@@ -1769,9 +1769,8 @@ fn render_gitlab_entry_chrome(
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .ui_text_size(12., cx)
+                        .ui_label_size(12., cx)
                         .text_color(theme::text())
-                        .when(kind == EntryKind::Mr, |d| d.mt(px(1.)))
                         .child(value),
                 )
                 .child(
@@ -1825,7 +1824,7 @@ fn entry_kind_hit(
         )
         .child(
             div()
-                .ui_text_size(12., cx)
+                .ui_label_size(12., cx)
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(fg)
                 .child(label),

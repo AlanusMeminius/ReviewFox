@@ -75,7 +75,7 @@ impl RenderOnce for ConfiguredCard {
                                 .text_color(color),
                         )
                     })
-                    .child(self.label),
+                    .child(div().ui_label_size(14., cx).child(self.label)),
             )
             .child(
                 div()

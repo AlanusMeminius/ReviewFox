@@ -236,6 +236,7 @@ impl RenderOnce for Button {
         };
         let on_click = self.on_click.filter(|_| !self.disabled);
         let focusable = self.tab_index.is_some() || self.focus_handle.is_some();
+        let small_label = self.small_label;
         let icon = self.icon.map(|icon| {
             svg()
                 .size(px(14.))
@@ -290,7 +291,9 @@ impl RenderOnce for Button {
                     .on_click(move |event, window, cx| handler(event, window, cx))
             })
             .children(start_icon)
-            .when_some(self.label, |button, label| button.child(label))
+            .when_some(self.label, |button, label| {
+                button.child(div().ui_label_size(if small_label { 12. } else { 14. }, cx).child(label))
+            })
             .when_some(self.hint, |button, hint| {
                 button.child(
                     div()

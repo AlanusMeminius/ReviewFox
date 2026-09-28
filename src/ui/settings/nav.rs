@@ -179,7 +179,7 @@ impl RenderOnce for NavItem {
                                     .text_color(theme::muted()),
                             ),
                     )
-                    .child(label),
+                    .child(div().ui_label_size(14., cx).child(label)),
                 None => row
                     .child(
                         div()
@@ -193,7 +193,7 @@ impl RenderOnce for NavItem {
                                 ..theme::line()
                             })),
                     )
-                    .child(label),
+                    .child(div().ui_label_size(14., cx).child(label)),
             })
     }
 }

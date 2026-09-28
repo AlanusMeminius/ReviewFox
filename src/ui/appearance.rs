@@ -196,6 +196,25 @@ pub fn ui_text(cx: &App, design: f32) -> Pixels {
     px(ui_text_px(design, cx.global::<Appearance>().ui_font_size))
 }
 
+/// Downward shift that centres caps and figures in their line box, so they
+/// line up with geometrically centred icons: gpui centres ascent + descent,
+/// but caps and figures only span baseline..cap height.
+fn cap_center_nudge(ascent: f32, descent: f32, cap_height: f32) -> f32 {
+    (cap_height + descent.abs() - ascent) / 2.
+}
+
+/// [`cap_center_nudge`] at `size` for `family`, from the metrics of the face
+/// actually drawn (the fallback when the family is not installed).
+pub fn cap_nudge(cx: &App, family: SharedString, size: Pixels) -> Pixels {
+    let text = cx.text_system();
+    let id = text.resolve_font(&gpui::font(family));
+    px(cap_center_nudge(
+        text.ascent(id, size).into(),
+        text.descent(id, size).into(),
+        text.cap_height(id, size).into(),
+    ))
+}
+
 /// Sizes UI Font text through [`ui_text`]. Every UI text size goes through
 /// this, in design px: 12 for gpui's `text_xs`, 14 for `text_sm`, 16 for the
 /// unsized default (1rem, set at each window root). Code Font chrome/meta text
@@ -204,6 +223,22 @@ pub fn ui_text(cx: &App, design: f32) -> Pixels {
 pub trait UiTextSize: Styled + Sized {
     fn ui_text_size(self, design: f32, cx: &App) -> Self {
         self.text_size(ui_text(cx, design))
+    }
+
+    /// Text beside an icon: shifts only this element so caps centre on the icon.
+    /// Put it on the text element, never on a container with hover/background/border.
+    fn ui_label_size(self, design: f32, cx: &App) -> Self {
+        let size = ui_text(cx, design);
+        self.text_size(size)
+            .relative()
+            .top(cap_nudge(cx, ui_font(cx), size))
+    }
+
+    /// Code Font meta text at an unscaled `size` (not [`ui_text`]).
+    fn code_label_size(self, size: Pixels, family: SharedString, cx: &App) -> Self {
+        self.text_size(size)
+            .relative()
+            .top(cap_nudge(cx, family, size))
     }
 }
 
@@ -254,6 +289,17 @@ mod tests {
 
     fn installed(names: &[&'static str]) -> Vec<SharedString> {
         names.iter().map(|&n| n.into()).collect()
+    }
+
+    #[test]
+    fn cap_center_nudge_follows_the_face_metrics() {
+        let at_12 = |units: f32| units / 2048. * 12.;
+        // Helvetica: shallow ascent, deep descent, so caps sit high.
+        let helvetica = cap_center_nudge(at_12(1577.), at_12(-471.), at_12(1469.));
+        assert!((helvetica - 1.06).abs() < 0.01, "{helvetica}");
+        // IBM Plex Sans (1000 upm): tall ascent, so caps sit low.
+        let plex = cap_center_nudge(12.3, 3.3, 8.376);
+        assert!((plex + 0.31).abs() < 0.01, "{plex}");
     }
 
     #[test]

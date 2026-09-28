@@ -1266,14 +1266,10 @@ fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoE
                 .flex_none()
                 .h_full()
                 .px_2()
-                // The line box reserves descender room, so figures and caps sit
-                // high against the geometrically centred chevrons (measured ~1.5px).
-                .relative()
-                .top(px(1.5))
                 .flex()
                 .items_center()
                 .gap_1()
-                .ui_text_size(12., cx)
+                .ui_label_size(12., cx)
                 .child(div().text_color(theme::faint()).child("File"))
                 .child(div().text_color(theme::text()).child(file))
                 .child(div().text_color(theme::faint()).child("·"))
@@ -1384,7 +1380,6 @@ fn font_size_group(font_px: u32, cx: &mut Context<DiffView>) -> impl IntoElement
                 .justify_center()
                 .rounded(px(NAV_BUTTON_RADIUS))
                 .cursor_pointer()
-                .text_xs()
                 .text_color(if font_px == DiffFontSize::DEFAULT {
                     theme::muted()
                 } else {
@@ -1394,7 +1389,11 @@ fn font_size_group(font_px: u32, cx: &mut Context<DiffView>) -> impl IntoElement
                 .hover(|button| button.bg(theme::hover()))
                 .active(|button| button.bg(theme::element_active()))
                 .on_click(cx.listener(|this, _, _, cx| this.font_size(FontOp::Reset, cx)))
-                .child(font_px.to_string()),
+                .child(
+                    div()
+                        .ui_label_size(12., cx)
+                        .child(font_px.to_string()),
+                ),
         )
         .child(nav_button(
             "font-inc",

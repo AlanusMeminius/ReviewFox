@@ -58,7 +58,7 @@ pub fn dir_row(
                 .h(px(16.))
                 .flex()
                 .items_center()
-                .ui_text_size(12., cx)
+                .ui_label_size(12., cx)
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme::muted())
                 .child(name.into()),
@@ -130,7 +130,7 @@ pub fn file_row(
                 .items_center()
                 .justify_center()
                 .font_family(mono.clone())
-                .text_xs()
+                .code_label_size(px(12.), mono.clone(), cx)
                 .text_color(status_color)
                 .child(status.letter()),
         )
@@ -144,7 +144,7 @@ pub fn file_row(
                 .whitespace_nowrap()
                 .flex()
                 .items_center()
-                .ui_text_size(12., cx)
+                .ui_label_size(12., cx)
                 .text_color(name_color)
                 .child(name),
         )
@@ -153,8 +153,8 @@ pub fn file_row(
                 .h(px(16.))
                 .flex()
                 .items_center()
-                .font_family(mono)
-                .text_xs()
+                .font_family(mono.clone())
+                .code_label_size(px(12.), mono, cx)
                 .gap_1()
                 .child(div().text_color(add_color).child(format!("+{add}")))
                 .child(div().text_color(del_color).child(format!("−{del}"))),
