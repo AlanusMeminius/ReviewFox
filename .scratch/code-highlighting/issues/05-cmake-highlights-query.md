@@ -32,3 +32,5 @@ Via the 01 module: a sample `CMakeLists.txt` yields the expected capture for eac
 - Registry: `Option<HighlightConfiguration>` per Language + `log::warn!` on compile failure; index by `lang as usize`; `log::debug!` on highlighter errors; `from_interpreter` is always `None`.
 - Replaced `cmake_placeholder_query_compiles` with `cmake_highlights_each_category`; added `every_bundled_query_compiles`.
 - Verify: `cargo test --bin reviewfox` → 173 passed, 1 ignored.
+
+- Review follow-up: assert `else` / `elseif` as keywords in `cmake_highlights_each_category`; clarify the `return` SCM comment (same-node stack order, not nested innermost).

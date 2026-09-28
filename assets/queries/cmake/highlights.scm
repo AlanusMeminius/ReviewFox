@@ -37,7 +37,8 @@
   (endmacro)
 ] @keyword
 
-; After the general @function so it wins as the innermost capture.
+; Same identifier node as @function above; listed later so the highlighter
+; applies @keyword after @function and it is what the stack leaves on top.
 (normal_command
   (identifier) @keyword
   (#match? @keyword "^[Rr][Ee][Tt][Uu][Rr][Nn]$"))

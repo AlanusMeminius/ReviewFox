@@ -306,6 +306,8 @@ project(x \"quoted\" [=[bracket]=])
 if(ON)
   set(V ${FOO} $ENV{PATH} $CACHE{BAR})
   target_link_libraries(t PUBLIC req)
+elseif(OFF)
+else()
 endif()
 foreach(i)
 endforeach()
@@ -328,6 +330,8 @@ endmacro()
             ("set", "function"),
             ("target_link_libraries", "function"),
             ("if", "keyword"),
+            ("elseif", "keyword"),
+            ("else", "keyword"),
             ("endif", "keyword"),
             ("foreach", "keyword"),
             ("endforeach", "keyword"),
