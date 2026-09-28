@@ -1,4 +1,4 @@
-﻿use gpui::{
+use gpui::{
     anchored, canvas, deferred, ease_out_quint, Animation, AnimationExt, App, Bounds,
     ClickEvent, ClipboardItem, Context, Corner, Div, FocusHandle, Focusable, InteractiveElement,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render,
