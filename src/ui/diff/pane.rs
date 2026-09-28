@@ -523,10 +523,6 @@ impl DualPane {
         cx.notify();
     }
 
-    pub fn sync_horizontal(&self) -> bool {
-        self.sync_horizontal
-    }
-
     pub fn set_sync_horizontal(&mut self, on: bool, cx: &mut Context<Self>) {
         if on == self.sync_horizontal {
             return;
