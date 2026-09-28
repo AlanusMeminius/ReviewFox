@@ -108,6 +108,12 @@ pub fn run() {
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             theme::init_code_font(&cx.text_system().all_font_names());
+            // Compile highlight queries off the UI thread before the first open.
+            cx.background_spawn(async {
+                crate::syntax::warm();
+                let _ = theme::syntax_colors();
+            })
+            .detach();
             #[cfg(target_os = "macos")]
             app_icon::set_app_icon();
 

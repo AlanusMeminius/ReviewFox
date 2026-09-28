@@ -62,3 +62,11 @@ pub fn layout(took: Duration, rows: [usize; 2], bridges: usize) {
         bridges,
     );
 }
+
+pub fn highlight(took: Duration) {
+    eprintln!(
+        "[frame-trace] highlight {:.3}ms (count={})",
+        ms(took),
+        crate::syntax::highlight_count(),
+    );
+}

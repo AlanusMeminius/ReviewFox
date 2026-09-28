@@ -11,8 +11,53 @@
 use std::ops::Range;
 use std::path::Path;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
+
+/// Bytes / lines / longest-line limits; a side over any stays plain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SizeGuard {
+    pub max_bytes: usize,
+    pub max_lines: usize,
+    pub max_line_bytes: usize,
+}
+
+/// Defaults from issue 04 measurements (see issue Comments).
+pub const DEFAULT_SIZE_GUARD: SizeGuard = SizeGuard {
+    max_bytes: 512 * 1024,
+    max_lines: 20_000,
+    max_line_bytes: 8_192,
+};
+
+/// `true` when `text` should stay plain (any limit exceeded).
+pub fn exceeds_size_guard(text: &str, guard: SizeGuard) -> bool {
+    if text.len() > guard.max_bytes {
+        return true;
+    }
+    let mut lines = 0usize;
+    let mut max_line = 0usize;
+    for line in text.lines() {
+        lines += 1;
+        max_line = max_line.max(line.len());
+        if lines > guard.max_lines || max_line > guard.max_line_bytes {
+            return true;
+        }
+    }
+    false
+}
+
+/// Force query compile on a background thread before the first open.
+pub fn warm() {
+    let _ = capture_names();
+}
+
+/// How many times [`highlight`] has run (acceptance: fold / ignore-ws must not bump).
+pub fn highlight_count() -> u64 {
+    HIGHLIGHT_COUNT.load(Ordering::Relaxed)
+}
+
+static HIGHLIGHT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// A language with a compiled-in grammar and highlights query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -126,6 +171,7 @@ pub fn capture_name(id: CaptureId) -> &'static str {
 /// a highlighter error keeps the spans found so far. Unknown / failed query
 /// Languages yield no spans (plain text).
 pub fn highlight(lang: Language, text: &str) -> Vec<Span> {
+    HIGHLIGHT_COUNT.fetch_add(1, Ordering::Relaxed);
     let Some(config) = REGISTRY.config(lang) else {
         return Vec::new();
     };
@@ -520,5 +566,119 @@ endmacro()
         }
         // Extension wins over the first line.
         assert_eq!(detect(Path::new("x.rs"), "#!/bin/sh"), Some(Language::Rust));
+    }
+
+    /// Tiny guard so boundary cases stay readable.
+    fn g(bytes: usize, lines: usize, line_bytes: usize) -> SizeGuard {
+        SizeGuard {
+            max_bytes: bytes,
+            max_lines: lines,
+            max_line_bytes: line_bytes,
+        }
+    }
+
+    #[test]
+    fn size_guard_boundaries() {
+        // (label, text, guard, exceeds)
+        let cases: &[(&str, &str, SizeGuard, bool)] = &[
+            ("empty", "", g(0, 0, 0), false),
+            ("bytes_eq", "abcd", g(4, 100, 100), false),
+            ("bytes_over", "abcde", g(4, 100, 100), true),
+            ("lines_eq", "a\nb\nc", g(100, 3, 100), false),
+            ("lines_over", "a\nb\nc\nd", g(100, 3, 100), true),
+            ("line_eq", "abcd", g(100, 100, 4), false),
+            ("line_over", "abcde", g(100, 100, 4), true),
+            ("longest_of_many", "a\nbbbbb\nc", g(100, 100, 4), true),
+            ("crlf_line", "abcd\r\nef", g(100, 100, 4), false),
+            ("crlf_line_over", "abcde\r\nef", g(100, 100, 4), true),
+        ];
+        for (label, text, guard, want) in cases {
+            assert_eq!(
+                exceeds_size_guard(text, *guard),
+                *want,
+                "{label}: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn highlight_count_bumps_once_per_call() {
+        let before = highlight_count();
+        let _ = highlight(Language::Rust, "fn x() {}");
+        let after = highlight_count();
+        // Other tests may call `highlight` in parallel; require a bump of ≥1.
+        assert!(after >= before + 1, "before={before} after={after}");
+    }
+
+    /// `cargo test --bin reviewfox warm_compile_bench --release -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual query-compile timing; not part of CI"]
+    fn warm_compile_bench() {
+        use std::time::Instant;
+        let t = Instant::now();
+        warm();
+        eprintln!(
+            "[bench] syntax::warm (query compile) {:.1}ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+    }
+
+    /// `cargo test --bin reviewfox highlight_size_bench --release -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual size-guard timing; not part of CI"]
+    fn highlight_size_bench() {
+        use std::time::Instant;
+
+        fn stats(text: &str) -> (usize, usize, usize) {
+            let lines = text.lines().count();
+            let max_line = text.lines().map(|l| l.len()).max().unwrap_or(0);
+            (text.len(), lines, max_line)
+        }
+
+        fn run(label: &str, lang: Language, text: &str) {
+            let (bytes, lines, max_line) = stats(text);
+            // Warm registry once outside the timed call for fair per-file numbers.
+            let _ = capture_names();
+            let t = Instant::now();
+            let spans = highlight(lang, text);
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            eprintln!(
+                "[bench] {label}: {bytes} bytes, {lines} lines, max_line {max_line} → {:.1}ms, {} spans",
+                ms,
+                spans.len()
+            );
+        }
+
+        let app_view = include_str!("../ui/app_view.rs");
+        run("repo app_view.rs", Language::Rust, app_view);
+
+        // Synthetic scales: repeated real-ish Rust / C++ so release timings
+        // stay comparable without depending on cargo registry paths.
+        let rust_unit = "fn foo(x: i32) -> i32 {\n    // c\n    let s = \"hi\";\n    x + 1\n}\n";
+        let cpp_unit = "namespace n {\nint f(int x) {\n  // c\n  if (x) return 1;\n  puts(\"s\");\n}\n}\n";
+        for (label, lang, unit, n) in [
+            ("rust×2k lines", Language::Rust, rust_unit, 400usize),
+            ("rust×10k lines", Language::Rust, rust_unit, 2_000),
+            ("rust×20k lines", Language::Rust, rust_unit, 4_000),
+            ("cpp×2k lines", Language::Cpp, cpp_unit, 300),
+            ("cpp×10k lines", Language::Cpp, cpp_unit, 1_500),
+            ("cpp×20k lines", Language::Cpp, cpp_unit, 3_000),
+        ] {
+            let text = unit.repeat(n);
+            run(label, lang, &text);
+        }
+
+        // Long single line (minified-style).
+        let long = format!("let x = {};\n", "a".repeat(16_384));
+        run("rust long-line 16k", Language::Rust, &long);
+        let long2 = format!("let x = {};\n", "a".repeat(65_536));
+        run("rust long-line 64k", Language::Rust, &long2);
+
+        // Large byte budgets at ~fixed line length.
+        let chunk = "fn a(){ let b = 1; }\n";
+        for (label, n) in [("rust ~256KB", 12_000usize), ("rust ~512KB", 24_000), ("rust ~1MB", 48_000)]
+        {
+            run(label, Language::Rust, &chunk.repeat(n));
+        }
     }
 }

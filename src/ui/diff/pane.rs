@@ -93,6 +93,9 @@ pub struct DualPane {
     hunk_s: Option<f32>,
     /// Session-level mono size for both panes and ribbons (§3.5).
     font_size: DiffFontSize,
+    /// Bumped on every [`Self::open`]; background highlight results with a
+    /// different generation are dropped.
+    open_generation: u64,
 }
 
 impl EventEmitter<PaneEvent> for DualPane {}
@@ -121,6 +124,7 @@ impl DualPane {
             hunk_index: None,
             hunk_s: Some(0.),
             font_size: DiffFontSize::default(),
+            open_generation: 0,
         }
     }
 
@@ -132,6 +136,8 @@ impl DualPane {
         comments: Vec<Anchor>,
         cx: &mut Context<Self>,
     ) {
+        self.open_generation = self.open_generation.wrapping_add(1);
+        let generation = self.open_generation;
         self.file = match file {
             FileDiff::Text {
                 alignment,
@@ -144,16 +150,49 @@ impl DualPane {
             }),
             _ => None,
         };
+        // Plain text until the background task finishes (or the size guard skips).
         self.highlights = [None, None];
         if let Some(file) = self.file.as_ref() {
             let first = first_line(&file.new_text).or_else(|| first_line(&file.old_text));
             if let Some(lang) = syntax::detect(Path::new(path), first.unwrap_or("")) {
-                // Resolve palette with the first highlight (not at theme build).
-                let _ = theme::syntax_colors();
-                self.highlights = [
-                    Some(Arc::from(syntax::highlight(lang, &file.old_text))),
-                    Some(Arc::from(syntax::highlight(lang, &file.new_text))),
-                ];
+                let old_text = file.old_text.clone();
+                let new_text = file.new_text.clone();
+                let any_under_guard = !syntax::exceeds_size_guard(&old_text, syntax::DEFAULT_SIZE_GUARD)
+                    || !syntax::exceeds_size_guard(&new_text, syntax::DEFAULT_SIZE_GUARD);
+                if any_under_guard {
+                    cx.spawn(async move |this, cx| {
+                        let (sides, took) = cx
+                            .background_executor()
+                            .spawn(async move {
+                                let t = std::time::Instant::now();
+                                // Query compile + palette resolve stay off the UI thread.
+                                let _ = theme::syntax_colors();
+                                let side = |text: &str| {
+                                    if syntax::exceeds_size_guard(text, syntax::DEFAULT_SIZE_GUARD)
+                                    {
+                                        None
+                                    } else {
+                                        Some(Arc::from(syntax::highlight(lang, text)))
+                                    }
+                                };
+                                ([side(&old_text), side(&new_text)], t.elapsed())
+                            })
+                            .await;
+                        this.update(cx, |this, cx| {
+                            if !should_apply_highlight(this.open_generation, generation) {
+                                return;
+                            }
+                            this.highlights = sides;
+                            this.shapes.clear();
+                            if trace::enabled() {
+                                trace::highlight(took);
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
             }
         }
         self.comments = comments;
@@ -820,4 +859,24 @@ pub(super) fn nearest_hunk_index(s_rows: f32, lands: &[HunkLand]) -> Option<usiz
     }
     let past = lands.partition_point(|land| land.s as f32 <= s_rows + 0.5);
     Some(past.saturating_sub(1))
+}
+
+/// Background highlight results apply only while this open is still current.
+fn should_apply_highlight(open_generation: u64, result_generation: u64) -> bool {
+    open_generation == result_generation
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_apply_highlight;
+
+    #[test]
+    fn stale_generation_is_dropped() {
+        assert!(should_apply_highlight(3, 3));
+        assert!(!should_apply_highlight(4, 3));
+        assert!(!should_apply_highlight(3, 4));
+        assert!(should_apply_highlight(0, 0));
+        assert!(!should_apply_highlight(u64::MAX, 0));
+        assert!(should_apply_highlight(u64::MAX, u64::MAX));
+    }
 }
