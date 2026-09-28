@@ -6,6 +6,8 @@ pub mod layout;
 pub mod pane;
 mod tabs;
 mod trace;
+#[allow(dead_code)]
+mod wrap;
 pub mod viewport;
 
 #[cfg(test)]
