@@ -25,7 +25,7 @@ Split by change frequency. Lower-frequency data never sits on the per-frame path
 
 | Layer | File | Inputs | Outputs | Rebuilt when |
 |---|---|---|---|---|
-| **Layout** (pure) | `src/ui/diff/layout.rs` | `Arc<str>` old/new text, `Alignment`, `FoldState` | Per-side visual lines (line rows and omit separators modeled separately, not a `RowKind`), bridges, knots, hunk lands, seam and comment row indices, lazy per-Replace word marks. Line text is a byte range into the shared text. | Alignment / fold / ignore-whitespace change |
+| **Layout** (pure) | `src/ui/diff/layout.rs` | `Arc<str>` old/new text, `Alignment`, `FoldState`, optional soft wrap (per-side width + char width fn) | Per-side visual rows (a logical line may span several when wrapped; Equal pairs padded to the same count) (line rows and omit separators modeled separately, not a `RowKind`), bridges, knots, hunk lands, seam and comment row indices, lazy per-Replace word marks. Line text is a byte range into the shared text. | Alignment / fold / ignore-whitespace change; with wrap on, also wrap width / font change |
 | **Viewport** (pure) | `src/ui/diff/viewport.rs` | Layout, `scroll_s`, `view_h`, `row_h`, device scale (the per-side `x_offset` is applied at paint; `route_wheel` / `max_x` / `clamp_x` are free fns here) | `s_range`, per-side top (device-pixel snapped), visible row ranges, pixel bridges / gaps / omit links, hit testing `hit(side, y)` / `bridge_at(y)` | Every frame (cheap, visible-only) |
 | **Render** | `src/ui/diff/element.rs`, `pane.rs` | Layout, Viewport, `Decorations` | Paint only | — |
 
@@ -76,7 +76,7 @@ DualPaneElement (one Element: old pane | gutter | new pane)
 | Word marks | Replace block index | Layout rebuild |
 | Shaped lines | (side, visual row) | Layout rebuild, font size change, Code Font family change; evicted outside visible ± one screen |
 | Mono advances (code text, line-number digit) | font px / — | Code Font family change (code-text advance also on font size change) |
-| Soft-wrap breaks + visual row counts | (Layout, wrap width, font px, family) | Layout rebuild, pane width change, font size / family change, wrap toggle |
+| Soft-wrap breaks + visual row counts | part of Layout (one `Layout::build` entry, so a fold rebuild cannot drop wrap) | Layout rebuild, which wrap also triggers: pane width change, font size / family change, wrap toggle |
 | Viewport | — | never cached; recomputed each frame |
 
 ## 7. Verification
