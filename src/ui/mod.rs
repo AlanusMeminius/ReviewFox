@@ -6,6 +6,7 @@ mod gitlab_connection;
 mod diff;
 mod diff_window;
 mod file_tree;
+mod file_tree_rows;
 mod icon_button;
 mod text_field;
 #[cfg(target_os = "macos")]

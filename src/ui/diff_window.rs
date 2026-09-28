@@ -2,7 +2,7 @@ use gpui::{
     AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, StatefulInteractiveElement,
     StyleRefinement, Styled, Subscription, WeakEntity, Window, WindowControlArea, canvas, div,
-    SharedString, prelude::*, px, rgb, svg,
+    SharedString, prelude::*, px, rgb,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -17,6 +17,7 @@ use crate::git::{self, FileDiff};
 use crate::window_geometry_store;
 use super::diff::pane::{self, DualPane, FontOp, PaneEvent, SlotBounds, placeholder};
 use super::file_tree::{self, TreeRow};
+use super::file_tree_rows;
 #[cfg(target_os = "macos")]
 use super::mac_column_vibrancy::ColumnVibrancy;
 use super::scrollbar;
@@ -832,134 +833,30 @@ fn render_tree_pane(
                     TreeRow::Dir { depth, name, path } => {
                         let collapsed = view.collapsed_dirs.contains(&path);
                         let toggle_path = path.clone();
-                        div()
-                            .id(("ddir", i))
-                            .mx_1()
-                            .h(px(22.))
-                            .pl(px(6. + depth as f32 * 12.))
-                            .rounded_lg()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .cursor_pointer()
-                            .hover(|d| d.bg(rgb(0xf6f8fb)))
+                        file_tree_rows::dir_row(("ddir", i), depth, name, collapsed, cx)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.collapsed_dirs.remove(&toggle_path) {
                                     this.collapsed_dirs.insert(toggle_path.clone());
                                 }
                                 cx.notify();
                             }))
-                            .child(
-                                div()
-                                    .size(px(16.))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        svg()
-                                            .size(theme::ICON_SIZE)
-                                            .path(if collapsed {
-                                                "folder.svg"
-                                            } else {
-                                                "folder_open.svg"
-                                            })
-                                            .text_color(theme::muted()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .h(px(16.))
-                                    .flex()
-                                    .items_center()
-                                    .ui_text_size(12., cx)
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme::muted())
-                                    .child(name),
-                            )
                     }
                     TreeRow::File { depth, path } => {
                         let path_click = path.path.clone();
                         let active = selected == path.path;
-                        let name = path.file_name().to_string();
-                        let status = path.status;
-                        let add = path.additions;
-                        let del = path.deletions;
-                        div()
-                            .id(("dfile", i))
-                            .mx_1()
-                            .h(px(22.))
-                            .pl(px(6. + depth as f32 * 12.))
-                            .pr_1()
-                            .rounded_lg()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .cursor_pointer()
-                            .when(active, |d| d.bg(theme::range()))
-                            .hover(move |d| {
-                                if active {
-                                    d.bg(theme::range())
-                                } else {
-                                    d.bg(rgb(0xf6f8fb))
-                                }
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.select_path(path_click.clone(), cx);
-                                cx.notify();
-                            }))
-                            .child(
-                                div()
-                                    .size(px(16.))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .font_family(mono.clone())
-                                    .text_xs()
-                                    .text_color(match status {
-                                        PathStatus::Add => rgb(0x1a7f4b),
-                                        PathStatus::Delete => rgb(0xb42318),
-                                        PathStatus::Modify => rgb(0x9a6700),
-                                    })
-                                    .child(status.letter()),
-                            )
-                            .child(
-                                div()
-                                    .h(px(16.))
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .flex()
-                                    .items_center()
-                                    .ui_text_size(12., cx)
-                                    .text_color(theme::text())
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .child(name),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .h(px(16.))
-                                    .flex()
-                                    .items_center()
-                                    .font_family(mono.clone())
-                                    .text_xs()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_color(rgb(0x1a7f4b))
-                                            .child(format!("+{add}")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_color(rgb(0xb42318))
-                                            .child(format!("−{del}")),
-                                    ),
-                            )
+                        file_tree_rows::file_row(
+                            ("dfile", i),
+                            depth,
+                            &path,
+                            active,
+                            mono.clone(),
+                            cx,
+                        )
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.select_path(path_click.clone(), cx);
+                            cx.notify();
+                        }))
                     }
                 })),
             sb,
