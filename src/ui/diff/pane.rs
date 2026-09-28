@@ -221,6 +221,7 @@ impl DualPane {
     ) {
         self.open_generation = self.open_generation.wrapping_add(1);
         let generation = self.open_generation;
+        self.pending_land = None;
         self.file = match file {
             FileDiff::Text {
                 alignment,
@@ -507,6 +508,7 @@ impl DualPane {
             self.wrap_layout_dirty = true;
         } else {
             self.wrap_layout_dirty = false;
+            self.pending_land = None;
         }
         self.rebuild_layout(None);
         self.restore_after_rewrap(cap);
