@@ -775,59 +775,69 @@ fn render_titlebar(
                 .gap_2()
                 // Same inset the island uses, measured from the stage's left edge.
                 .pl(px(theme::CHANGES_INSET))
-                .child(
-                    div()
-                        .id("diff-titlebar-drag")
-                        .h_full()
-                        .flex_1()
-                        // Holds the toolbar right; on a crowded toolbar it yields before the buttons do.
-                        .min_w(px(0.))
-                        .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
-                )
                 .child(render_nav_capsule(view, cx))
-                .child(toolbar_divider())
                 .child(
-                    IconButton::new("expand-all", "unfold_vertical.svg", "Expand All").on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.with_pane(cx, |pane, cx| pane.expand_all(cx));
-                        }),
-                    ),
+                    capsule()
+                        .child(nav_button(
+                            "expand-all",
+                            "unfold_vertical.svg",
+                            "Expand All",
+                            None,
+                            true,
+                            false,
+                            cx.listener(|this, _, _, cx| {
+                                this.with_pane(cx, |pane, cx| pane.expand_all(cx));
+                            }),
+                        ))
+                        .child(nav_button(
+                            "collapse-eq",
+                            "fold_vertical.svg",
+                            "Collapse Unchanged",
+                            None,
+                            true,
+                            false,
+                            cx.listener(|this, _, _, cx| {
+                                this.with_pane(cx, |pane, cx| pane.collapse_unchanged(cx));
+                            }),
+                        ))
+                        .child(nav_button(
+                            "ignore-ws",
+                            "pilcrow.svg",
+                            "Ignore Whitespace",
+                            None,
+                            true,
+                            view.view_options.ignore_whitespace,
+                            cx.listener(|this, _, _, cx| this.toggle_ignore_whitespace(cx)),
+                        )),
                 )
-                .child(
-                    IconButton::new("collapse-eq", "fold_vertical.svg", "Collapse Unchanged")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.with_pane(cx, |pane, cx| pane.collapse_unchanged(cx));
-                        })),
-                )
-                .child(
-                    IconButton::new("ignore-ws", "pilcrow.svg", "Ignore Whitespace")
-                        .pressed(view.view_options.ignore_whitespace)
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_ignore_whitespace(cx))),
-                )
-                .child(toolbar_divider())
                 .child(font_size_group(view.pane.read(cx).font_px(), cx))
-                .child(toolbar_divider())
-                .child(
-                    IconButton::new("find", "search.svg", "Find")
-                        .shortcut("/")
-                        .pressed(view.searching)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if this.searching {
-                                this.searching = false;
-                                cx.notify();
-                            } else {
-                                this.searching = true;
-                                this.set_drafting(None, cx);
-                                cx.notify();
-                            }
-                        })),
-                )
-                .child(toolbar_divider())
-                .child(
-                    IconButton::new("export", "export.svg", "Copy Review to Clipboard")
-                        .on_click(cx.listener(|this, _, _, cx| this.export_to_clipboard(cx))),
-                )
+                .child(capsule().child(nav_button(
+                    "find",
+                    "search.svg",
+                    "Find",
+                    Some("/".into()),
+                    true,
+                    view.searching,
+                    cx.listener(|this, _, _, cx| {
+                        if this.searching {
+                            this.searching = false;
+                            cx.notify();
+                        } else {
+                            this.searching = true;
+                            this.set_drafting(None, cx);
+                            cx.notify();
+                        }
+                    }),
+                )))
+                .child(capsule().child(nav_button(
+                    "export",
+                    "export.svg",
+                    "Copy Review to Clipboard",
+                    None,
+                    true,
+                    false,
+                    cx.listener(|this, _, _, cx| this.export_to_clipboard(cx)),
+                )))
                 .children(view.export_status.as_ref().map(|status| {
                     div()
                         .flex_none()
@@ -835,6 +845,15 @@ fn render_titlebar(
                         .text_color(theme::accent())
                         .child(status.clone())
                 }))
+                .child(
+                    div()
+                        .id("diff-titlebar-drag")
+                        .h_full()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .window_control_area(WindowControlArea::Drag)
+                        .occlude(),
+                )
                 .child(
                     // Doubles as the trailing inset when no caption buttons follow.
                     div()
@@ -1223,31 +1242,23 @@ fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoE
     } else {
         format!("{}/{hunk_count}", view.hunk_index.unwrap_or(0) + 1)
     };
-    div()
-        .flex_none()
-        .h(theme::TOGGLE_SIZE)
-        .flex()
-        .items_center()
-        .p(px(NAV_INSET))
-        // Concentric with the buttons' hover: button radius + inset + border.
-        .rounded(px(NAV_BUTTON_RADIUS + NAV_INSET + 1.))
-        .border_1()
-        .border_color(theme::line())
-        .bg(theme::white())
+    capsule()
         .child(nav_button(
             "prev-file",
             "chevrons_left.svg",
             "Previous File",
-            "{",
+            Some("{".into()),
             index > 0,
+            false,
             cx.listener(|this, _, _, cx| this.jump_file(-1, cx)),
         ))
         .child(nav_button(
             "prev-hunk",
             "chevron_left.svg",
             "Previous Hunk",
-            "[",
+            Some("[".into()),
             true,
+            false,
             cx.listener(|this, _, _, cx| this.jump_hunk(-1, cx)),
         ))
         .child(
@@ -1273,29 +1284,55 @@ fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoE
             "next-hunk",
             "chevron_right.svg",
             "Next Hunk",
-            "]",
+            Some("]".into()),
             true,
+            false,
             cx.listener(|this, _, _, cx| this.jump_hunk(1, cx)),
         ))
         .child(nav_button(
             "next-file",
             "chevrons_right.svg",
             "Next File",
-            "}",
+            Some("}".into()),
             index + 1 < total,
+            false,
             cx.listener(|this, _, _, cx| this.jump_file(1, cx)),
         ))
 }
 
+/// Bordered group of toolbar buttons, `TOGGLE_SIZE` tall like any other button.
+fn capsule() -> Div {
+    div()
+        .flex_none()
+        .h(theme::TOGGLE_SIZE)
+        .flex()
+        .items_center()
+        .p(px(NAV_INSET))
+        // Concentric with the buttons' hover: button radius + inset + border.
+        .rounded(px(NAV_BUTTON_RADIUS + NAV_INSET + 1.))
+        .border_1()
+        .border_color(theme::line())
+        .bg(theme::white())
+}
+
 /// Fills the capsule's height: `TOGGLE_SIZE` less border and inset on both sides.
+/// Pressed buttons sit on the range tint with an accent glyph, like `IconButton`.
 fn nav_button(
     id: &'static str,
     icon: &'static str,
     tooltip: &'static str,
-    shortcut: &'static str,
+    shortcut: Option<SharedString>,
     enabled: bool,
+    pressed: bool,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let color = if !enabled {
+        theme::faint()
+    } else if pressed {
+        theme::accent()
+    } else {
+        theme::muted()
+    };
     div()
         .id(id)
         .h_full()
@@ -1305,7 +1342,8 @@ fn nav_button(
         .items_center()
         .justify_center()
         .rounded(px(NAV_BUTTON_RADIUS))
-        .tooltip(Tooltip::text(tooltip, Some(shortcut.into())))
+        .when(pressed, |button| button.bg(theme::range()))
+        .tooltip(Tooltip::text(tooltip, shortcut))
         .when(enabled, |button| {
             button
                 .cursor_pointer()
@@ -1318,39 +1356,33 @@ fn nav_button(
                 .size(theme::ICON_SIZE)
                 .flex_none()
                 .path(icon)
-                .text_color(if enabled { theme::muted() } else { theme::faint() }),
+                .text_color(color),
         )
-}
-
-/// Short rule between toolbar groups: file and hunk navigation, folding and whitespace,
-/// text size, find, export.
-fn toolbar_divider() -> impl IntoElement {
-    div().flex_none().w(px(1.)).h(px(14.)).bg(theme::line())
 }
 
 /// `− 13 +`, like a browser's zoom control: the number is the current size and
 /// resets it, so no third glyph competes with the two signs.
 fn font_size_group(font_px: u32, cx: &mut Context<DiffView>) -> impl IntoElement {
-    div()
-        .flex_none()
-        .flex()
-        .items_center()
-        .child(
-            IconButton::new("font-dec", "minus.svg", "Smaller Text")
-                .shortcut(tooltip::cmd("-"))
-                .disabled(font_px <= DiffFontSize::MIN)
-                .on_click(cx.listener(|this, _, _, cx| this.font_size(FontOp::Dec, cx))),
-        )
+    capsule()
+        .child(nav_button(
+            "font-dec",
+            "minus.svg",
+            "Smaller Text",
+            Some(tooltip::cmd("-")),
+            font_px > DiffFontSize::MIN,
+            false,
+            cx.listener(|this, _, _, cx| this.font_size(FontOp::Dec, cx)),
+        ))
         .child(
             div()
                 .id("font-reset")
-                .h(theme::TOGGLE_SIZE)
+                .h_full()
                 .min_w(px(24.))
                 .px_1()
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_md()
+                .rounded(px(NAV_BUTTON_RADIUS))
                 .cursor_pointer()
                 .text_xs()
                 .text_color(if font_px == DiffFontSize::DEFAULT {
@@ -1364,12 +1396,15 @@ fn font_size_group(font_px: u32, cx: &mut Context<DiffView>) -> impl IntoElement
                 .on_click(cx.listener(|this, _, _, cx| this.font_size(FontOp::Reset, cx)))
                 .child(font_px.to_string()),
         )
-        .child(
-            IconButton::new("font-inc", "plus.svg", "Larger Text")
-                .shortcut(tooltip::cmd("="))
-                .disabled(font_px >= DiffFontSize::MAX)
-                .on_click(cx.listener(|this, _, _, cx| this.font_size(FontOp::Inc, cx))),
-        )
+        .child(nav_button(
+            "font-inc",
+            "plus.svg",
+            "Larger Text",
+            Some(tooltip::cmd("=")),
+            font_px < DiffFontSize::MAX,
+            false,
+            cx.listener(|this, _, _, cx| this.font_size(FontOp::Inc, cx)),
+        ))
 }
 
 fn toggle_button(
