@@ -134,26 +134,13 @@ pub fn sidebar() -> Rgba {
 pub fn hover() -> Rgba {
     rgb(0xe9ebef)
 }
-/// Chrome pill fill (branch / value toggles) — white on the frosted desk.
+/// Chrome pill fill (branch / value / unselected kind toggles) — white on the frosted desk.
 pub fn capsule() -> Rgba {
     white()
-}
-/// Capsule-track fill behind Branch | MR kind hits (prototype A).
-pub fn capsule_track() -> Rgba {
-    rgb(0xeef0f4)
 }
 /// Hover fill on capsule chrome (prototype `--capsule-bg-hover`).
 pub fn capsule_track_hover() -> Rgba {
     rgb(0xe4e7ed)
-}
-/// Soft lift under the selected kind segment inside [`capsule_track`].
-pub fn kind_on_shadow() -> Vec<BoxShadow> {
-    vec![BoxShadow {
-        color: hsla(220. / 360., 0.38, 0.14, 0.10),
-        offset: point(px(0.), px(1.)),
-        blur_radius: px(2.),
-        spread_radius: px(0.),
-    }]
 }
 /// Sidebar active row — same blue as the app icon; chroma survives vibrancy.
 pub fn sidebar_selected() -> Rgba {

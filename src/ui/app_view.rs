@@ -1541,7 +1541,7 @@ fn render_branch_pill(
         )
 }
 
-/// Two-piece GitLab Entry chrome: capsule-track kind switch + separate value pill (ADR-0011 / prototype A).
+/// Two-piece GitLab Entry chrome: peer kind capsules + value pill (ADR-0011).
 fn render_gitlab_entry_chrome(
     view: &AppView,
     branch: &str,
@@ -1574,9 +1574,7 @@ fn render_gitlab_entry_chrome(
                 .flex_none()
                 .flex()
                 .items_center()
-                .p(px(2.))
-                .rounded_full()
-                .bg(theme::capsule_track())
+                .gap(px(6.))
                 .child(entry_kind_hit(
                     "entry-kind-branch",
                     "Branch",
@@ -1636,7 +1634,7 @@ fn render_gitlab_entry_chrome(
                 })
                 .child(
                     svg()
-                        .size(theme::ICON_SIZE_SM)
+                        .size(theme::ICON_SIZE)
                         .flex_none()
                         .path(value_icon)
                         .text_color(theme::muted()),
@@ -1671,48 +1669,41 @@ fn entry_kind_hit(
     target: EntryKind,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let fg = if selected {
+        theme::on_sidebar_selected()
+    } else {
+        theme::muted()
+    };
     div()
         .id(id)
-        .h(px(f32::from(theme::TOGGLE_SIZE) - 4.))
-        .px(px(10.))
+        .h(theme::TOGGLE_SIZE)
+        .px_2()
         .rounded_full()
         .flex()
         .items_center()
-        .gap(px(5.))
+        .gap_1()
         .flex_none()
         .cursor_pointer()
-        .when(selected, |d| {
-            d.bg(theme::white())
-                .shadow(theme::kind_on_shadow())
-                .text_color(theme::text())
-        })
+        .when(selected, |d| d.bg(theme::sidebar_selected()))
         .when(!selected, |d| {
-            d.text_color(theme::muted())
-                .hover(|d| d.text_color(theme::text()))
+            d.bg(theme::capsule())
+                .hover(|d| d.bg(theme::hover()))
         })
         .on_click(cx.listener(move |this, _, _, cx| {
             this.select_entry_kind(target, cx);
         }))
         .child(
             svg()
-                .size(theme::ICON_SIZE_SM)
+                .size(theme::ICON_SIZE)
                 .flex_none()
                 .path(icon)
-                .text_color(if selected {
-                    theme::text()
-                } else {
-                    theme::muted()
-                }),
+                .text_color(fg),
         )
         .child(
             div()
                 .ui_text_size(12., cx)
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(if selected {
-                    theme::text()
-                } else {
-                    theme::muted()
-                })
+                .text_color(fg)
                 .child(label),
         )
 }
