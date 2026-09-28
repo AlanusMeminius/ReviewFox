@@ -169,7 +169,7 @@ struct Run {
 fn run(lines: u32, hunks: u32, folded: bool) -> Run {
     let (old, new, alignment, fold) = synthetic(lines, hunks);
     let t = Instant::now();
-    let layout = Layout::build(old.into(), new.into(), &alignment, folded.then_some(&fold));
+    let layout = Layout::build(old.into(), new.into(), &alignment, folded.then_some(&fold), None);
     black_box((layout.old.max_chars(), layout.new.max_chars()));
     let build = t.elapsed();
     let (lo, hi) = viewport::s_range(&layout, VIEW_H, ROW_H);

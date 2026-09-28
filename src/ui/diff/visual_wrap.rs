@@ -1,10 +1,10 @@
-//! Apply soft-wrap visual row expansion to a [`super::layout::Layout`]. Pure; see
-//! `docs/diffview-architecture.md` §6 and `docs/dual-pane-diff.md` §3.1.1.
+//! Soft-wrap inputs and row expansion helpers for [`super::layout::Layout::build`].
+//! See `docs/diffview-architecture.md` §6 and `docs/dual-pane-diff.md` §3.1.1.
 
 use std::collections::HashMap;
 use std::ops::Range;
 
-use super::layout::{LineKind, LinePart, LineRow, SideLayout};
+use super::layout::{LineKind, LinePart, SideLayout};
 use super::tabs::TabExpansion;
 use super::wrap::{WrapBreaks, wrap_display_line};
 
@@ -21,12 +21,22 @@ pub struct WrapPlan {
     pub new: WrapSide,
 }
 
-/// Stored break data after [`super::layout::Layout::apply_wrap`].
+/// Stored break data when [`super::layout::Layout::build`] is given a wrap plan.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppliedWrap {
     pub plan: WrapPlan,
     pub old_breaks: HashMap<u32, WrapBreaks>,
     pub new_breaks: HashMap<u32, WrapBreaks>,
+}
+
+impl AppliedWrap {
+    #[allow(dead_code)] // 05 shaped rows
+    pub fn breaks(&self, side: crate::domain::Side, ln: u32) -> Option<&WrapBreaks> {
+        match side {
+            crate::domain::Side::Old => self.old_breaks.get(&ln),
+            crate::domain::Side::New => self.new_breaks.get(&ln),
+        }
+    }
 }
 
 pub(crate) struct WrapCtx<'a> {
@@ -54,6 +64,28 @@ fn visual_rows_for_line(
     n
 }
 
+fn push_wrapped_rows(
+    side: &mut SideLayout,
+    ln: u32,
+    kind: LineKind,
+    bytes: Range<usize>,
+    block: Option<u32>,
+    content_rows: u32,
+    pad_rows: u32,
+) {
+    for part_ix in 0..content_rows {
+        let part = if part_ix == 0 {
+            LinePart::First
+        } else {
+            LinePart::Continuation
+        };
+        side.push_visual_line(ln, kind, part, bytes.clone(), block);
+    }
+    for _ in 0..pad_rows {
+        side.push_visual_line(ln, kind, LinePart::EqualPad, bytes.clone(), block);
+    }
+}
+
 impl<'a> WrapCtx<'a> {
     pub(crate) fn push_line_rows(
         &mut self,
@@ -70,14 +102,7 @@ impl<'a> WrapCtx<'a> {
             crate::domain::Side::New => (self.new_w, &mut self.new_breaks),
         };
         let n = visual_rows_for_line(side_text, &bytes, width, ln, store, self.cw);
-        for part_ix in 0..n {
-            let part = if part_ix == 0 {
-                LinePart::First
-            } else {
-                LinePart::Continuation
-            };
-            side.push_visual_line(ln, kind, part, bytes.clone(), block);
-        }
+        push_wrapped_rows(side, ln, kind, bytes, block, n, 0);
         n
     }
 
@@ -111,54 +136,8 @@ impl<'a> WrapCtx<'a> {
             self.cw,
         );
         let pair = old_n.max(new_n);
-
-        for part_ix in 0..old_n {
-            let part = if part_ix == 0 {
-                LinePart::First
-            } else {
-                LinePart::Continuation
-            };
-            old.push_visual_line(o_ln, kind, part, old_bytes.clone(), None);
-        }
-        for _ in old_n..pair {
-            old.push_visual_line(o_ln, kind, LinePart::EqualPad, old_bytes.clone(), None);
-        }
-
-        for part_ix in 0..new_n {
-            let part = if part_ix == 0 {
-                LinePart::First
-            } else {
-                LinePart::Continuation
-            };
-            new.push_visual_line(n_ln, kind, part, new_bytes.clone(), None);
-        }
-        for _ in new_n..pair {
-            new.push_visual_line(n_ln, kind, LinePart::EqualPad, new_bytes.clone(), None);
-        }
+        push_wrapped_rows(old, o_ln, kind, old_bytes.clone(), None, old_n, pair - old_n);
+        push_wrapped_rows(new, n_ln, kind, new_bytes.clone(), None, new_n, pair - new_n);
         pair
-    }
-}
-
-impl LineRow {
-    /// Line number column: first visual row of a logical line only (§3.1.1).
-    #[allow(dead_code)] // 05 line numbers
-    pub fn shows_line_number(&self) -> bool {
-        self.part == LinePart::First
-    }
-
-    /// Equal padding beside a longer wrapped partner: blank, no hatch (§3.1.1).
-    #[allow(dead_code)] // 05 paint
-    pub fn is_equal_padding(&self) -> bool {
-        self.part == LinePart::EqualPad
-    }
-}
-
-impl AppliedWrap {
-    #[allow(dead_code)] // 05 shaped rows
-    pub fn breaks(&self, side: crate::domain::Side, ln: u32) -> Option<&WrapBreaks> {
-        match side {
-            crate::domain::Side::Old => self.old_breaks.get(&ln),
-            crate::domain::Side::New => self.new_breaks.get(&ln),
-        }
     }
 }

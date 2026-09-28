@@ -18,7 +18,7 @@ use super::element::{
     insert_scrollbar_hitboxes,
     line_number_digits, ln_col_width, text_extent, thumb_for, top_at,
 };
-use super::layout::{HunkLand, Layout, Row};
+use super::layout::{HunkLand, Layout, Row, WrapPlan};
 use super::trace;
 use super::viewport::{self, Viewport};
 use crate::domain::{
@@ -318,13 +318,16 @@ impl DualPane {
             return;
         };
         let t = trace::start();
+        let wrap: Option<(&WrapPlan, &mut dyn FnMut(char) -> f32)> = None;
         let mut layout = Layout::build(
             file.old_text.clone(),
             file.new_text.clone(),
             &file.alignment,
             Some(&self.fold),
+            wrap,
         );
         layout.set_comments(self.comments.iter());
+        debug_assert!(layout.wrap.is_none());
         if t.is_some() {
             trace::layout(
                 trace::since(t),

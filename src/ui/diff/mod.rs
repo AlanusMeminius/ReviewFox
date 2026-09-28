@@ -10,8 +10,6 @@ mod visual_wrap;
 mod wrap;
 pub mod viewport;
 
-#[allow(unused_imports)]
-pub use visual_wrap::{AppliedWrap, WrapPlan, WrapSide};
 
 #[cfg(test)]
 mod perf;

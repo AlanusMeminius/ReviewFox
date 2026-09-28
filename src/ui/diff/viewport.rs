@@ -25,8 +25,6 @@ pub struct PlacedBridge {
 pub struct AnchorCap {
     pub side: Side,
     pub ln: u32,
-    /// Row on `side` that was on the anchor when captured.
-    pub visual_row: u32,
     pub view_y: f32,
 }
 
@@ -226,7 +224,6 @@ impl<'a> Viewport<'a> {
         let cap = |side: Side, row: u32, ln: u32| AnchorCap {
             side,
             ln,
-            visual_row: row,
             view_y: row as f32 * self.row_h - self.top(side),
         };
         for (side, hit) in hits {
@@ -502,18 +499,18 @@ pub fn s_for_anchor(
 
 /// Rewrap / width / font / toggle: hold the logical line's first visual row on
 /// the anchor (§3.1.1), even when capture was on a continuation row.
-#[allow(dead_code)] // 05 rewrap / resize / toggle
+#[allow(dead_code)] // 05 toggle / resize
 pub fn s_for_rewrap(
     layout: &Layout,
     cap: AnchorCap,
     view_h: f32,
     row_h: f32,
-    current_s: f32,
+    _current_s: f32,
 ) -> Option<f32> {
     let row = layout.side(cap.side).row_of_line(cap.ln)?;
     Some(clamp_s(
         layout,
-        s_for_content(layout, cap.side, row as f32 * row_h, row_h, current_s),
+        s_for_content(layout, cap.side, row as f32 * row_h, row_h, 0.),
         view_h,
         row_h,
     ))
@@ -712,7 +709,7 @@ fn subtract_span(span: (f32, f32), cover: (f32, f32)) -> Vec<(f32, f32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::layout::tests::{build, eq, lines};
+    use super::super::layout::tests::{build, eq, lines, ten_then_insert};
     use super::*;
     use crate::domain::{Alignment, AlignmentOp, FoldState, LineSpan};
 
@@ -1015,20 +1012,28 @@ mod tests {
         layout.side(side).row_of_line(ln).unwrap() as f32 * ROW_H - vp.top(side)
     }
 
-    fn wrap_layout(old: &str, new: &str, ops: Vec<AlignmentOp>, width: f32) -> Layout {
+    fn wrap_layout(
+        old: &str,
+        new: &str,
+        ops: Vec<AlignmentOp>,
+        width: f32,
+        fold: Option<&FoldState>,
+    ) -> Layout {
+        use super::super::layout::Layout;
         use super::super::visual_wrap::{WrapPlan, WrapSide};
-        use std::sync::Arc;
         let alignment = Alignment { ops };
-        let old_t: Arc<str> = old.into();
-        let new_t: Arc<str> = new.into();
-        let mut layout = build(old, new, alignment.ops.clone(), None);
         let plan = WrapPlan {
             old: WrapSide { width_px: width },
             new: WrapSide { width_px: width },
         };
         let mut cw = |_: char| 10.0f32;
-        layout.apply_wrap(old_t, new_t, &alignment, None, plan, &mut cw);
-        layout
+        Layout::build(
+            old.into(),
+            new.into(),
+            &alignment,
+            fold,
+            Some((&plan, &mut cw)),
+        )
     }
 
     #[test]
@@ -1260,7 +1265,7 @@ mod tests {
     fn hit_on_continuation_row_maps_to_logical_line() {
         use super::super::layout::LinePart;
         let text = "a".repeat(25);
-        let layout = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 100.);
+        let layout = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 100., None);
         let vp = Viewport::new(&layout, 0., VIEW_H, ROW_H);
         let Some(Row::Line(l)) = vp.hit(Side::Old, ROW_H + 2.) else {
             panic!("continuation row");
@@ -1271,30 +1276,96 @@ mod tests {
     #[test]
     fn rewrap_pins_logical_line_first_visual_row() {
         let text = "a".repeat(25);
-        let layout = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 100.);
+        let layout = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 100., None);
         let s = s_for_content(&layout, Side::Old, 0., ROW_H, 0.);
         let before = view_y(&layout, s, Side::Old, 1);
         let cap = Viewport::new(&layout, s, VIEW_H, ROW_H)
             .capture_anchor()
             .expect("anchor");
-        let mut layout2 = build(&text, &text, vec![eq(1, 1, 1)], None);
-        let plan = super::super::visual_wrap::WrapPlan {
-            old: super::super::visual_wrap::WrapSide { width_px: 50. },
-            new: super::super::visual_wrap::WrapSide { width_px: 50. },
-        };
-        let alignment = Alignment { ops: vec![eq(1, 1, 1)] };
-        let old_t: std::sync::Arc<str> = text.as_str().into();
-        let mut cw = |_: char| 10.0f32;
-        layout2.apply_wrap(
-            std::sync::Arc::clone(&old_t),
-            old_t,
-            &alignment,
-            None,
-            plan,
-            &mut cw,
-        );
+        let layout2 = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 50., None);
         let s2 = s_for_rewrap(&layout2, cap, VIEW_H, ROW_H, s).unwrap();
         assert_eq!(view_y(&layout2, s2, Side::Old, 1), before);
+    }
+
+    #[test]
+    fn rewrap_from_continuation_row_pins_first_visual_row() {
+        use super::super::layout::LinePart;
+        const H: f32 = 60.;
+        let long = "a".repeat(50);
+        let text = format!("head\n{long}");
+        let ops = vec![eq(1, 1, 1), eq(2, 2, 1)];
+        let layout = wrap_layout(&text, &text, ops.clone(), 100., None);
+        assert!(layout.old.rows() >= 4);
+        let first = layout.old.row_of_line(2).unwrap();
+        assert!(first > 0, "wrapped line not at content y 0");
+        let s = s_for_content(&layout, Side::Old, (first + 1) as f32 * ROW_H, ROW_H, 0.);
+        let cap = Viewport::new(&layout, s, H, ROW_H)
+            .capture_anchor()
+            .expect("anchor on continuation");
+        assert_eq!(cap.ln, 2);
+        let layout2 = wrap_layout(&text, &text, ops, 50., None);
+        assert!(layout2.old.rows() > layout.old.rows());
+        let vp1 = Viewport::new(&layout, s, H, ROW_H);
+        let Some(Row::Line(at_cap)) = vp1.hit(Side::Old, H / 3.) else {
+            panic!("setup: row on anchor");
+        };
+        assert_eq!(at_cap.part, LinePart::Continuation);
+
+        let s2 = s_for_rewrap(&layout2, cap, H, ROW_H, s).unwrap();
+        let vp2 = Viewport::new(&layout2, s2, H, ROW_H);
+        let Some(Row::Line(l)) = vp2.hit(Side::Old, H / 3.) else {
+            panic!("first row on anchor");
+        };
+        assert_eq!((l.ln, l.part), (2, LinePart::First));
+    }
+
+    #[test]
+    fn hit_on_equal_pad_row_returns_logical_line() {
+        let old = "a".repeat(25);
+        let new = "b".repeat(15);
+        let layout = wrap_layout(&old, &new, vec![eq(1, 1, 1)], 100., None);
+        let pad_row = layout.new.lines()[2].row as usize;
+        let vp = Viewport::new(&layout, 0., VIEW_H, ROW_H);
+        let Some(Row::Line(l)) = vp.hit(Side::New, pad_row as f32 * ROW_H + 1.) else {
+            panic!("padding row");
+        };
+        assert!(l.is_equal_padding());
+        assert_eq!(l.ln, 1);
+    }
+
+    #[test]
+    fn match_on_continuation_row_lands_on_anchor() {
+        const H: f32 = 60.;
+        let text = "a".repeat(25);
+        let layout = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 100., None);
+        let b = layout
+            .wrap
+            .as_ref()
+            .unwrap()
+            .old_breaks
+            .get(&1)
+            .unwrap()
+            .breaks[0];
+        let row = layout.row_of_match_byte(Side::Old, 1, b).unwrap();
+        let s = s_for_content(&layout, Side::Old, row as f32 * ROW_H, ROW_H, 0.);
+        let vp = Viewport::new(&layout, s, H, ROW_H);
+        assert!((row as f32 * ROW_H - vp.top(Side::Old) - H / 3.).abs() < 0.01);
+    }
+
+    #[test]
+    fn anchor_keeps_place_across_expand_with_wrap() {
+        let (old, new, ops) = ten_then_insert();
+        let mut fold = FoldState::collapsed();
+        let collapsed = wrap_layout(&old, &new, ops.clone(), 100., Some(&fold));
+        let s = s_for_content(&collapsed, Side::Old, 8.5 * ROW_H, ROW_H, 0.);
+        let cap = Viewport::new(&collapsed, s, VIEW_H, ROW_H)
+            .capture_anchor()
+            .expect("anchor");
+        let before = view_y(&collapsed, s, Side::Old, 8);
+        fold.expand(0);
+        let expanded = wrap_layout(&old, &new, ops, 100., Some(&fold));
+        let s2 = s_for_anchor(&expanded, cap, VIEW_H, ROW_H, s).unwrap();
+        assert_eq!(view_y(&expanded, s2, Side::Old, 8), before);
     }
 
     #[test]
@@ -1313,6 +1384,7 @@ mod tests {
                 },
             ],
             100.,
+            None,
         );
         let target = layout.hunk_lands[0].target;
         let s = s_for_target(&layout, target, ROW_H, 0.).unwrap();
