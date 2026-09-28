@@ -1194,8 +1194,7 @@ impl WrapCharWidth<'_, '_> {
             .window
             .as_deref_mut()
             .expect("wrap layout builds need a Window for non-ASCII widths");
-        let w = char_advance(self.family, self.font_px as f32, c, window)
-            .expect("glyph advance for wrap");
+        let w = char_advance(self.family, self.font_px as f32, c, window);
         self.cache.insert(key, w);
         w
     }
@@ -1209,12 +1208,22 @@ fn family_hash(family: &SharedString) -> u64 {
     h.finish()
 }
 
-fn char_advance(family: &SharedString, font_px: f32, c: char, window: &mut Window) -> Option<f32> {
-    let text = window.text_system();
-    let id = text.resolve_font(&font(family.clone()));
-    text.advance(id, px(font_px), c)
-        .ok()
-        .map(|s| f32::from(s.width))
+/// Shaped like painted rows, so glyphs missing from the Code Font get the
+/// fallback font's width instead of failing.
+fn char_advance(family: &SharedString, font_px: f32, c: char, window: &mut Window) -> f32 {
+    let text: SharedString = c.to_string().into();
+    let run = gpui::TextRun {
+        len: text.len(),
+        font: font(family.clone()),
+        color: gpui::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window
+        .text_system()
+        .shape_line(text, px(font_px), &[run], None);
+    f32::from(line.width)
 }
 
 /// Advance of `'0'` in `family` at `font_px`.
