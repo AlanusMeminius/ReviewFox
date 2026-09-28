@@ -159,6 +159,7 @@ pub fn run() {
                 KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("TextField")),
             ]);
             cx.bind_keys(settings::key_bindings());
+            cx.bind_keys(diff_window::key_bindings());
             cx.set_menus(vec![Menu {
                 name: "ReviewFox".into(),
                 items: vec![

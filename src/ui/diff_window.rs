@@ -1,8 +1,8 @@
 use gpui::{
     AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
+    InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, ParentElement, Render, SharedString,
     StatefulInteractiveElement, StyleRefinement, Styled, Subscription, WeakEntity, Window,
-    WindowControlArea, canvas, div, prelude::*, px, rgb,
+    WindowControlArea, actions, canvas, div, prelude::*, px, rgb,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -27,6 +27,24 @@ use super::window_geometry;
 use crate::export;
 use crate::git::{self, FileDiff};
 use crate::window_geometry_store;
+
+actions!(diff, [CloseDiff, DismissOrCloseDiff]);
+
+/// Key context on the Diff window root.
+const CONTEXT: &str = "Diff";
+
+#[cfg(target_os = "macos")]
+const CLOSE_KEY: &str = "cmd-w";
+#[cfg(not(target_os = "macos"))]
+const CLOSE_KEY: &str = "ctrl-w";
+
+/// Diff-window bindings, scoped to [`CONTEXT`].
+pub fn key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("escape", DismissOrCloseDiff, Some(CONTEXT)),
+        KeyBinding::new(CLOSE_KEY, CloseDiff, Some(CONTEXT)),
+    ]
+}
 
 /// Own snapshot for the Diff window — not a live shared model with main.
 #[derive(Clone, Debug)]
@@ -344,6 +362,26 @@ impl DiffView {
         cx.notify();
     }
 
+    /// Cmd/Ctrl+W: always close the Diff window.
+    fn close_diff(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        window.remove_window();
+    }
+
+    /// Esc: dismiss Find → cancel draft → else close window.
+    fn dismiss_or_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.searching {
+            self.searching = false;
+            cx.notify();
+            return;
+        }
+        if self.drafting.is_some() {
+            self.set_drafting(None, cx);
+            cx.notify();
+            return;
+        }
+        window.remove_window();
+    }
+
     fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let mods = &event.keystroke.modifiers;
         if mods.secondary() && !mods.alt && !mods.shift {
@@ -360,10 +398,6 @@ impl DiffView {
         }
         if self.searching {
             match event.keystroke.key.as_str() {
-                "escape" => {
-                    self.searching = false;
-                    cx.notify();
-                }
                 "enter" => {
                     if let Some(m) = self.current_matches().into_iter().next() {
                         self.jump_match(m.side, m.ln, cx);
@@ -403,10 +437,6 @@ impl DiffView {
         }
         match event.keystroke.key.as_str() {
             "enter" => self.commit_draft(cx),
-            "escape" => {
-                self.set_drafting(None, cx);
-                cx.notify();
-            }
             "backspace" => {
                 if let Some(d) = &mut self.drafting {
                     d.body.pop();
@@ -560,6 +590,13 @@ impl Render for DiffView {
             // Unsized UI text inherits gpui's 1rem default (16px), scaled like the rest.
             .ui_text_size(16., cx)
             .track_focus(&self.focus)
+            .key_context(CONTEXT)
+            .on_action(cx.listener(|this, _: &CloseDiff, window, cx| {
+                this.close_diff(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DismissOrCloseDiff, window, cx| {
+                this.dismiss_or_close(window, cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 this.handle_key(event, cx);
             }))

@@ -54,6 +54,7 @@ pub struct AppView {
     /// In-memory MR Entry (list = GitLab commits; Comparison = diff_refs).
     mr_entry: Option<MrEntry>,
     repo_menu: Option<RepoContextMenu>,
+    commit_menu: Option<CommitContextMenu>,
     activation_sub: Option<gpui::Subscription>,
     bounds_sub: Option<gpui::Subscription>,
     /// Ephemeral; paths in set are collapsed. Default empty = all expanded.
@@ -84,6 +85,10 @@ struct RepoContextMenu {
     path: PathBuf,
     position: Point<Pixels>,
     kind: RepoMenuKind,
+}
+
+struct CommitContextMenu {
+    position: Point<Pixels>,
 }
 
 enum MainState {
@@ -122,6 +127,7 @@ impl AppView {
             mr_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_entry: None,
             repo_menu: None,
+            commit_menu: None,
             activation_sub: None,
             bounds_sub: None,
             collapsed_dirs: HashSet::new(),
@@ -684,6 +690,25 @@ impl AppView {
         cx.notify();
     }
 
+    /// Right-click a commit row: select that row if outside the current
+    /// Comparison, then show the commit context menu.
+    fn open_commit_menu(
+        &mut self,
+        index: usize,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let outside = match &self.state {
+            MainState::Ready(bb) => !bb.in_range.get(index).copied().unwrap_or(false),
+            MainState::Empty | MainState::Error(_) => return,
+        };
+        if outside {
+            self.select_commit(index, false, cx);
+        }
+        self.commit_menu = Some(CommitContextMenu { position });
+        cx.notify();
+    }
+
     fn pin_repo(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         workspace_store::pin(&path);
         self.refresh_store();
@@ -716,8 +741,11 @@ impl AppView {
     }
 
     fn handle_branch_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        if event.keystroke.key.as_str() == "escape" && self.repo_menu.is_some() {
+        if event.keystroke.key.as_str() == "escape"
+            && (self.repo_menu.is_some() || self.commit_menu.is_some())
+        {
             self.repo_menu = None;
+            self.commit_menu = None;
             cx.notify();
             return;
         }
@@ -756,13 +784,18 @@ impl AppView {
         cx.notify();
     }
 
+    /// Same gate as the Changes capsule Open Diff button / commit menu item.
+    fn can_open_diff(&self) -> bool {
+        matches!(&self.state, MainState::Ready(bb) if !bb.changed_paths.is_empty())
+    }
+
     fn open_diff(&mut self, cx: &mut Context<Self>) {
+        if !self.can_open_diff() {
+            return;
+        }
         let MainState::Ready(loaded) = &self.state else {
             return;
         };
-        if loaded.changed_paths.is_empty() {
-            return;
-        }
         let preferred = self
             .diff_window
             .and_then(|h| {
@@ -983,11 +1016,13 @@ impl Render for AppView {
                 if !window.is_window_active()
                     && (view.branch_picker.is_some()
                         || view.mr_picker.is_some()
-                        || view.repo_menu.is_some())
+                        || view.repo_menu.is_some()
+                        || view.commit_menu.is_some())
                 {
                     view.branch_picker = None;
                     view.mr_picker = None;
                     view.repo_menu = None;
+                    view.commit_menu = None;
                     cx.notify();
                 }
             }));
@@ -1062,6 +1097,9 @@ impl Render for AppView {
                     ),
             )
             .when(self.repo_menu.is_some(), |d| d.child(render_repo_menu(self, cx)))
+            .when(self.commit_menu.is_some(), |d| {
+                d.child(render_commit_menu(self, cx))
+            })
             // Outside `#stage` so overflow_hidden there cannot clip picker shadows.
             .when(self.branch_picker.is_some(), |d| {
                 d.child(deferred(render_branch_picker(self, cx)))
@@ -1309,6 +1347,80 @@ fn render_repo_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                                     .child(label),
                             )
                     })),
+            ),
+    )
+    .with_priority(1)
+    .into_any_element()
+}
+
+fn render_commit_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+    let Some(menu) = &view.commit_menu else {
+        return div().into_any_element();
+    };
+    let position = menu.position;
+    let can_open = view.can_open_diff();
+
+    deferred(
+        anchored()
+            .position(position)
+            .anchor(Corner::TopLeft)
+            .snap_to_window()
+            .child(
+                div()
+                    .id("commit-context-menu")
+                    .min_w(px(200.))
+                    .p_1()
+                    .flex()
+                    .flex_col()
+                    .bg(theme::white())
+                    .rounded_lg()
+                    .shadow_lg()
+                    .occlude()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.commit_menu = None;
+                        cx.notify();
+                    }))
+                    .child({
+                        let item = div()
+                            .id("commit-menu-open-diff")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .gap_2();
+                        let item = if can_open {
+                            item.cursor_pointer()
+                                .hover(|d| d.bg(theme::hover()))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.commit_menu = None;
+                                    this.open_diff(cx);
+                                }))
+                        } else {
+                            item
+                        };
+                        item.child(
+                            svg()
+                                .size(theme::ICON_SIZE)
+                                .flex_none()
+                                .path("diff_title.svg")
+                                .text_color(if can_open {
+                                    theme::muted()
+                                } else {
+                                    theme::faint()
+                                }),
+                        )
+                        .child(
+                            div()
+                                .ui_text_size(14., cx)
+                                .text_color(if can_open {
+                                    theme::text()
+                                } else {
+                                    theme::faint()
+                                })
+                                .child("Open Diff"),
+                        )
+                    }),
             ),
     )
     .with_priority(1)
@@ -1644,8 +1756,21 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
                                 }
                             })
                             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                                this.select_commit(i, event.modifiers().shift, cx);
+                                // Double-click: always fold Comparison to this single
+                                // commit, then open Diff (ignores any Shift range).
+                                if event.click_count() >= 2 {
+                                    this.select_commit(i, false, cx);
+                                    this.open_diff(cx);
+                                } else {
+                                    this.select_commit(i, event.modifiers().shift, cx);
+                                }
                             }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    this.open_commit_menu(i, event.position, cx);
+                                }),
+                            )
                             .child(
                                 div()
                                     .w_full()
@@ -2224,7 +2349,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         MainState::Ready(loaded) => loaded.changed_paths.clone(),
         MainState::Empty | MainState::Error(_) => Vec::new(),
     };
-    let can_open = !paths.is_empty();
+    let can_open = view.can_open_diff();
     let rows = file_tree::flatten(&paths, &view.collapsed_dirs);
     let head_meta = match &view.state {
         MainState::Ready(loaded) => head_commit_meta(loaded),
