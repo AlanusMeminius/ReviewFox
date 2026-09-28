@@ -272,29 +272,29 @@ pub struct SearchMatch {
 
 /// Byte offset of the first case-insensitive match of `query` in `line`, if any.
 pub fn first_match_byte(line: &str, query: &str) -> Option<usize> {
-    let q = query.trim();
-    if q.is_empty() {
-        return None;
-    }
-    let lower = line.to_lowercase();
-    let pos = lower.find(&q.to_lowercase())?;
-    Some(pos)
+    match_byte_ranges(line, query).first().map(|r| r.start)
 }
 
-/// Every non-overlapping case-insensitive match of `query` in `line` as byte ranges.
+/// Every non-overlapping case-insensitive match of `query` in `line` as byte ranges
+/// into the original line (not a lowercased copy).
 pub fn match_byte_ranges(line: &str, query: &str) -> Vec<std::ops::Range<usize>> {
     let q = query.trim();
     if q.is_empty() {
         return Vec::new();
     }
-    let lower = line.to_lowercase();
     let needle = q.to_lowercase();
     let mut out = Vec::new();
-    let mut start = 0;
-    while let Some(rel) = lower[start..].find(&needle) {
-        let at = start + rel;
-        out.push(at..at + needle.len());
-        start = at + needle.len().max(1);
+    let mut i = 0;
+    while i < line.len() {
+        let Some(rel) = line[i..].to_lowercase().find(&needle) else {
+            break;
+        };
+        let start = i + rel;
+        let end = start + q.len().min(line.len().saturating_sub(start));
+        if end > start {
+            out.push(start..end);
+        }
+        i = start + 1;
     }
     out
 }

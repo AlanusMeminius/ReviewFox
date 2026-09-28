@@ -80,10 +80,12 @@ pub struct DualPane {
     soft_wrap: bool,
     /// In-file search query for row highlights (mirrors DiffView).
     search_query: SharedString,
-    /// Shaped non-ASCII advances per `(char, font px)`.
-    char_widths: HashMap<(char, u32), f32>,
+    /// Shaped non-ASCII advances per `(char, font px, family hash)`.
+    char_widths: HashMap<(char, u32, u64), f32>,
     /// Last prepaint pane widths; stable width triggers rewrap (§6 deferral).
     prev_frame_pane_w: [f32; 2],
+    /// Wrap must rebuild in prepaint with a Window (glyph widths + plan).
+    wrap_layout_dirty: bool,
     /// Which side last received horizontal input; used when sync is turned on.
     last_x_side: Option<Side>,
     /// Horizontal travel per side from the last prepaint (`0..=max_x`).
@@ -145,6 +147,7 @@ impl DualPane {
             search_query: SharedString::default(),
             char_widths: HashMap::new(),
             prev_frame_pane_w: [0.; 2],
+            wrap_layout_dirty: false,
             last_x_side: None,
             max_x: [0.; 2],
             widest_seen: [0.; 2],
@@ -181,6 +184,7 @@ impl DualPane {
             self.ln_advance = None;
             self.char_widths.clear();
             if self.soft_wrap {
+                self.wrap_layout_dirty = true;
                 let cap = self.capture_anchor();
                 self.rebuild_layout(None);
                 self.restore_after_rewrap(cap);
@@ -188,6 +192,12 @@ impl DualPane {
                 self.invalidate_shapes();
             }
             cx.notify();
+        }
+    }
+
+    fn mark_wrap_dirty(&mut self) {
+        if self.soft_wrap {
+            self.wrap_layout_dirty = true;
         }
     }
 
@@ -272,6 +282,7 @@ impl DualPane {
         self.reset_scroll(cx);
         self.x_offsets = [0.; 2];
         self.last_x_side = None;
+        self.wrap_layout_dirty = self.soft_wrap;
         self.rebuild_layout(None);
         self.reveal_bars(cx);
         cx.notify();
@@ -349,20 +360,26 @@ impl DualPane {
             .unwrap_or(font_px as f32 * 0.6);
         let soft = self.soft_wrap;
         let pane_w = self.pane_w;
+        let family_hash = family_hash(&self.code_font);
+        let can_wrap = soft && (pane_w[0] > 0. || pane_w[1] > 0.) && window.is_some();
         let mut width_ctx = WrapCharWidth {
             mono,
             font_px,
             family: &self.code_font,
+            family_hash,
             cache: &mut self.char_widths,
             window,
         };
         let mut char_width = |c: char| width_ctx.width(c);
-        let wrap = if soft && (pane_w[0] > 0. || pane_w[1] > 0.) {
+        let wrap = if can_wrap {
             Some((
                 &plan as &WrapPlan,
                 &mut char_width as &mut dyn FnMut(char) -> f32,
             ))
         } else {
+            if soft {
+                self.wrap_layout_dirty = true;
+            }
             None
         };
         let mut layout = Layout::build(
@@ -383,6 +400,9 @@ impl DualPane {
             );
         }
         self.layout = Some(layout);
+        if can_wrap {
+            self.wrap_layout_dirty = false;
+        }
     }
 
     fn restore_after_rewrap(&mut self, cap: Option<viewport::AnchorCap>) {
@@ -400,30 +420,46 @@ impl DualPane {
         }
     }
 
-    fn maybe_rewrap_for_width(&mut self, pane_w: [f32; 2], window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_wrap_layout(&mut self, pane_w: [f32; 2], window: &mut Window, cx: &mut Context<Self>) {
         if !self.soft_wrap {
+            self.wrap_layout_dirty = false;
             return;
         }
-        let stable =
-            pane_w[0] == self.prev_frame_pane_w[0] && pane_w[1] == self.prev_frame_pane_w[1];
-        self.prev_frame_pane_w = pane_w;
-        if !stable {
+        let has_width = pane_w[0] > 0. || pane_w[1] > 0.;
+        if !has_width {
             return;
         }
-        let needs = self.layout.as_ref().is_none_or(|layout| {
+        self.pane_w = pane_w;
+
+        let width_mismatch = |layout: &Layout| {
             layout.wrap.as_ref().is_none_or(|applied| {
                 applied.plan.old.width_px != code_wrap_width_px(pane_w[0])
                     || applied.plan.new.width_px != code_wrap_width_px(pane_w[1])
             })
-        });
-        if !needs {
+        };
+
+        if self.wrap_layout_dirty || self.layout.as_ref().is_none_or(|l| l.wrap.is_none()) {
+            self.prev_frame_pane_w = pane_w;
+            let cap = self.capture_anchor();
+            self.rebuild_layout(Some(window));
+            self.restore_after_rewrap(cap);
             return;
         }
-        let cap = self.capture_anchor();
-        self.pane_w = pane_w;
-        self.rebuild_layout(Some(window));
-        self.restore_after_rewrap(cap);
-        cx.notify();
+
+        let stable =
+            pane_w[0] == self.prev_frame_pane_w[0] && pane_w[1] == self.prev_frame_pane_w[1];
+        if !stable {
+            self.prev_frame_pane_w = pane_w;
+            cx.notify();
+            return;
+        }
+        self.prev_frame_pane_w = pane_w;
+
+        if self.layout.as_ref().is_some_and(width_mismatch) {
+            let cap = self.capture_anchor();
+            self.rebuild_layout(Some(window));
+            self.restore_after_rewrap(cap);
+        }
     }
 
     pub fn set_soft_wrap(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -434,6 +470,9 @@ impl DualPane {
         self.soft_wrap = on;
         if on {
             self.x_offsets = [0.; 2];
+            self.wrap_layout_dirty = true;
+        } else {
+            self.wrap_layout_dirty = false;
         }
         self.rebuild_layout(None);
         self.restore_after_rewrap(cap);
@@ -445,7 +484,6 @@ impl DualPane {
             return;
         }
         self.search_query = query;
-        self.invalidate_shapes();
         cx.notify();
     }
 
@@ -462,6 +500,7 @@ impl DualPane {
     fn with_anchor(&mut self, mutate: impl FnOnce(&mut Self)) {
         let cap = self.capture_anchor();
         mutate(self);
+        self.mark_wrap_dirty();
         self.rebuild_layout(None);
         self.restore_anchor(cap);
         self.hunk_s = None;
@@ -571,6 +610,7 @@ impl DualPane {
         let plan = match_jump_plan(&file.alignment, &self.fold, side, ln);
         if let Some(id) = plan.expand {
             self.fold.expand(id);
+            self.mark_wrap_dirty();
             self.rebuild_layout(None);
         }
         let Some(layout) = self.layout.as_ref() else {
@@ -629,6 +669,7 @@ impl DualPane {
         }
         if self.soft_wrap {
             self.char_widths.clear();
+            self.wrap_layout_dirty = true;
             let cap = self.capture_anchor();
             self.rebuild_layout(None);
             self.restore_after_rewrap(cap);
@@ -977,7 +1018,7 @@ impl DualPane {
         for side in [Side::Old, Side::New] {
             self.pane_w[side_ix(side)] = f32::from(geom.pane(side).size.width);
         }
-        self.maybe_rewrap_for_width(self.pane_w, window, cx);
+        self.sync_wrap_layout(self.pane_w, window, cx);
         let layout = self.layout.as_ref()?;
         let t_vp = trace::start();
         let vp = Viewport::new(layout, self.scroll_s, self.view_h, row_h).snapped(self.scale);
@@ -1070,7 +1111,8 @@ struct WrapCharWidth<'a, 'w> {
     mono: f32,
     font_px: u32,
     family: &'a SharedString,
-    cache: &'a mut HashMap<(char, u32), f32>,
+    family_hash: u64,
+    cache: &'a mut HashMap<(char, u32, u64), f32>,
     window: Option<&'w mut Window>,
 }
 
@@ -1079,18 +1121,27 @@ impl WrapCharWidth<'_, '_> {
         if c.is_ascii() {
             return self.mono;
         }
-        let key = (c, self.font_px);
+        let key = (c, self.font_px, self.family_hash);
         if let Some(&w) = self.cache.get(&key) {
             return w;
         }
-        if let Some(window) = self.window.as_deref_mut() {
-            if let Some(w) = char_advance(self.family, self.font_px as f32, c, window) {
-                self.cache.insert(key, w);
-                return w;
-            }
-        }
-        self.mono * 2.
+        let window = self
+            .window
+            .as_deref_mut()
+            .expect("wrap layout builds need a Window for non-ASCII widths");
+        let w = char_advance(self.family, self.font_px as f32, c, window)
+            .expect("glyph advance for wrap");
+        self.cache.insert(key, w);
+        w
     }
+}
+
+fn family_hash(family: &SharedString) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    family.hash(&mut h);
+    h.finish()
 }
 
 fn char_advance(family: &SharedString, font_px: f32, c: char, window: &mut Window) -> Option<f32> {

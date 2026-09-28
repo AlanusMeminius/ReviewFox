@@ -65,7 +65,6 @@ struct RowShape {
     tabs: Option<TabExpansion>,
     label: Option<ShapedLine>,
     text_leading: f32,
-    search: Option<Vec<(usize, usize)>>,
 }
 
 impl ShapeCache {
@@ -354,7 +353,6 @@ pub(super) fn build_frame(
                     side,
                     row,
                     side_spans,
-                    search_query,
                     font_px,
                     code_family,
                     window,
@@ -372,23 +370,43 @@ pub(super) fn build_frame(
                                         wrap_segment(layout, side, l, tabs, layout.side(side));
                                     let clipped =
                                         clip_runs_to_display_segment(&runs, tabs, seg);
-                                    search_spans(&clipped, text)
+                                    run_spans(&clipped, text)
                                 } else {
                                     mark_spans(&runs, tabs, text)
                                 }
                             }
                             _ => Vec::new(),
                         };
-                        let search = shape
-                            .search
-                            .as_ref()
-                            .zip(shape.text.as_ref())
-                            .map(|(ranges, text)| search_spans(ranges, text))
-                            .unwrap_or_default();
+                        let pad = l.is_equal_padding();
+                        let search = if pad {
+                            Vec::new()
+                        } else {
+                            shape
+                                .text
+                                .as_ref()
+                                .zip(shape.tabs.as_ref())
+                                .map(|(text, tabs)| {
+                                    let line_text = layout.side(side).text(l);
+                                    let ranges: Vec<_> = search_query
+                                        .map(|q| {
+                                            crate::domain::match_byte_ranges(line_text, q)
+                                                .into_iter()
+                                                .map(|r| (r.start, r.end))
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .unwrap_or_default();
+                                    let (seg, _) =
+                                        wrap_segment(layout, side, l, tabs, layout.side(side));
+                                    let clipped =
+                                        clip_runs_to_display_segment(&ranges, tabs, seg);
+                                    run_spans(&clipped, text)
+                                })
+                                .unwrap_or_default()
+                        };
                         (
                             Some(l.kind),
-                            rows.has_comment(l.ln),
-                            drafting == Some(l.ln),
+                            !pad && rows.has_comment(l.ln),
+                            !pad && drafting == Some(l.ln),
                             marks,
                             search,
                             l.shows_line_number(),
@@ -505,7 +523,6 @@ fn shape_row(
     side: Side,
     row: Row<'_>,
     spans: Option<&[Span]>,
-    search_query: Option<&str>,
     font_px: f32,
     family: &SharedString,
     window: &mut Window,
@@ -516,7 +533,6 @@ fn shape_row(
             tabs: None,
             label: None,
             text_leading: 0.,
-            search: None,
         };
     };
     if line.is_equal_padding() {
@@ -525,24 +541,12 @@ fn shape_row(
             tabs: None,
             label: None,
             text_leading: 0.,
-            search: None,
         };
     }
     let side_layout = layout.side(side);
     let text = side_layout.text(line);
     let tabs = TabExpansion::new(text);
     let (segment, text_leading) = wrap_segment(layout, side, line, &tabs, side_layout);
-    let search = search_query.and_then(|q| {
-        let ranges: Vec<_> = crate::domain::match_byte_ranges(text, q)
-            .into_iter()
-            .map(|r| (r.start, r.end))
-            .collect();
-        if ranges.is_empty() {
-            None
-        } else {
-            Some(clip_runs_to_display_segment(&ranges, &tabs, segment.clone()))
-        }
-    });
     RowShape {
         text: Some({
             let segment_text = tabs.text[segment.clone()].to_string();
@@ -574,7 +578,6 @@ fn shape_row(
             )
         }),
         text_leading,
-        search,
     }
 }
 
@@ -707,58 +710,6 @@ fn shape_runs(
         .shape_line(text, px(font_px), &text_runs, None)
 }
 
-/// Display-byte `(len, color)` runs for one line: `spans` are byte ranges into
-/// `line_text` (as from [`crate::syntax::spans_in`]), mapped through `tabs`.
-/// Gaps use `default`; `palette` is indexed by [`CaptureId`].
-#[cfg_attr(not(test), allow(dead_code))]
-fn runs_for_line(
-    line_text: &str,
-    spans: &[(Range<usize>, crate::syntax::CaptureId)],
-    tabs: &TabExpansion,
-    palette: &[Rgba],
-    default: Rgba,
-) -> Vec<(usize, Rgba)> {
-    let display_len = tabs.text.len();
-    if display_len == 0 {
-        return Vec::new();
-    }
-    if spans.is_empty() {
-        return vec![(display_len, default)];
-    }
-    let color = |id: crate::syntax::CaptureId| {
-        palette
-            .get(usize::from(id.0))
-            .copied()
-            .unwrap_or(default)
-    };
-    let mut out = Vec::new();
-    let mut cursor = 0usize;
-    for (range, capture) in spans {
-        let start = range.start.min(line_text.len());
-        let end = range.end.min(line_text.len());
-        if end <= start {
-            continue;
-        }
-        let d0 = tabs.display_offset(start).min(display_len);
-        let d1 = tabs.display_offset(end).min(display_len);
-        if d1 <= d0 {
-            continue;
-        }
-        if d0 > cursor {
-            out.push((d0 - cursor, default));
-        }
-        let from = d0.max(cursor);
-        if d1 > from {
-            out.push((d1 - from, color(*capture)));
-        }
-        cursor = cursor.max(d1);
-    }
-    if cursor < display_len {
-        out.push((display_len - cursor, default));
-    }
-    out
-}
-
 /// x spans of highlight runs (byte ranges into the original line text,
 /// mapped through the tab expansion `text` was shaped from).
 fn mark_spans(runs: &[(usize, usize)], tabs: &TabExpansion, text: &ShapedLine) -> Vec<(f32, f32)> {
@@ -775,7 +726,7 @@ fn mark_spans(runs: &[(usize, usize)], tabs: &TabExpansion, text: &ShapedLine) -
         .collect()
 }
 
-fn search_spans(runs: &[(usize, usize)], text: &ShapedLine) -> Vec<(f32, f32)> {
+fn run_spans(runs: &[(usize, usize)], text: &ShapedLine) -> Vec<(f32, f32)> {
     runs.iter()
         .filter(|&&(a, b)| b > a)
         .map(|&(a, b)| {
@@ -1481,7 +1432,7 @@ mod tests {
     }
 
     #[test]
-    fn runs_for_line_table() {
+    fn runs_for_segment_table() {
         use crate::syntax::CaptureId;
         let kw = rgb(0xaa00aa);
         let str_c = rgb(0x00aa00);
@@ -1489,7 +1440,8 @@ mod tests {
         let palette = [kw, str_c];
         let got = |line: &str, spans: &[(Range<usize>, CaptureId)]| {
             let tabs = TabExpansion::new(line);
-            runs_for_line(line, spans, &tabs, &palette, def)
+            let segment = 0..tabs.text.len();
+            runs_for_segment(line, spans, &tabs, segment, &palette, def)
                 .into_iter()
                 .map(|(len, c)| (len, rgba(c)))
                 .collect::<Vec<_>>()

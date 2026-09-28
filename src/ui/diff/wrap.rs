@@ -45,14 +45,6 @@ fn forbids_break_between(prev: char, c: char) -> bool {
         && c.is_ascii()
 }
 
-fn segment_width(text: &str, start: usize, end: usize, char_width: &mut impl FnMut(char) -> f32) -> f32 {
-    let mut w = 0_f32;
-    for c in text[start..end].chars() {
-        w += char_width(c);
-    }
-    w
-}
-
 /// Width of `text[start..end]` using prefix sums at char boundaries in `char_bounds`.
 fn segment_width_prefix(
     width_at: &[f32],
@@ -247,14 +239,6 @@ pub(crate) fn wrap_breaks_for_line(
         WrapFit::MustWrap => wrap_display_line_must_wrap(text, width, cw),
         WrapFit::Measure => wrap_display_line_dyn(text, width, cw),
     }
-}
-
-pub fn wrap_display_line(
-    text: &str,
-    wrap_width: f32,
-    mut char_width: impl FnMut(char) -> f32,
-) -> WrapBreaks {
-    wrap_display_line_inner(text, wrap_width, &mut char_width, WrapFit::Measure)
 }
 
 pub(crate) fn wrap_display_line_dyn(
@@ -485,6 +469,10 @@ mod tests {
         }
     }
 
+    fn wrap_line(text: &str, width: f32, mut cw: impl FnMut(char) -> f32) -> WrapBreaks {
+        wrap_display_line_dyn(text, width, &mut cw)
+    }
+
     fn cjk_wide() -> impl FnMut(char) -> f32 {
         move |c| {
             if c.is_ascii() {
@@ -571,7 +559,7 @@ mod tests {
     fn plain_words_break_on_spaces() {
         let text = "hello world foo";
         let w = 70.;
-        let r = wrap_display_line(text, w, mono(10.));
+        let r = wrap_line(text, w, mono(10.));
         assert_eq!(r.breaks, vec![6, 12]);
         assert_eq!(r.continuation_indent_px, 0.);
         assert_width_invariant(text, w, &r, mono(10.));
@@ -581,7 +569,7 @@ mod tests {
     fn long_type_path_wrap_45_no_colon_colon_split() {
         let text = "std::chrono::duration";
         let w = 45.;
-        let r = wrap_display_line(text, w, mono(10.));
+        let r = wrap_line(text, w, mono(10.));
         assert_no_break_inside(text, &r.breaks);
         assert_width_invariant(text, w, &r, mono(10.));
     }
@@ -591,7 +579,7 @@ mod tests {
         let w = 25.;
         let mut width = mono(10.);
         for text in ["a->b", "foo->bar"] {
-            let r = wrap_display_line(text, w, &mut width);
+            let r = wrap_line(text, w, &mut width);
             assert_no_break_inside(text, &r.breaks);
             let segs = row_segments(text, &r.breaks);
             assert!(!segs.iter().any(|s| *s == "a-" || *s == ">b"));
@@ -604,7 +592,7 @@ mod tests {
         let w = 25.;
         let mut width = mono(10.);
         for text in ["x <<= 1", "x >>= 1", "/*a"] {
-            let r = wrap_display_line(text, w, &mut width);
+            let r = wrap_line(text, w, &mut width);
             assert_no_break_inside(text, &r.breaks);
             assert_width_invariant(text, w, &r, mono(10.));
         }
@@ -626,7 +614,7 @@ mod tests {
         ];
         let mut width = mono(10.);
         for (text, w) in cases {
-            let r = wrap_display_line(text, *w, &mut width);
+            let r = wrap_line(text, *w, &mut width);
             assert!(
                 !r.breaks.is_empty(),
                 "{text:?} should wrap at width {w}"
@@ -640,7 +628,7 @@ mod tests {
     fn cjk_breaks_per_char() {
         let text = "你好世界";
         let w = 17.;
-        let r = wrap_display_line(text, w, cjk_wide());
+        let r = wrap_line(text, w, cjk_wide());
         assert_eq!(r.breaks.len(), 3);
         assert_width_invariant(text, w, &r, cjk_wide());
     }
@@ -649,7 +637,7 @@ mod tests {
     fn long_token_char_splits() {
         let text = "aaaaaaaaaa";
         let w = 35.;
-        let r = wrap_display_line(text, w, mono(10.));
+        let r = wrap_line(text, w, mono(10.));
         assert_eq!(r.breaks, vec![3, 6, 9]);
         assert_width_invariant(text, w, &r, mono(10.));
     }
@@ -658,7 +646,7 @@ mod tests {
     fn continuation_indent_kept_with_real_wrap_and_width_invariant() {
         let text = "    hello world extra";
         let w = 80.;
-        let r = wrap_display_line(text, w, mono(10.));
+        let r = wrap_line(text, w, mono(10.));
         assert_eq!(r.continuation_indent_px, 40.);
         assert!(!r.breaks.is_empty());
         assert_width_invariant(text, w, &r, mono(10.));
@@ -668,7 +656,7 @@ mod tests {
     fn continuation_indent_dropped_past_half_width() {
         let narrow = "      x";
         let w2 = 50.;
-        let r2 = wrap_display_line(narrow, w2, mono(10.));
+        let r2 = wrap_line(narrow, w2, mono(10.));
         assert_eq!(r2.continuation_indent_px, 0.);
         assert_width_invariant(narrow, w2, &r2, mono(10.));
     }
@@ -677,7 +665,7 @@ mod tests {
     fn cjk_with_leading_space_respects_width_invariant() {
         let text = " 你好世界";
         let w = 20.;
-        let r = wrap_display_line(text, w, cjk_wide());
+        let r = wrap_line(text, w, cjk_wide());
         assert_width_invariant(text, w, &r, cjk_wide());
     }
 
@@ -686,7 +674,7 @@ mod tests {
         let line = "ab\tc";
         let text = TabExpansion::new(line).text;
         let w = 30.;
-        let r = wrap_display_line(&text, w, mono(10.));
+        let r = wrap_line(&text, w, mono(10.));
         assert_eq!(text, "ab  c");
         assert_width_invariant(&text, w, &r, mono(10.));
     }
@@ -694,14 +682,14 @@ mod tests {
     #[test]
     fn line_that_fits_has_no_breaks() {
         let text = "short";
-        let r = wrap_display_line(text, 100., mono(10.));
+        let r = wrap_line(text, 100., mono(10.));
         assert!(r.breaks.is_empty());
     }
 
     #[test]
     fn single_char_wider_than_wrap_gets_own_row() {
         let text = "ab";
-        let r = wrap_display_line(text, 15., |c| if c == 'a' { 10. } else { 20. });
+        let r = wrap_line(text, 15., |c| if c == 'a' { 10. } else { 20. });
         assert_eq!(r.breaks, vec![1]);
         assert_width_invariant(text, 15., &r, |c| if c == 'a' { 10. } else { 20. });
     }
@@ -710,7 +698,7 @@ mod tests {
     fn leading_indent_may_split_when_wrap_narrower_than_indent() {
         let text = "    code code";
         let w = 45.;
-        let r = wrap_display_line(text, w, mono(10.));
+        let r = wrap_line(text, w, mono(10.));
         assert_width_invariant(text, w, &r, mono(10.));
     }
 }

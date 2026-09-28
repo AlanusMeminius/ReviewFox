@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
-use super::tabs::display_columns;
+use super::tabs::{TabExpansion, display_columns};
 use super::visual_wrap::WrapCtx;
 pub use super::visual_wrap::{AppliedWrap, WrapPlan};
 
@@ -462,14 +462,21 @@ impl Layout {
 
     /// Visual row of a match byte in `ln` (§3.5); without wrap, the line's first row.
     pub fn row_of_match_byte(&self, side: Side, ln: u32, byte: usize) -> Option<u32> {
-        let first = self.side(side).row_of_line(ln)?;
+        let side_layout = self.side(side);
+        let first = side_layout.row_of_line(ln)?;
         let Some(applied) = self.wrap.as_ref() else {
             return Some(first);
         };
+        let line_row = side_layout
+            .lines
+            .iter()
+            .find(|l| l.ln == ln && l.part == LinePart::First)?;
+        let text = side_layout.text(line_row);
+        let display_byte = TabExpansion::new(text).display_offset(byte);
         let mut row = first;
         if let Some(breaks) = applied.breaks(side, ln) {
             for &b in &breaks.breaks {
-                if byte >= b {
+                if display_byte >= b {
                     row += 1;
                 } else {
                     break;
@@ -1659,6 +1666,28 @@ ab	c
     }
 
     #[test]
+    fn row_of_match_byte_on_tabbed_continuation_row() {
+        let line = format!("\t{}", "a".repeat(30));
+        let layout = wrap_layout_unfolded(&line, &line, vec![eq(1, 1, 1)], 50.);
+        let tabs = TabExpansion::new(&line);
+        let match_at = crate::domain::first_match_byte(&line, "aaaa").unwrap();
+        let display = tabs.display_offset(match_at);
+        let breaks = layout
+            .wrap
+            .as_ref()
+            .unwrap()
+            .old_breaks
+            .get(&1)
+            .unwrap();
+        assert!(
+            breaks.breaks.iter().any(|&b| display >= b),
+            "match should fall on a continuation row"
+        );
+        let row = layout.row_of_match_byte(Side::Old, 1, match_at).unwrap();
+        assert!(row > layout.old.row_of_line(1).unwrap());
+    }
+
+    #[test]
     fn folded_file_with_wrap_keeps_omits_and_seams() {
         let pad = "x".repeat(30);
         let (old, new, ops) = ten_then_insert();
@@ -1685,5 +1714,14 @@ ab	c
             reference.old.omits().iter().map(omit_key).collect::<Vec<_>>()
         );
         assert_eq!(folded.old.seams().len(), reference.old.seams().len());
+        let omit_rows: Vec<_> = dump(&folded.old)
+            .into_iter()
+            .filter(|s| s.starts_with('~'))
+            .collect();
+        assert_eq!(omit_rows, ["~0 4-7"]);
+        assert_eq!(folded.old.omits()[0].row, 24);
+        assert_eq!(folded.old.seams(), [50]);
+        assert!(dump(&folded.old).iter().any(|s| s.starts_with("8 L8")));
+        assert!(dump(&folded.old).iter().any(|s| s.starts_with("10 L10")));
     }
 }
