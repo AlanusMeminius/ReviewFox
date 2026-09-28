@@ -7,6 +7,22 @@ use gpui::rgba;
 use gpui::{BoxShadow, Hsla, Pixels, Rgba, hsla, point, px, rgb};
 
 pub const SIDEBAR_WIDTH: Pixels = gpui::px(188.);
+/// Workspace sidebar row (repos + Settings).
+pub const SIDEBAR_ROW_HEIGHT: f32 = 32.;
+/// Vertical gap between rows, so neighbouring selected / hover capsules never touch.
+pub const SIDEBAR_ROW_GAP: f32 = 4.;
+/// Capsule inset from the sidebar's left and right edges.
+pub const SIDEBAR_ROW_INSET: f32 = 8.;
+/// Inner pad inside the capsule so the icon's left edge sits at 14 (inset + this).
+pub const SIDEBAR_ROW_PAD_X: f32 = 6.;
+pub const SIDEBAR_ROW_RADIUS: f32 = 8.;
+/// Icon is 16 wide starting at 14; this gap puts the label at 34.
+pub const SIDEBAR_ICON_LABEL_GAP: f32 = 4.;
+pub const SIDEBAR_SECTION_HEIGHT: f32 = 24.;
+/// Extra top margin on every section header except the first.
+pub const SIDEBAR_SECTION_GAP: f32 = 12.;
+pub const SIDEBAR_SCROLL_PAD_TOP: f32 = 16.;
+pub const SIDEBAR_SETTINGS_PAD_BOTTOM: f32 = 8.;
 pub const FILES_WIDTH: Pixels = gpui::px(280.);
 pub const DIFF_TREE_WIDTH: Pixels = gpui::px(200.);
 /// The window titlebar band, and the only chrome row left: it carries the caption
@@ -149,6 +165,25 @@ pub fn sidebar_selected() -> Rgba {
 /// Primary label on [`sidebar_selected`].
 pub fn on_sidebar_selected() -> Rgba {
     white()
+}
+/// Workspace sidebar selected / pressed row fill. Translucent so macOS vibrancy
+/// (and Windows acrylic) shows through.
+pub fn sidebar_row_selected() -> Rgba {
+    Rgba {
+        r: 0.,
+        g: 0.,
+        b: 0.,
+        a: 0.07,
+    }
+}
+/// Workspace sidebar hover fill on a non-selected row.
+pub fn sidebar_row_hover() -> Rgba {
+    Rgba {
+        r: 0.,
+        g: 0.,
+        b: 0.,
+        a: 0.04,
+    }
 }
 pub fn range() -> Rgba {
     rgb(0xf1f5ff)

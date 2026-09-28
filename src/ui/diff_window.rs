@@ -15,7 +15,7 @@ use crate::domain::{
 use super::appearance::{self, UiTextSize};
 use super::diff::pane::{self, DualPane, FontOp, PaneEvent, SlotBounds, placeholder};
 use super::file_tree::{self, TreeRow};
-use super::file_tree_rows;
+use super::file_tree_rows::{self, RowSurface};
 use super::icon_button::IconButton;
 #[cfg(target_os = "macos")]
 use super::mac_column_vibrancy::ColumnVibrancy;
@@ -912,7 +912,7 @@ fn render_tree_pane(
                     TreeRow::Dir { depth, name, path } => {
                         let collapsed = view.collapsed_dirs.contains(&path);
                         let toggle_path = path.clone();
-                        file_tree_rows::dir_row(("ddir", i), depth, name, collapsed, cx)
+                        file_tree_rows::dir_row(("ddir", i), depth, name, collapsed, RowSurface::Desk, cx)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.collapsed_dirs.remove(&toggle_path) {
                                     this.collapsed_dirs.insert(toggle_path.clone());
@@ -928,6 +928,7 @@ fn render_tree_pane(
                             depth,
                             &path,
                             active,
+                            RowSurface::Desk,
                             mono.clone(),
                             cx,
                         )
