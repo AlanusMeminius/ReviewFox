@@ -1840,7 +1840,7 @@ fn entry_kind_hit(
 fn collapsed_leading_width() -> f32 {
     let controls = 12. + f32::from(theme::TOGGLE_SIZE) * 2. + theme::CHROME_GAP;
     #[cfg(target_os = "macos")]
-    let controls = controls + theme::TRAFFIC_LIGHTS_WIDTH;
+    let controls = controls + theme::TRAFFIC_LIGHTS_WIDTH + theme::CHROME_GAP;
     controls
 }
 
