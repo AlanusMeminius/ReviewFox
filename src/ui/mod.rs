@@ -1,18 +1,18 @@
 #[cfg(target_os = "macos")]
 mod app_icon;
 mod app_view;
-mod gitlab_connection;
 mod diff;
 mod diff_window;
 mod file_tree;
+mod gitlab_connection;
 mod icon_button;
-mod text_field;
 #[cfg(target_os = "macos")]
 mod mac_column_vibrancy;
 mod metadata;
 mod scrollbar;
 mod settings;
 mod splitter;
+mod text_field;
 mod theme;
 mod tooltip;
 mod window_controls;
@@ -28,11 +28,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use app_view::AppView;
 use crate::git::BranchBrowser;
 use crate::reqwest_client::ReqwestClient;
 use crate::window_geometry_store;
 use crate::workspace_store;
+use app_view::AppView;
 use gitlab_connection::GitLabConnection;
 use text_field::{
     Backspace, Confirm, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, SelectLeft,
@@ -104,103 +104,105 @@ pub fn run() {
         None
     };
 
-    Application::new().with_assets(Assets).run(move |cx: &mut App| {
-        theme::init_code_font(&cx.text_system().all_font_names());
-        #[cfg(target_os = "macos")]
-        app_icon::set_app_icon();
+    Application::new()
+        .with_assets(Assets)
+        .run(move |cx: &mut App| {
+            theme::init_code_font(&cx.text_system().all_font_names());
+            #[cfg(target_os = "macos")]
+            app_icon::set_app_icon();
 
-        let http_client =
-            ReqwestClient::user_agent(concat!("ReviewFox/", env!("CARGO_PKG_VERSION")))
-                .expect("HTTP client");
-        cx.set_http_client(Arc::new(http_client));
+            let http_client =
+                ReqwestClient::user_agent(concat!("ReviewFox/", env!("CARGO_PKG_VERSION")))
+                    .expect("HTTP client");
+            cx.set_http_client(Arc::new(http_client));
 
-        let gitlab_connection = Rc::new(RefCell::new(GitLabConnection::default()));
-        settings::init(gitlab_connection.clone(), cx);
+            let gitlab_connection = Rc::new(RefCell::new(GitLabConnection::default()));
+            settings::init(gitlab_connection.clone(), cx);
 
-        cx.on_action(|_: &Quit, cx| {
-            window_geometry_store::begin_quit();
-            window_geometry_store::flush();
-            cx.quit();
-        });
-        // Keys, gear and menu open without a target; error links call
-        // `settings::open_or_focus_settings` with one.
-        cx.on_action(|_: &OpenSettings, cx| settings::open_or_focus_settings(None, cx));
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("ctrl-q", Quit, None),
-            KeyBinding::new("cmd-comma", OpenSettings, None),
-            KeyBinding::new("ctrl-comma", OpenSettings, None),
-            KeyBinding::new("backspace", Backspace, Some("TextField")),
-            KeyBinding::new("delete", Delete, Some("TextField")),
-            KeyBinding::new("enter", Confirm, Some("TextField")),
-            KeyBinding::new("left", Left, Some("TextField")),
-            KeyBinding::new("right", Right, Some("TextField")),
-            KeyBinding::new("shift-left", SelectLeft, Some("TextField")),
-            KeyBinding::new("shift-right", SelectRight, Some("TextField")),
-            KeyBinding::new("cmd-a", SelectAll, Some("TextField")),
-            KeyBinding::new("ctrl-a", SelectAll, Some("TextField")),
-            KeyBinding::new("cmd-v", Paste, Some("TextField")),
-            KeyBinding::new("ctrl-v", Paste, Some("TextField")),
-            KeyBinding::new("cmd-c", Copy, Some("TextField")),
-            KeyBinding::new("ctrl-c", Copy, Some("TextField")),
-            KeyBinding::new("cmd-x", Cut, Some("TextField")),
-            KeyBinding::new("ctrl-x", Cut, Some("TextField")),
-            KeyBinding::new("home", Home, Some("TextField")),
-            KeyBinding::new("end", End, Some("TextField")),
-            KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("TextField")),
-        ]);
-        cx.bind_keys(settings::key_bindings());
-        cx.set_menus(vec![Menu {
-            name: "ReviewFox".into(),
-            items: vec![
-                MenuItem::action("Settings…", OpenSettings),
-                MenuItem::separator(),
-                MenuItem::action("Quit", Quit),
-            ],
-        }]);
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
+            cx.on_action(|_: &Quit, cx| {
                 window_geometry_store::begin_quit();
                 window_geometry_store::flush();
                 cx.quit();
-            }
-        })
-        .detach();
+            });
+            // Keys, gear and menu open without a target; error links call
+            // `settings::open_or_focus_settings` with one.
+            cx.on_action(|_: &OpenSettings, cx| settings::open_or_focus_settings(None, cx));
+            cx.bind_keys([
+                KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("ctrl-q", Quit, None),
+                KeyBinding::new("cmd-comma", OpenSettings, None),
+                KeyBinding::new("ctrl-comma", OpenSettings, None),
+                KeyBinding::new("backspace", Backspace, Some("TextField")),
+                KeyBinding::new("delete", Delete, Some("TextField")),
+                KeyBinding::new("enter", Confirm, Some("TextField")),
+                KeyBinding::new("left", Left, Some("TextField")),
+                KeyBinding::new("right", Right, Some("TextField")),
+                KeyBinding::new("shift-left", SelectLeft, Some("TextField")),
+                KeyBinding::new("shift-right", SelectRight, Some("TextField")),
+                KeyBinding::new("cmd-a", SelectAll, Some("TextField")),
+                KeyBinding::new("ctrl-a", SelectAll, Some("TextField")),
+                KeyBinding::new("cmd-v", Paste, Some("TextField")),
+                KeyBinding::new("ctrl-v", Paste, Some("TextField")),
+                KeyBinding::new("cmd-c", Copy, Some("TextField")),
+                KeyBinding::new("ctrl-c", Copy, Some("TextField")),
+                KeyBinding::new("cmd-x", Cut, Some("TextField")),
+                KeyBinding::new("ctrl-x", Cut, Some("TextField")),
+                KeyBinding::new("home", Home, Some("TextField")),
+                KeyBinding::new("end", End, Some("TextField")),
+                KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("TextField")),
+            ]);
+            cx.bind_keys(settings::key_bindings());
+            cx.set_menus(vec![Menu {
+                name: "ReviewFox".into(),
+                items: vec![
+                    MenuItem::action("Settings…", OpenSettings),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit", Quit),
+                ],
+            }]);
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    window_geometry_store::begin_quit();
+                    window_geometry_store::flush();
+                    cx.quit();
+                }
+            })
+            .detach();
 
-        let geometry = window_geometry_store::snapshot();
-        let bounds = window_geometry::resolve_bounds(
-            geometry.main.as_ref(),
-            window_geometry::main_default_size(),
-            cx,
-        );
+            let geometry = window_geometry_store::snapshot();
+            let bounds = window_geometry::resolve_bounds(
+                geometry.main.as_ref(),
+                window_geometry::main_default_size(),
+                cx,
+            );
 
-        let boot = boot.clone();
-        let gitlab_connection = gitlab_connection.clone();
-        let restore_diff = restore_diff.clone();
-        let _main = cx
-            .open_window(
-                WindowOptions {
-                    focus: true,
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("ReviewFox".into()),
-                        appears_transparent: true,
-                        traffic_light_position: traffic_light_position(),
+            let boot = boot.clone();
+            let gitlab_connection = gitlab_connection.clone();
+            let restore_diff = restore_diff.clone();
+            let _main = cx
+                .open_window(
+                    WindowOptions {
+                        focus: true,
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        titlebar: Some(TitlebarOptions {
+                            title: Some("ReviewFox".into()),
+                            appears_transparent: true,
+                            traffic_light_position: traffic_light_position(),
+                            ..Default::default()
+                        }),
+                        window_decorations: Some(WindowDecorations::Client),
+                        window_background: window_background_appearance(),
                         ..Default::default()
-                    }),
-                    window_decorations: Some(WindowDecorations::Client),
-                    window_background: window_background_appearance(),
-                    ..Default::default()
-                },
-                move |_, cx| {
-                    cx.new(|cx| AppView::new(boot, gitlab_connection, restore_diff, cx))
-                },
-            )
-            .expect("open main window");
+                    },
+                    move |_, cx| {
+                        cx.new(|cx| AppView::new(boot, gitlab_connection, restore_diff, cx))
+                    },
+                )
+                .expect("open main window");
 
-        // Diff opens via Open Diff on the main Changes chrome, or boot restore.
-        cx.activate(true);
-    });
+            // Diff opens via Open Diff on the main Changes chrome, or boot restore.
+            cx.activate(true);
+        });
 }
 
 /// Restore via `last` → BranchBrowser::open_workspace. Failure already drops the entry.

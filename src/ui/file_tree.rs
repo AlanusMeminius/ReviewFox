@@ -12,7 +12,10 @@ pub enum TreeRow {
         /// Full dir path (e.g. `src/ui`) used as collapse key.
         path: String,
     },
-    File { depth: u32, path: ChangedPath },
+    File {
+        depth: u32,
+        path: ChangedPath,
+    },
 }
 
 #[derive(Default)]

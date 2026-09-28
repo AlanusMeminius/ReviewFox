@@ -63,7 +63,8 @@ impl ShapeCache {
     }
 
     fn retain(&mut self, keep: &[Range<usize>; 2]) {
-        self.rows.retain(|&(side, row), _| keep[side_ix(side)].contains(&(row as usize)));
+        self.rows
+            .retain(|&(side, row), _| keep[side_ix(side)].contains(&(row as usize)));
     }
 }
 
@@ -278,16 +279,13 @@ pub(super) fn build_frame(
         let mut widest = 0f32;
         for i in visible {
             let Some(row) = rows.row(i) else { continue };
-            let shape = shapes
-                .rows
-                .entry((side, i as u32))
-                .or_insert_with(|| {
-                    let t = trace::start();
-                    let shape = shape_row(layout, side, row, font_px, window);
-                    stats.shaped += 1;
-                    stats.shape += trace::since(t);
-                    shape
-                });
+            let shape = shapes.rows.entry((side, i as u32)).or_insert_with(|| {
+                let t = trace::start();
+                let shape = shape_row(layout, side, row, font_px, window);
+                stats.shaped += 1;
+                stats.shape += trace::since(t);
+                shape
+            });
             let (kind, commented, drafting_here, marks) = match row {
                 Row::Line(l) => {
                     let marks = match (layout.mark_runs(side, l), &shape.text, &shape.tabs) {
@@ -311,7 +309,11 @@ pub(super) fn build_frame(
                 y0: y_of(i),
                 y1: y_of(i + 1),
                 kind_bg,
-                bg: if drafting_here { rgb(DRAFTING_BG) } else { kind_bg },
+                bg: if drafting_here {
+                    rgb(DRAFTING_BG)
+                } else {
+                    kind_bg
+                },
                 commented,
                 text: shape.text.clone(),
                 marks,
@@ -395,7 +397,13 @@ pub(super) fn build_frame(
     }
 }
 
-fn shape_row(layout: &Layout, side: Side, row: Row<'_>, font_px: f32, window: &mut Window) -> RowShape {
+fn shape_row(
+    layout: &Layout,
+    side: Side,
+    row: Row<'_>,
+    font_px: f32,
+    window: &mut Window,
+) -> RowShape {
     let Row::Line(line) = row else {
         return RowShape {
             text: None,
@@ -426,7 +434,13 @@ fn shape_row(layout: &Layout, side: Side, row: Row<'_>, font_px: f32, window: &m
     }
 }
 
-fn shape(window: &mut Window, text: SharedString, family: &'static str, font_px: f32, color: Rgba) -> ShapedLine {
+fn shape(
+    window: &mut Window,
+    text: SharedString,
+    family: &'static str,
+    font_px: f32,
+    color: Rgba,
+) -> ShapedLine {
     let run = TextRun {
         len: text.len(),
         font: font(family),
@@ -447,7 +461,12 @@ fn mark_spans(runs: &[(usize, usize)], tabs: &TabExpansion, text: &ShapedLine) -
         .map(|&(a, b)| (tabs.display_offset(a), tabs.display_offset(b)))
         .map(|(a, b)| (a.min(text.len()), b.min(text.len())))
         .filter(|(a, b)| b > a)
-        .map(|(a, b)| (f32::from(text.x_for_index(a)), f32::from(text.x_for_index(b))))
+        .map(|(a, b)| {
+            (
+                f32::from(text.x_for_index(a)),
+                f32::from(text.x_for_index(b)),
+            )
+        })
         .collect()
 }
 
@@ -494,9 +513,14 @@ impl Frame {
         for side in [Side::Old, Side::New] {
             self.paint_code(side, window, cx);
         }
-        window.with_content_mask(Some(ContentMask { bounds: geom.gutter }), |window| {
-            self.paint_gutter(window, cx);
-        });
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: geom.gutter,
+            }),
+            |window| {
+                self.paint_gutter(window, cx);
+            },
+        );
         paint_omit_waves(window, geom, &self.waves);
         for frame in &self.sides {
             let Some(thumb) = frame.thumb.as_ref().filter(|t| t.shown) else {
@@ -531,11 +555,17 @@ impl Frame {
                     text_x += COMMENT_BAR;
                 }
                 for &(a, b) in &row.marks {
-                    let rect = hline(text_x + a, text_x + b, row.y0 + (self.row_h - mark_h) / 2., mark_h);
+                    let rect = hline(
+                        text_x + a,
+                        text_x + b,
+                        row.y0 + (self.row_h - mark_h) / 2.,
+                        mark_h,
+                    );
                     window.paint_quad(fill(rect, theme::mod_chg()).corner_radii(px(2.)));
                 }
                 if let Some(text) = &row.text {
-                    text.paint(point(px(text_x), px(row.y0)), row_h, window, cx).ok();
+                    text.paint(point(px(text_x), px(row.y0)), row_h, window, cx)
+                        .ok();
                 }
                 // Row marker, pinned to the pane edge above scrolled text.
                 if row.commented {
@@ -592,7 +622,9 @@ impl Frame {
                     Side::Old => c1 - LN_PAD - f32::from(label.width),
                     Side::New => c0 + LN_PAD,
                 };
-                label.paint(point(px(x), px(row.y0)), row_h, window, cx).ok();
+                label
+                    .paint(point(px(x), px(row.y0)), row_h, window, cx)
+                    .ok();
             }
         }
     }
@@ -600,7 +632,8 @@ impl Frame {
 
 fn paint_bridges(window: &mut Window, placed: &[WinBridge], ln_w: f32) {
     for bridge in placed {
-        let parallel = (bridge.y_l0 - bridge.y_r0).abs() < 1. && (bridge.y_l1 - bridge.y_r1).abs() < 1.;
+        let parallel =
+            (bridge.y_l0 - bridge.y_r0).abs() < 1. && (bridge.y_l1 - bridge.y_r1).abs() < 1.;
         let mut path = PathBuilder::fill();
         if parallel {
             path.move_to(point(px(bridge.x_l), px(bridge.y_l0)));
@@ -721,7 +754,9 @@ const WAVE_STEP: f32 = 2.;
 
 fn wave_y(x: f32, base: f32, crest_at: Option<f32>) -> f32 {
     let phase = match crest_at {
-        Some(lock) => (x - lock) / WAVE_PERIOD * std::f32::consts::TAU + std::f32::consts::FRAC_PI_2,
+        Some(lock) => {
+            (x - lock) / WAVE_PERIOD * std::f32::consts::TAU + std::f32::consts::FRAC_PI_2
+        }
         None => x / WAVE_PERIOD * std::f32::consts::TAU,
     };
     base + phase.sin() * WAVE_AMP
@@ -904,9 +939,11 @@ pub(super) fn insert_hitboxes(
     window: &mut Window,
 ) -> (Hitbox, [Hitbox; 2], [Option<Hitbox>; 2]) {
     let whole = window.insert_hitbox(geom.bounds, HitboxBehavior::Normal);
-    let code = [Side::Old, Side::New].map(|side| window.insert_hitbox(geom.pane(side), HitboxBehavior::Normal));
+    let code = [Side::Old, Side::New]
+        .map(|side| window.insert_hitbox(geom.pane(side), HitboxBehavior::Normal));
     let tracks = [Side::Old, Side::New].map(|side| {
-        tracks[side_ix(side)].then(|| window.insert_hitbox(geom.track(side), HitboxBehavior::Normal))
+        tracks[side_ix(side)]
+            .then(|| window.insert_hitbox(geom.track(side), HitboxBehavior::Normal))
     });
     (whole, code, tracks)
 }
@@ -927,7 +964,11 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
         let delta = event.delta.pixel_delta(window.line_height());
         // Deltas are negative when the user scrolls down / right (AppKit
         // scrollingDelta, Windows wheel); flip to "content moves" signs.
-        let (dx, dy) = route_wheel(-f32::from(delta.x), -f32::from(delta.y), event.modifiers.shift);
+        let (dx, dy) = route_wheel(
+            -f32::from(delta.x),
+            -f32::from(delta.y),
+            event.modifiers.shift,
+        );
         if dy != 0. {
             entity.update(cx, |pane, cx| pane.scroll_by(dy, cx));
             cx.stop_propagation();
@@ -954,7 +995,10 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
         let y = f32::from(event.position.y) - geom.top();
         for side in [Side::Old, Side::New] {
             let ix = side_ix(side);
-            if down_tracks[ix].as_ref().is_some_and(|t| t.is_hovered(window)) {
+            if down_tracks[ix]
+                .as_ref()
+                .is_some_and(|t| t.is_hovered(window))
+            {
                 let track = geom.track(side);
                 let local = f32::from(event.position.y - track.top());
                 entity.update(cx, |pane, cx| pane.press_track(side, local, cx));
@@ -987,8 +1031,11 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
             return;
         }
         let pos = event.position;
-        let hovered = [Side::Old, Side::New]
-            .map(|side| tracks[side_ix(side)].as_ref().is_some_and(|t| t.is_hovered(window)));
+        let hovered = [Side::Old, Side::New].map(|side| {
+            tracks[side_ix(side)]
+                .as_ref()
+                .is_some_and(|t| t.is_hovered(window))
+        });
         let in_gutter = hitbox.is_hovered(window) && geom.gutter.contains(&pos);
         let y = f32::from(pos.y) - geom.top();
         let track_y = [Side::Old, Side::New].map(|side| f32::from(pos.y - geom.track(side).top()));

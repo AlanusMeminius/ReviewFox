@@ -1,30 +1,30 @@
 use gpui::{
     AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, StatefulInteractiveElement,
-    StyleRefinement, Styled, Subscription, WeakEntity, Window, WindowControlArea, canvas, div,
-    prelude::*, px, rgb, svg,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render,
+    StatefulInteractiveElement, StyleRefinement, Styled, Subscription, WeakEntity, Window,
+    WindowControlArea, canvas, div, prelude::*, px, rgb, svg,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::domain::{
-    Anchor, ChangedPath, Comparison, DiffFontSize, PathStatus, Review, SearchMatch, SearchScope, Side,
-    ViewOptions, search_file,
+    Anchor, ChangedPath, Comparison, DiffFontSize, PathStatus, Review, SearchMatch, SearchScope,
+    Side, ViewOptions, search_file,
 };
 
-use crate::export;
-use crate::git::{self, FileDiff};
-use crate::window_geometry_store;
 use super::diff::pane::{self, DualPane, FontOp, PaneEvent, SlotBounds, placeholder};
 use super::file_tree::{self, TreeRow};
+use super::icon_button::IconButton;
 #[cfg(target_os = "macos")]
 use super::mac_column_vibrancy::ColumnVibrancy;
 use super::scrollbar;
 use super::splitter::{self, Axis, ResizeState};
-use super::icon_button::IconButton;
 use super::theme;
 use super::tooltip::{self, Tooltip};
 use super::window_geometry;
+use crate::export;
+use crate::git::{self, FileDiff};
+use crate::window_geometry_store;
 
 /// Own snapshot for the Diff window — not a live shared model with main.
 #[derive(Clone, Debug)]
@@ -96,20 +96,25 @@ impl Render for DiffShell {
 }
 
 impl DiffView {
-    pub fn with_snapshot(snapshot: DiffSnapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn with_snapshot(
+        snapshot: DiffSnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let review = Review::new(snapshot.comparison.clone());
         let pane = cx.new(|_| DualPane::new());
-        let pane_events = cx.subscribe_in(&pane, window, |this, _, event, window, cx| match event {
-            PaneEvent::BeginDraft { side, ln } => this.begin_draft(*side, *ln, window, cx),
-            PaneEvent::HunkIndexChanged(index) => {
-                this.hunk_index = *index;
-                cx.notify();
-            }
-            PaneEvent::HoverCopy(copy) => {
-                this.hover_copy = copy.clone();
-                cx.notify();
-            }
-        });
+        let pane_events =
+            cx.subscribe_in(&pane, window, |this, _, event, window, cx| match event {
+                PaneEvent::BeginDraft { side, ln } => this.begin_draft(*side, *ln, window, cx),
+                PaneEvent::HunkIndexChanged(index) => {
+                    this.hunk_index = *index;
+                    cx.notify();
+                }
+                PaneEvent::HoverCopy(copy) => {
+                    this.hover_copy = copy.clone();
+                    cx.notify();
+                }
+            });
         let mut this = Self {
             focus: cx.focus_handle(),
             tree_collapsed: false,
@@ -421,7 +426,6 @@ impl DiffView {
         }
     }
 
-
     fn font_size(&mut self, op: FontOp, cx: &mut Context<Self>) {
         self.with_pane(cx, |pane, cx| pane.set_font_size(op, cx));
         // The toolbar shows the size, so it re-renders with the pane.
@@ -588,10 +592,7 @@ fn file_status(view: &DiffView, cx: &mut Context<DiffView>) -> (String, String) 
                         let n = view.hunk_index.unwrap_or(0) + 1;
                         format!("hunk {n} of {hunk_count}")
                     };
-                    format!(
-                        "{hunk_part} · {n} comment{}",
-                        if n == 1 { "" } else { "s" }
-                    )
+                    format!("{hunk_part} · {n} comment{}", if n == 1 { "" } else { "s" })
                 }
                 FileDiff::Binary => "binary file".into(),
                 FileDiff::Error(e) => e.clone(),
@@ -629,12 +630,7 @@ fn render_status_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
                 .whitespace_nowrap()
                 .child(path),
         )
-        .child(
-            div()
-                .flex_none()
-                .whitespace_nowrap()
-                .child(subtitle),
-        )
+        .child(div().flex_none().whitespace_nowrap().child(subtitle))
 }
 
 /// The status bar's band below the island. It replaces the stage's bottom inset,
@@ -725,10 +721,11 @@ fn render_titlebar(
                 )
                 .child(toolbar_divider())
                 .child(
-                    IconButton::new("expand-all", "unfold_vertical.svg", "Expand All")
-                        .on_click(cx.listener(|this, _, _, cx| {
+                    IconButton::new("expand-all", "unfold_vertical.svg", "Expand All").on_click(
+                        cx.listener(|this, _, _, cx| {
                             this.with_pane(cx, |pane, cx| pane.expand_all(cx));
-                        })),
+                        }),
+                    ),
                 )
                 .child(
                     IconButton::new("collapse-eq", "fold_vertical.svg", "Collapse Unchanged")
@@ -817,148 +814,143 @@ fn render_tree_pane(
         .child({
             let (scroll, sb) = scrollbar::vertical("diff-tree-sb", cx);
             scrollbar::overlay_flex(
-            div()
-                .id("diff-tree-body")
-                .size_full()
-                .px_1()
-                .pt_1()
-                .track_scroll(&scroll)
-                .overflow_y_scroll()
-                .children(rows.into_iter().enumerate().map(|(i, row)| match row {
-                    TreeRow::Dir { depth, name, path } => {
-                        let collapsed = view.collapsed_dirs.contains(&path);
-                        let toggle_path = path.clone();
-                        div()
-                            .id(("ddir", i))
-                            .mx_1()
-                            .h(px(22.))
-                            .pl(px(6. + depth as f32 * 12.))
-                            .rounded_lg()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .cursor_pointer()
-                            .hover(|d| d.bg(rgb(0xf6f8fb)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.collapsed_dirs.remove(&toggle_path) {
-                                    this.collapsed_dirs.insert(toggle_path.clone());
-                                }
-                                cx.notify();
-                            }))
-                            .child(
-                                div()
-                                    .size(px(16.))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        svg()
-                                            .size(theme::ICON_SIZE)
-                                            .path(if collapsed {
-                                                "folder.svg"
-                                            } else {
-                                                "folder_open.svg"
-                                            })
-                                            .text_color(theme::muted()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .h(px(16.))
-                                    .flex()
-                                    .items_center()
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme::muted())
-                                    .child(name),
-                            )
-                    }
-                    TreeRow::File { depth, path } => {
-                        let path_click = path.path.clone();
-                        let active = selected == path.path;
-                        let name = path.file_name().to_string();
-                        let status = path.status;
-                        let add = path.additions;
-                        let del = path.deletions;
-                        div()
-                            .id(("dfile", i))
-                            .mx_1()
-                            .h(px(22.))
-                            .pl(px(6. + depth as f32 * 12.))
-                            .pr_1()
-                            .rounded_lg()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .cursor_pointer()
-                            .when(active, |d| d.bg(theme::range()))
-                            .hover(move |d| {
-                                if active {
-                                    d.bg(theme::range())
-                                } else {
-                                    d.bg(rgb(0xf6f8fb))
-                                }
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.select_path(path_click.clone(), cx);
-                                cx.notify();
-                            }))
-                            .child(
-                                div()
-                                    .size(px(16.))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .font_family(theme::MONO_FONT)
-                                    .text_xs()
-                                    .text_color(match status {
-                                        PathStatus::Add => rgb(0x1a7f4b),
-                                        PathStatus::Delete => rgb(0xb42318),
-                                        PathStatus::Modify => rgb(0x9a6700),
-                                    })
-                                    .child(status.letter()),
-                            )
-                            .child(
-                                div()
-                                    .h(px(16.))
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .flex()
-                                    .items_center()
-                                    .text_xs()
-                                    .text_color(theme::text())
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .child(name),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .h(px(16.))
-                                    .flex()
-                                    .items_center()
-                                    .font_family(theme::MONO_FONT)
-                                    .text_xs()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_color(rgb(0x1a7f4b))
-                                            .child(format!("+{add}")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_color(rgb(0xb42318))
-                                            .child(format!("−{del}")),
-                                    ),
-                            )
-                    }
-                })),
-            sb,
+                div()
+                    .id("diff-tree-body")
+                    .size_full()
+                    .px_1()
+                    .pt_1()
+                    .track_scroll(&scroll)
+                    .overflow_y_scroll()
+                    .children(rows.into_iter().enumerate().map(|(i, row)| match row {
+                        TreeRow::Dir { depth, name, path } => {
+                            let collapsed = view.collapsed_dirs.contains(&path);
+                            let toggle_path = path.clone();
+                            div()
+                                .id(("ddir", i))
+                                .mx_1()
+                                .h(px(22.))
+                                .pl(px(6. + depth as f32 * 12.))
+                                .rounded_lg()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgb(0xf6f8fb)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !this.collapsed_dirs.remove(&toggle_path) {
+                                        this.collapsed_dirs.insert(toggle_path.clone());
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(
+                                    div()
+                                        .size(px(16.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            svg()
+                                                .size(theme::ICON_SIZE)
+                                                .path(if collapsed {
+                                                    "folder.svg"
+                                                } else {
+                                                    "folder_open.svg"
+                                                })
+                                                .text_color(theme::muted()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .h(px(16.))
+                                        .flex()
+                                        .items_center()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(theme::muted())
+                                        .child(name),
+                                )
+                        }
+                        TreeRow::File { depth, path } => {
+                            let path_click = path.path.clone();
+                            let active = selected == path.path;
+                            let name = path.file_name().to_string();
+                            let status = path.status;
+                            let add = path.additions;
+                            let del = path.deletions;
+                            div()
+                                .id(("dfile", i))
+                                .mx_1()
+                                .h(px(22.))
+                                .pl(px(6. + depth as f32 * 12.))
+                                .pr_1()
+                                .rounded_lg()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .cursor_pointer()
+                                .when(active, |d| d.bg(theme::range()))
+                                .hover(move |d| {
+                                    if active {
+                                        d.bg(theme::range())
+                                    } else {
+                                        d.bg(rgb(0xf6f8fb))
+                                    }
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.select_path(path_click.clone(), cx);
+                                    cx.notify();
+                                }))
+                                .child(
+                                    div()
+                                        .size(px(16.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .font_family(theme::MONO_FONT)
+                                        .text_xs()
+                                        .text_color(match status {
+                                            PathStatus::Add => rgb(0x1a7f4b),
+                                            PathStatus::Delete => rgb(0xb42318),
+                                            PathStatus::Modify => rgb(0x9a6700),
+                                        })
+                                        .child(status.letter()),
+                                )
+                                .child(
+                                    div()
+                                        .h(px(16.))
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .flex()
+                                        .items_center()
+                                        .text_xs()
+                                        .text_color(theme::text())
+                                        .overflow_hidden()
+                                        .child(div().overflow_hidden().text_ellipsis().child(name)),
+                                )
+                                .child(
+                                    div()
+                                        .h(px(16.))
+                                        .flex()
+                                        .items_center()
+                                        .font_family(theme::MONO_FONT)
+                                        .text_xs()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_color(rgb(0x1a7f4b))
+                                                .child(format!("+{add}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(rgb(0xb42318))
+                                                .child(format!("−{del}")),
+                                        ),
+                                )
+                        }
+                    })),
+                sb,
             )
         })
 }
@@ -1073,43 +1065,38 @@ fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
                         .pressed(true)
                         .on_click(cx.listener(|this, _, _, cx| this.cycle_search_scope(cx))),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme::muted())
-                        .child(format!("{} hit{}", matches.len(), if matches.len() == 1 { "" } else { "s" })),
-                ),
+                .child(div().text_xs().text_color(theme::muted()).child(format!(
+                    "{} hit{}",
+                    matches.len(),
+                    if matches.len() == 1 { "" } else { "s" }
+                ))),
         )
         .when(!matches.is_empty(), |bar| {
-            bar.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .children(matches.into_iter().enumerate().map(|(i, m)| {
-                        let side = m.side;
-                        let ln = m.ln;
-                        let label = format!("{} {ln}", m.side.label());
-                        div()
-                            .id(("hit", i))
-                            .h(theme::TOGGLE_SIZE)
-                            .px_2()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_xs()
-                            .text_color(theme::muted())
-                            .hover(|button| button.bg(theme::hover()))
-                            .active(|button| button.bg(rgb(0xdfe3e9)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.jump_match(side, ln, cx);
-                            }))
-                            .child(label)
-                    })),
-            )
+            bar.child(div().flex().flex_wrap().gap_1().children(
+                matches.into_iter().enumerate().map(|(i, m)| {
+                    let side = m.side;
+                    let ln = m.ln;
+                    let label = format!("{} {ln}", m.side.label());
+                    div()
+                        .id(("hit", i))
+                        .h(theme::TOGGLE_SIZE)
+                        .px_2()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .hover(|button| button.bg(theme::hover()))
+                        .active(|button| button.bg(rgb(0xdfe3e9)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.jump_match(side, ln, cx);
+                        }))
+                        .child(label)
+                }),
+            ))
         })
         .into_any_element()
 }
@@ -1177,28 +1164,25 @@ fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElem
                 .track_scroll(&scroll)
                 .overflow_y_scroll()
                 .children(comments.into_iter().map(|c| {
-            let label = match &c.anchor {
-                crate::domain::Anchor::Line { side, span, .. } => {
-                    format!("{} L{} · ", side.label(), span.start)
-                }
-                crate::domain::Anchor::File { .. } => "file · ".into(),
-            };
-            div()
-                .id(("cmt", c.id as usize))
-                .text_xs()
-                .child(
-                    div()
-                        .flex()
-                        .gap_1()
-                        .child(
-                            div()
-                                .font_family(theme::MONO_FONT)
-                                .text_color(theme::faint())
-                                .child(label),
-                        )
-                        .child(div().text_color(theme::text()).child(c.body)),
-                )
-        })),
+                    let label = match &c.anchor {
+                        crate::domain::Anchor::Line { side, span, .. } => {
+                            format!("{} L{} · ", side.label(), span.start)
+                        }
+                        crate::domain::Anchor::File { .. } => "file · ".into(),
+                    };
+                    div().id(("cmt", c.id as usize)).text_xs().child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .font_family(theme::MONO_FONT)
+                                    .text_color(theme::faint())
+                                    .child(label),
+                            )
+                            .child(div().text_color(theme::text()).child(c.body)),
+                    )
+                })),
             sb,
         ))
         .into_any_element()
@@ -1222,12 +1206,7 @@ fn render_draft_bar(view: &DiffView) -> impl IntoElement {
         .rounded_b(px(theme::CHANGES_RADIUS))
         .px_3()
         .py_2()
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme::muted())
-                .child(hint),
-        )
+        .child(div().text_xs().text_color(theme::muted()).child(hint))
         .child(
             div()
                 .mt_1()
@@ -1294,7 +1273,11 @@ fn toggle_button(
     collapsed: bool,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
-    let label = if collapsed { "Show Files" } else { "Hide Files" };
+    let label = if collapsed {
+        "Show Files"
+    } else {
+        "Hide Files"
+    };
     IconButton::new(id, "sidebar_title.svg", label)
         .pressed(collapsed)
         .on_click(cx.listener(|this, _, _, cx| {

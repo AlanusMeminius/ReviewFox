@@ -19,3 +19,7 @@ Pure helper `runs_for_line(line_text, spans, tabs, palette) -> Vec<(len, color)>
 ## Done when
 
 `cargo test` green; human check: a `.rs` / `.cpp` / `CMakeLists.txt` file shows color on both sides, fold/expand keeps it, other files look as before.
+
+## Carried from 01 review (2026-09-28)
+
+- Spans may include line terminators (`"/// doc\n"`, CRLF `"// c\r"`). `spans_in` clips to the line range, but check the Layout line range and `display_offset` treat a trailing `\r` the same way word marks do.

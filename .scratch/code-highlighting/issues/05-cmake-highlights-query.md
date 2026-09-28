@@ -18,3 +18,9 @@ Via the 01 module: a sample `CMakeLists.txt` yields the expected capture for eac
 ## Done when
 
 `cargo test` green.
+
+## Carried from 01 review (2026-09-28)
+
+- Harden first: all three queries compile inside one shared `LazyLock` (`src/syntax/mod.rs`), so an invalid CMake query panics and poisons it for Rust/C++ too. Keep compile errors per Language (e.g. `Option<HighlightConfiguration>` + `log::warn!`) so a bad query makes only that language plain; keep a test that every bundled/repo query compiles.
+- Small cleanups in the same module: `from_interpreter` collapses to `None` with the doc comment (drop the unused digit stripping); `Registry::config` indexes by `lang as usize` instead of a linear search; `log::debug!` where highlighter errors are dropped.
+- Replace the `cmake_placeholder_query_compiles` test with the per-category test.

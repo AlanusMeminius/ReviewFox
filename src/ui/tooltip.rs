@@ -2,8 +2,8 @@
 //! control has one, its keyboard shortcut in a dimmer tone.
 
 use gpui::{
-    AnyView, App, AppContext, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window, div,
-    prelude::FluentBuilder, rgb,
+    AnyView, App, AppContext, Context, IntoElement, ParentElement, Render, SharedString, Styled,
+    Window, div, prelude::FluentBuilder, rgb,
 };
 
 use super::theme;

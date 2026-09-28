@@ -17,3 +17,9 @@ Fallback chain; unknown capture → `text()`; contrast test over the table.
 ## Done when
 
 `cargo test` green; table covers every capture name the three v1 queries emit.
+
+## Carried from 01 review (2026-09-28)
+
+- Any `syntax` call (`capture_names()` included) compiles all queries once: ~53 ms release / ~148 ms debug. Do not resolve the palette on the UI thread at theme build or first paint; resolve it lazily alongside the first highlight result (or on the background thread).
+- The C query emits bare `delimiter` (for `;` `.`), Rust emits `punctuation.delimiter`. The drop-last-segment fallback never maps `delimiter` to punctuation: add an explicit `delimiter` entry. The test looping over `syntax::capture_names()` should enforce every name has a deliberate color.
+- Current union (25): attribute, comment, comment.documentation, constant, constant.builtin, constructor, delimiter, escape, function, function.macro, function.method, function.special, keyword, label, number, operator, property, punctuation.bracket, punctuation.delimiter, string, type, type.builtin, variable, variable.builtin, variable.parameter.

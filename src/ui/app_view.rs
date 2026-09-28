@@ -1,9 +1,9 @@
 use gpui::{
-    anchored, canvas, deferred, ease_out_quint, point, Animation, AnimationExt, App, Bounds,
-    ClickEvent, ClipboardItem, Context, Corner, Div, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render,
-    Size, StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds,
-    WindowControlArea, WindowDecorations, WindowHandle, WindowOptions, div, prelude::*, px, rgb,
+    Animation, AnimationExt, App, Bounds, ClickEvent, ClipboardItem, Context, Corner, Div,
+    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, ParentElement, Pixels, Point, Render, Size, StatefulInteractiveElement, Styled,
+    TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowDecorations, WindowHandle,
+    WindowOptions, anchored, canvas, deferred, div, ease_out_quint, point, prelude::*, px, rgb,
     svg,
 };
 use std::cell::{Cell, RefCell};
@@ -12,6 +12,21 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+use super::OpenSettings;
+use super::diff_window::{DiffSnapshot, DiffView};
+use super::file_tree::{self, TreeRow};
+use super::gitlab_connection::{self, GitLabConnection};
+use super::icon_button::IconButton;
+#[cfg(target_os = "macos")]
+use super::mac_column_vibrancy::ColumnVibrancy;
+use super::metadata;
+use super::scrollbar;
+use super::settings;
+use super::splitter::{self, Axis, ResizeState};
+use super::theme;
+use super::tooltip;
+use super::window_controls::window_controls;
+use super::window_geometry;
 use crate::domain::{Comparison, Oid, PathStatus, Repository};
 use crate::git::{self, BranchBrowser, BranchInfo, CommitInfo};
 use crate::gitlab::{
@@ -21,21 +36,6 @@ use crate::gitlab::{
 use crate::settings_store;
 use crate::window_geometry_store::{self, DiffReopen};
 use crate::workspace_store::{self, MrEntryLabel, WorkspaceEntry, WorkspaceStore};
-use super::diff_window::{DiffSnapshot, DiffView};
-use super::file_tree::{self, TreeRow};
-use super::gitlab_connection::{self, GitLabConnection};
-#[cfg(target_os = "macos")]
-use super::mac_column_vibrancy::ColumnVibrancy;
-use super::metadata;
-use super::scrollbar;
-use super::settings;
-use super::splitter::{self, Axis, ResizeState};
-use super::icon_button::IconButton;
-use super::theme;
-use super::tooltip;
-use super::window_controls::window_controls;
-use super::window_geometry;
-use super::OpenSettings;
 
 pub struct AppView {
     focus: FocusHandle,
@@ -103,13 +103,9 @@ impl AppView {
             Some(loaded) => MainState::Ready(loaded),
             None => MainState::Empty,
         };
-        gitlab_connection::spawn_refresh_connection(
-            gitlab_connection,
-            cx.entity().downgrade(),
-            cx,
-        );
-        let pending_mr = workspace_store::last_entry(&workspace_store::load())
-            .and_then(|e| e.mr.clone());
+        gitlab_connection::spawn_refresh_connection(gitlab_connection, cx.entity().downgrade(), cx);
+        let pending_mr =
+            workspace_store::last_entry(&workspace_store::load()).and_then(|e| e.mr.clone());
         let mut view = Self {
             focus: cx.focus_handle(),
             repos_collapsed: false,
@@ -222,10 +218,8 @@ impl AppView {
                 let chrome = f32::from(theme::TITLEBAR_HEIGHT);
                 let top = theme::CHANGES_TOP_INSET;
                 let inset = theme::CHANGES_INSET;
-                let available =
-                    f32::from(window.viewport_size().height) - chrome - top - inset;
-                let height =
-                    splitter::clamp_mr_detail_height(size - chrome - top, available);
+                let available = f32::from(window.viewport_size().height) - chrome - top - inset;
+                let height = splitter::clamp_mr_detail_height(size - chrome - top, available);
                 if this.mr_detail_height != height {
                     this.mr_detail_height = height;
                     cx.notify();
@@ -237,9 +231,11 @@ impl AppView {
 
     fn sync_collapsed_dirs(&mut self) {
         let next = match &self.state {
-            MainState::Ready(loaded) => {
-                loaded.changed_paths.iter().map(|p| p.path.clone()).collect()
-            }
+            MainState::Ready(loaded) => loaded
+                .changed_paths
+                .iter()
+                .map(|p| p.path.clone())
+                .collect(),
             MainState::Empty | MainState::Error(_) => Vec::new(),
         };
         if next != self.tree_path_fingerprint {
@@ -734,12 +730,20 @@ impl AppView {
             }
             return;
         }
-        let Some(picker) = &mut self.branch_picker else { return };
+        let Some(picker) = &mut self.branch_picker else {
+            return;
+        };
         match event.keystroke.key.as_str() {
             "escape" => self.branch_picker = None,
-            "backspace" => { picker.query.pop(); picker.refresh(); picker.selected = 0; }
+            "backspace" => {
+                picker.query.pop();
+                picker.refresh();
+                picker.selected = 0;
+            }
             "up" => picker.selected = picker.selected.saturating_sub(1),
-            "down" => picker.selected = (picker.selected + 1).min(picker.matches.len().saturating_sub(1)),
+            "down" => {
+                picker.selected = (picker.selected + 1).min(picker.matches.len().saturating_sub(1))
+            }
             "enter" => {
                 if let Some(branch) = picker.matches.get(picker.selected) {
                     let name = branch.name.clone();
@@ -764,17 +768,13 @@ impl AppView {
         if loaded.changed_paths.is_empty() {
             return;
         }
-        let preferred = self
-            .diff_window
-            .and_then(|h| {
-                h.update(cx, |view, _, _| {
-                    view.snapshot
-                        .as_ref()
-                        .map(|s| s.selected_path.clone())
-                })
-                .ok()
-                .flatten()
-            });
+        let preferred = self.diff_window.and_then(|h| {
+            h.update(cx, |view, _, _| {
+                view.snapshot.as_ref().map(|s| s.selected_path.clone())
+            })
+            .ok()
+            .flatten()
+        });
         let path = preferred
             .filter(|p| loaded.changed_paths.iter().any(|c| &c.path == p))
             .unwrap_or_else(|| loaded.changed_paths[0].path.clone());
@@ -791,12 +791,7 @@ impl AppView {
             .find(|p| p.path == path)
             .map(|p| p.status)
             .unwrap_or(PathStatus::Modify);
-        let file = git::file_diff(
-            &loaded.comparison,
-            &path,
-            status,
-            &Default::default(),
-        );
+        let file = git::file_diff(&loaded.comparison, &path, status, &Default::default());
         let snapshot = DiffSnapshot {
             comparison: loaded.comparison.clone(),
             changed_paths: loaded.changed_paths.clone(),
@@ -930,10 +925,7 @@ fn rebuild_diff_snapshot(reopen: &DiffReopen) -> Option<DiffSnapshot> {
     if changed_paths.is_empty() {
         return None;
     }
-    let path = if changed_paths
-        .iter()
-        .any(|p| p.path == reopen.selected_path)
-    {
+    let path = if changed_paths.iter().any(|p| p.path == reopen.selected_path) {
         reopen.selected_path.clone()
     } else {
         changed_paths[0].path.clone()
@@ -1016,7 +1008,9 @@ impl Render for AppView {
 
         div()
             .id("main")
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.handle_branch_key(event, cx)))
+            .on_key_down(
+                cx.listener(|this, event: &KeyDownEvent, _, cx| this.handle_branch_key(event, cx)),
+            )
             .size_full()
             .flex()
             .flex_col()
@@ -1060,18 +1054,25 @@ impl Render for AppView {
                             .child(render_files(self, cx)),
                     ),
             )
-            .when(self.repo_menu.is_some(), |d| d.child(render_repo_menu(self, cx)))
+            .when(self.repo_menu.is_some(), |d| {
+                d.child(render_repo_menu(self, cx))
+            })
             // Outside `#stage` so overflow_hidden there cannot clip picker shadows.
             .when(self.branch_picker.is_some(), |d| {
                 d.child(deferred(render_branch_picker(self, cx)))
             })
-            .when(self.mr_picker.is_some() && gitlab_chrome_visible(self), |d| {
-                d.child(deferred(render_mr_picker(self, cx)))
-            })
+            .when(
+                self.mr_picker.is_some() && gitlab_chrome_visible(self),
+                |d| d.child(deferred(render_mr_picker(self, cx))),
+            )
     }
 }
 
-fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>) -> impl IntoElement {
+fn render_sidebar(
+    view: &AppView,
+    width: gpui::Pixels,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     let active_path = match &view.state {
         MainState::Ready(loaded) => Some(loaded.comparison.repository.path().to_path_buf()),
         MainState::Empty | MainState::Error(_) => None,
@@ -1083,15 +1084,17 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
         let name = Repository::new(path.clone()).display_name();
         (path, name, active, gitlab)
     };
-    let pinned_rows: Vec<(PathBuf, String, bool, bool)> = workspace_store::pinned_entries(&view.store)
-        .into_iter()
-        .map(|e| row(e.path.clone()))
-        .collect();
+    let pinned_rows: Vec<(PathBuf, String, bool, bool)> =
+        workspace_store::pinned_entries(&view.store)
+            .into_iter()
+            .map(|e| row(e.path.clone()))
+            .collect();
     let pin_section = (!pinned_rows.is_empty()).then_some(pinned_rows);
-    let repos: Vec<(PathBuf, String, bool, bool)> = workspace_store::repository_entries(&view.store)
-        .into_iter()
-        .map(|e| row(e.path.clone()))
-        .collect();
+    let repos: Vec<(PathBuf, String, bool, bool)> =
+        workspace_store::repository_entries(&view.store)
+            .into_iter()
+            .map(|e| row(e.path.clone()))
+            .collect();
 
     div()
         .id("repos")
@@ -1279,35 +1282,35 @@ fn render_repo_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                         this.repo_menu = None;
                         cx.notify();
                     }))
-                    .children(items.into_iter().enumerate().map(|(i, (icon, label, action))| {
-                        let path = path.clone();
-                        div()
-                            .id(("repo-menu-item", i))
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .hover(|d| d.bg(theme::hover()))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                action(this, path.clone(), cx);
-                            }))
-                            .child(
-                                svg()
-                                    .size(theme::ICON_SIZE)
-                                    .flex_none()
-                                    .path(icon)
-                                    .text_color(theme::muted()),
-                            )
-                            .child(
+                    .children(
+                        items
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, (icon, label, action))| {
+                                let path = path.clone();
                                 div()
-                                    .text_sm()
-                                    .text_color(theme::text())
-                                    .child(label),
-                            )
-                    })),
+                                    .id(("repo-menu-item", i))
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .hover(|d| d.bg(theme::hover()))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        action(this, path.clone(), cx);
+                                    }))
+                                    .child(
+                                        svg()
+                                            .size(theme::ICON_SIZE)
+                                            .flex_none()
+                                            .path(icon)
+                                            .text_color(theme::muted()),
+                                    )
+                                    .child(div().text_sm().text_color(theme::text()).child(label))
+                            }),
+                    ),
             ),
     )
     .with_priority(1)
@@ -1348,12 +1351,9 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
             .when(!open, |d| d.hover(|d| d.bg(theme::hover())))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_branch_picker(cx)))
             .child(
-                canvas(
-                    move |bounds, _, _| track.set(bounds),
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
+                canvas(move |bounds, _, _| track.set(bounds), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
             )
             .child(
                 svg()
@@ -1394,12 +1394,9 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
             .when(!open, |d| d.hover(|d| d.bg(theme::hover())))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_mr_picker(cx)))
             .child(
-                canvas(
-                    move |bounds, _, _| track.set(bounds),
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
+                canvas(move |bounds, _, _| track.set(bounds), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
             )
             .child(
                 svg()
@@ -1466,7 +1463,11 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                 .pl(px(12.))
                 .overflow_hidden()
                 .children(traffic_lights_space())
-                .child(toggle_button("main-sidebar-toggle", view.repos_collapsed, cx))
+                .child(toggle_button(
+                    "main-sidebar-toggle",
+                    view.repos_collapsed,
+                    cx,
+                ))
                 .child(open_repo_button("open-repo", cx))
                 .child(
                     div()
@@ -1587,24 +1588,20 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
         )
         .child(islands);
 
-    div()
-        .id("commits")
-        .absolute()
-        .inset_0()
-        .child(
-            div()
-                .id("commits-content")
-                .absolute()
-                .inset_0()
-                .right(float_gap)
-                .flex()
-                .items_start()
-                .when(view.repos_collapsed, |row| {
-                    // Mirrors the titlebar's leading zone so pills and islands stay aligned.
-                    row.child(div().w(px(collapsed_leading_width())).flex_none())
-                })
-                .child(shared_column),
-        )
+    div().id("commits").absolute().inset_0().child(
+        div()
+            .id("commits-content")
+            .absolute()
+            .inset_0()
+            .right(float_gap)
+            .flex()
+            .items_start()
+            .when(view.repos_collapsed, |row| {
+                // Mirrors the titlebar's leading zone so pills and islands stay aligned.
+                row.child(div().w(px(collapsed_leading_width())).flex_none())
+            })
+            .child(shared_column),
+    )
 }
 
 fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -1721,11 +1718,7 @@ struct MrActivateReady {
     commit_infos: Vec<CommitInfo>,
 }
 
-fn finish_mr_activate(
-    view: &mut AppView,
-    iid: u64,
-    result: Result<MrActivateReady, ErrorNote>,
-) {
+fn finish_mr_activate(view: &mut AppView, iid: u64, result: Result<MrActivateReady, ErrorNote>) {
     let Some(entry) = view.mr_entry.as_mut() else {
         return;
     };
@@ -1743,9 +1736,7 @@ fn finish_mr_activate(
             entry.project = Some(ready.project);
             entry.detail = MrDetailState::Ready(ready.detail);
             if let MainState::Ready(bb) = &mut view.state {
-                if let Err(e) =
-                    bb.apply_mr_commits(ready.commit_infos)
-                {
+                if let Err(e) = bb.apply_mr_commits(ready.commit_infos) {
                     entry.detail = MrDetailState::Failed(ErrorNote::plain(e.0));
                 }
             }
@@ -1808,11 +1799,7 @@ fn render_error_note(
         .flex()
         .flex_col()
         .gap_1()
-        .child(
-            div()
-                .text_color(rgb(0xb42318))
-                .child(note.message.clone()),
-        )
+        .child(div().text_color(rgb(0xb42318)).child(note.message.clone()))
         .when_some(note.open_settings, |d, target| {
             d.child(
                 div()
@@ -1867,7 +1854,12 @@ fn render_mr_entry_detail(
                         vec![div().child("Loading MR detail…").into_any_element()]
                     }
                     MrDetailState::Failed(note) => {
-                        vec![render_error_note("mr-detail-open-settings", note, false, cx)]
+                        vec![render_error_note(
+                            "mr-detail-open-settings",
+                            note,
+                            false,
+                            cx,
+                        )]
                     }
                     MrDetailState::Ready(detail) => mr_entry_ready_lines(detail),
                 }),
@@ -2020,8 +2012,7 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                     .children(matches.iter().enumerate().map(|(i, mr)| {
                         let select_mr = mr.clone();
                         let title = format!("!{} · {}", mr.iid, mr.title);
-                        let branches =
-                            format!("{} → {}", mr.source_branch, mr.target_branch);
+                        let branches = format!("{} → {}", mr.source_branch, mr.target_branch);
                         div()
                             .id(("mr", i))
                             .w(px(inner_w))
@@ -2181,13 +2172,7 @@ fn picker_clip_shell(
                 .overflow_hidden()
                 .bg(theme::white())
                 .rounded(px(theme::CHANGES_RADIUS))
-                .child(
-                    div()
-                        .w(px(width))
-                        .h(px(height))
-                        .p_1()
-                        .child(body),
-                ),
+                .child(div().w(px(width)).h(px(height)).p_1().child(body)),
         )
         .with_animation(
             anim_id,
@@ -2210,32 +2195,31 @@ fn picker_scroll_area(
         .relative()
         .w(px(width))
         .h(px(height))
-        .child(div().absolute().inset_0().w(px(width)).h(px(height)).child(content))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .w(px(width))
+                .h(px(height))
+                .child(content),
+        )
         .child(div().absolute().inset_0().child(scrollbar))
 }
 
 /// Commit-list pattern: outer overflow clip + inner ellipsis, both with definite width chain.
-fn picker_line(
-    color: gpui::Rgba,
-    primary: bool,
-    text: impl Into<gpui::SharedString>,
-) -> Div {
-    div()
-        .w_full()
-        .min_w(px(0.))
-        .overflow_hidden()
-        .child(
-            div()
-                .w_full()
-                .min_w(px(0.))
-                .when(primary, |d| d.text_sm())
-                .when(!primary, |d| d.text_xs())
-                .text_color(color)
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .child(text.into()),
-        )
+fn picker_line(color: gpui::Rgba, primary: bool, text: impl Into<gpui::SharedString>) -> Div {
+    div().w_full().min_w(px(0.)).overflow_hidden().child(
+        div()
+            .w_full()
+            .min_w(px(0.))
+            .when(primary, |d| d.text_sm())
+            .when(!primary, |d| d.text_xs())
+            .text_color(color)
+            .overflow_hidden()
+            .text_ellipsis()
+            .whitespace_nowrap()
+            .child(text.into()),
+    )
 }
 
 fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -2312,126 +2296,121 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                     .track_scroll(&scroll)
                     .overflow_y_scroll()
                     .children(rows.into_iter().enumerate().map(|(i, row)| match row {
-                    TreeRow::Dir { depth, name, path } => {
-                        let collapsed = view.collapsed_dirs.contains(&path);
-                        let toggle_path = path.clone();
-                        div()
-                            .id(("dir", i))
-                            .mx_1()
-                            .h(px(22.))
-                            .pl(px(8. + depth as f32 * 12.))
-                            .pr_1()
-                            .rounded_lg()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .cursor_pointer()
-                            .hover(|d| d.bg(rgb(0xf6f8fb)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.collapsed_dirs.remove(&toggle_path) {
-                                    this.collapsed_dirs.insert(toggle_path.clone());
-                                }
-                                cx.notify();
-                            }))
-                            .child(
-                                div()
-                                    .size(px(16.))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        svg()
-                                            .size(theme::ICON_SIZE)
-                                            .path(if collapsed {
-                                                "folder.svg"
-                                            } else {
-                                                "folder_open.svg"
-                                            })
-                                            .text_color(theme::muted()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .h(px(16.))
-                                    .flex()
-                                    .items_center()
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme::muted())
-                                    .child(name),
-                            )
-                    }
-                    TreeRow::File { depth, path } => {
-                        let status = path.status;
-                        let name = path.file_name().to_string();
-                        let add = path.additions;
-                        let del = path.deletions;
-                        div()
-                            .id(("file", i))
-                            .mx_1()
-                            .h(px(22.))
-                            .pl(px(8. + depth as f32 * 12.))
-                            .pr_1()
-                            .rounded_lg()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .hover(|d| d.bg(rgb(0xf6f8fb)))
-                            .child(
-                                div()
-                                    .size(px(16.))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .font_family(theme::MONO_FONT)
-                                    .text_xs()
-                                    .text_color(match status {
-                                        PathStatus::Add => rgb(0x1a7f4b),
-                                        PathStatus::Delete => rgb(0xb42318),
-                                        PathStatus::Modify => rgb(0x9a6700),
-                                    })
-                                    .child(status.letter()),
-                            )
-                            .child(
-                                div()
-                                    .h(px(16.))
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .flex()
-                                    .items_center()
-                                    .text_xs()
-                                    .text_color(theme::text())
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .child(name),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .h(px(16.))
-                                    .flex()
-                                    .items_center()
-                                    .font_family(theme::MONO_FONT)
-                                    .text_xs()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_color(rgb(0x1a7f4b))
-                                            .child(format!("+{add}")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_color(rgb(0xb42318))
-                                            .child(format!("−{del}")),
-                                    ),
-                            )
-                    }
-                })),
+                        TreeRow::Dir { depth, name, path } => {
+                            let collapsed = view.collapsed_dirs.contains(&path);
+                            let toggle_path = path.clone();
+                            div()
+                                .id(("dir", i))
+                                .mx_1()
+                                .h(px(22.))
+                                .pl(px(8. + depth as f32 * 12.))
+                                .pr_1()
+                                .rounded_lg()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgb(0xf6f8fb)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !this.collapsed_dirs.remove(&toggle_path) {
+                                        this.collapsed_dirs.insert(toggle_path.clone());
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(
+                                    div()
+                                        .size(px(16.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            svg()
+                                                .size(theme::ICON_SIZE)
+                                                .path(if collapsed {
+                                                    "folder.svg"
+                                                } else {
+                                                    "folder_open.svg"
+                                                })
+                                                .text_color(theme::muted()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .h(px(16.))
+                                        .flex()
+                                        .items_center()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(theme::muted())
+                                        .child(name),
+                                )
+                        }
+                        TreeRow::File { depth, path } => {
+                            let status = path.status;
+                            let name = path.file_name().to_string();
+                            let add = path.additions;
+                            let del = path.deletions;
+                            div()
+                                .id(("file", i))
+                                .mx_1()
+                                .h(px(22.))
+                                .pl(px(8. + depth as f32 * 12.))
+                                .pr_1()
+                                .rounded_lg()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .hover(|d| d.bg(rgb(0xf6f8fb)))
+                                .child(
+                                    div()
+                                        .size(px(16.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .font_family(theme::MONO_FONT)
+                                        .text_xs()
+                                        .text_color(match status {
+                                            PathStatus::Add => rgb(0x1a7f4b),
+                                            PathStatus::Delete => rgb(0xb42318),
+                                            PathStatus::Modify => rgb(0x9a6700),
+                                        })
+                                        .child(status.letter()),
+                                )
+                                .child(
+                                    div()
+                                        .h(px(16.))
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .flex()
+                                        .items_center()
+                                        .text_xs()
+                                        .text_color(theme::text())
+                                        .overflow_hidden()
+                                        .child(div().overflow_hidden().text_ellipsis().child(name)),
+                                )
+                                .child(
+                                    div()
+                                        .h(px(16.))
+                                        .flex()
+                                        .items_center()
+                                        .font_family(theme::MONO_FONT)
+                                        .text_xs()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_color(rgb(0x1a7f4b))
+                                                .child(format!("+{add}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(rgb(0xb42318))
+                                                .child(format!("−{del}")),
+                                        ),
+                                )
+                        }
+                    })),
                 sb,
             )
         })
@@ -2459,7 +2438,10 @@ fn head_commit_meta(loaded: &BranchBrowser) -> Option<HeadMeta> {
         .cloned()?;
     let selected = loaded.in_range.iter().filter(|&&b| b).count();
     let range_label = (selected > 1).then(|| loaded.comparison.label());
-    Some(HeadMeta { commit, range_label })
+    Some(HeadMeta {
+        commit,
+        range_label,
+    })
 }
 
 fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -2513,7 +2495,12 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
                         .child(short),
                 )
                 .child(div().child("·"))
-                .child(div().overflow_hidden().text_ellipsis().child(meta.commit.author.clone()))
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(meta.commit.author.clone()),
+                )
                 .child(div().child("·"))
                 .child(div().child(meta.commit.time_label.clone()))
                 .when_some(meta.range_label.clone(), |d, label| {
@@ -2699,9 +2686,12 @@ impl BranchPicker {
 
     fn refresh(&mut self) {
         let query = self.query.to_lowercase();
-        self.matches = self.all.iter().filter(|branch| {
-            query.is_empty() || branch.name.to_lowercase().contains(&query)
-        }).cloned().collect();
+        self.matches = self
+            .all
+            .iter()
+            .filter(|branch| query.is_empty() || branch.name.to_lowercase().contains(&query))
+            .cloned()
+            .collect();
     }
 }
 
@@ -2728,12 +2718,12 @@ fn settings_button(cx: &mut Context<AppView>) -> impl IntoElement {
         }))
 }
 
-fn toggle_button(
-    id: &'static str,
-    collapsed: bool,
-    cx: &mut Context<AppView>,
-) -> impl IntoElement {
-    let label = if collapsed { "Show Repositories" } else { "Hide Repositories" };
+fn toggle_button(id: &'static str, collapsed: bool, cx: &mut Context<AppView>) -> impl IntoElement {
+    let label = if collapsed {
+        "Show Repositories"
+    } else {
+        "Hide Repositories"
+    };
     IconButton::new(id, "sidebar_title.svg", label)
         .pressed(collapsed)
         .on_click(cx.listener(|this, _, _, cx| {

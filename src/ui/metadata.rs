@@ -1,8 +1,8 @@
 //! Label + colored pill metadata rows, ported from BeadsViewer's issue detail.
 
 use gpui::{
-    AnyElement, App, ClipboardItem, Div, FontWeight, IntoElement, SharedString,
-    Stateful, div, prelude::*, px, rgb,
+    AnyElement, App, ClipboardItem, Div, FontWeight, IntoElement, SharedString, Stateful, div,
+    prelude::*, px, rgb,
 };
 
 use super::theme;
@@ -76,7 +76,12 @@ fn render_item(item: Item) -> Div {
         .gap_1()
         .text_xs()
         .font_weight(FontWeight::NORMAL)
-        .child(div().flex_none().text_color(theme::faint()).child(item.label))
+        .child(
+            div()
+                .flex_none()
+                .text_color(theme::faint())
+                .child(item.label),
+        )
         .child(value)
 }
 

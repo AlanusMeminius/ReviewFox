@@ -12,12 +12,6 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::domain::{
-    Alignment, AlignmentOp, Anchor, DiffFontSize, FoldState, Side, hunk_jump_target,
-    match_jump_plan,
-};
-use crate::git::FileDiff;
-use crate::ui::{scrollbar, theme};
 use super::element::{
     self, BarState, Decorations, FrameInput, Geom, ShapeCache, build_frame, insert_hitboxes,
     line_number_digits, ln_col_width, text_extent, thumb_for, top_at,
@@ -25,6 +19,12 @@ use super::element::{
 use super::layout::{HunkLand, Layout, Row};
 use super::trace;
 use super::viewport::{self, Viewport};
+use crate::domain::{
+    Alignment, AlignmentOp, Anchor, DiffFontSize, FoldState, Side, hunk_jump_target,
+    match_jump_plan,
+};
+use crate::git::FileDiff;
+use crate::ui::{scrollbar, theme};
 
 /// What the shell (DiffView) hears from the pane. Hunk index and hover copy
 /// are emitted only when they change.
@@ -253,7 +253,9 @@ impl DualPane {
         let (Some(cap), Some(layout)) = (cap, self.layout.as_ref()) else {
             return;
         };
-        if let Some(s) = viewport::s_for_anchor(layout, cap, self.view_h, self.row_h(), self.scroll_s) {
+        if let Some(s) =
+            viewport::s_for_anchor(layout, cap, self.view_h, self.row_h(), self.scroll_s)
+        {
             self.scroll_s = s;
         }
     }
@@ -312,14 +314,12 @@ impl DualPane {
                     .unwrap_or(false)
             })
         } else {
-            (0..hunk_count)
-                .rev()
-                .find(|&i| {
-                    lands
-                        .get(i)
-                        .map(|h| (h.s as f32) < s_rows - 0.5)
-                        .unwrap_or(false)
-                })
+            (0..hunk_count).rev().find(|&i| {
+                lands
+                    .get(i)
+                    .map(|h| (h.s as f32) < s_rows - 0.5)
+                    .unwrap_or(false)
+            })
         };
         let Some(i) = next else {
             return;
@@ -327,7 +327,8 @@ impl DualPane {
         let Some(target) = hunk_jump_target(&file.alignment, i) else {
             return;
         };
-        let s = viewport::s_for_target(layout, target, row_h, self.scroll_s).unwrap_or(self.scroll_s);
+        let s =
+            viewport::s_for_target(layout, target, row_h, self.scroll_s).unwrap_or(self.scroll_s);
         self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
         self.hunk_s = Some(s / row_h);
         self.set_hunk_index(Some(i), cx);
@@ -629,7 +630,8 @@ impl DualPane {
         for side in [Side::Old, Side::New] {
             let ix = side_ix(side);
             self.widest_seen[ix] = self.widest_seen[ix].max(frame.widest(side));
-            let longest = (layout.side(side).max_chars() as f32 * advance).max(self.widest_seen[ix]);
+            let longest =
+                (layout.side(side).max_chars() as f32 * advance).max(self.widest_seen[ix]);
             let pane_w = f32::from(geom.pane(side).size.width);
             self.max_x[ix] = viewport::max_x(text_extent(longest), pane_w);
             self.x_offsets[ix] = viewport::clamp_x(self.x_offsets[ix], self.max_x[ix]);
@@ -643,7 +645,8 @@ impl DualPane {
             // Emitting mid-draw would not schedule the shell's redraw.
             let this = cx.entity().downgrade();
             cx.defer(move |cx| {
-                this.update(cx, |pane, cx| pane.set_hunk_index(index, cx)).ok();
+                this.update(cx, |pane, cx| pane.set_hunk_index(index, cx))
+                    .ok();
             });
         }
         frame.stats.prepaint = trace::since(t_prepaint);

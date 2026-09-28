@@ -18,3 +18,7 @@ Guard predicate table-tested at the boundaries; stale-generation drop logic as a
 ## Done when
 
 `cargo test` green; human check: a very large C++ file opens as fast as before and colors in shortly after; a file above the guard stays plain.
+
+## Carried from 01 review (2026-09-28)
+
+- First `syntax` call pays the one-time query compile (~53 ms release / ~148 ms debug); it must happen on the background thread, never on the UI thread (consider warming it at startup in the background).

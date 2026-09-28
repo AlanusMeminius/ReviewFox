@@ -96,7 +96,11 @@ impl<'a> Viewport<'a> {
 
     /// Pane y of an empty side's only seam.
     pub fn empty_seam(&self, side: Side) -> f32 {
-        empty_seam(self.layout.side(other(side)).rows(), self.view_h, self.row_h)
+        empty_seam(
+            self.layout.side(other(side)).rows(),
+            self.view_h,
+            self.row_h,
+        )
     }
 
     /// Seam rows of `side` whose hairline can be on screen.
@@ -283,7 +287,12 @@ impl<'a> Viewport<'a> {
                     return None;
                 }
                 let seam = edge_y(old_seam, old_n, new_n, old_top);
-                (seam, seam, content_y(new_from, new_top), content_y(new_to, new_top))
+                (
+                    seam,
+                    seam,
+                    content_y(new_from, new_top),
+                    content_y(new_to, new_top),
+                )
             }
             Bridge::Delete {
                 old_from,
@@ -295,7 +304,12 @@ impl<'a> Viewport<'a> {
                     return None;
                 }
                 let seam = edge_y(new_seam, new_n, old_n, new_top);
-                (content_y(old_from, old_top), content_y(old_to, old_top), seam, seam)
+                (
+                    content_y(old_from, old_top),
+                    content_y(old_to, old_top),
+                    seam,
+                    seam,
+                )
             }
             Bridge::Replace {
                 old_from,
@@ -332,7 +346,12 @@ const EDGE_SLACK: f32 = 4.;
 /// Indices of items that can reach into the pane. `lo(i)` / `hi(i)` are the
 /// item's top and bottom over both sides (pane y) and must be non-decreasing
 /// in `i`, so "wholly above" is a prefix and "wholly below" a suffix.
-fn window(n: usize, lo: impl Fn(usize) -> f32, hi: impl Fn(usize) -> f32, view_h: f32) -> Range<usize> {
+fn window(
+    n: usize,
+    lo: impl Fn(usize) -> f32,
+    hi: impl Fn(usize) -> f32,
+    view_h: f32,
+) -> Range<usize> {
     let start = partition(n, |i| hi(i) < -EDGE_SLACK);
     let end = partition(n, |i| lo(i) <= view_h + EDGE_SLACK);
     start..end.max(start)
@@ -416,7 +435,13 @@ fn s_where(knots: &[ScrollKnot], side: Side, y: f32, reach: bool) -> Option<f32>
 /// Scroll parameter that puts content pixel `content_px` of `side` on the
 /// anchor line. Keeps `current_s` if it already does; inside a stretch where
 /// `side` stands still, lands where the side starts moving again.
-pub fn s_for_content(layout: &Layout, side: Side, content_px: f32, row_h: f32, current_s: f32) -> f32 {
+pub fn s_for_content(
+    layout: &Layout,
+    side: Side,
+    content_px: f32,
+    row_h: f32,
+    current_s: f32,
+) -> f32 {
     let knots = &layout.knots;
     let (cur_old, cur_new) = interp(current_s, knots, row_h);
     let cur = if side == Side::Old { cur_old } else { cur_new };
@@ -442,13 +467,30 @@ pub fn s_for_content(layout: &Layout, side: Side, content_px: f32, row_h: f32, c
 
 /// Scroll parameter that lands `target` on the anchor line (§3.5). Not
 /// clamped: hunk navigation keeps the unclamped value; clamp with [`clamp_s`].
-pub fn s_for_target(layout: &Layout, target: HunkJumpTarget, row_h: f32, current_s: f32) -> Option<f32> {
+pub fn s_for_target(
+    layout: &Layout,
+    target: HunkJumpTarget,
+    row_h: f32,
+    current_s: f32,
+) -> Option<f32> {
     let row = layout.side(target.side).row_of_line(target.ln)?;
-    Some(s_for_content(layout, target.side, row as f32 * row_h, row_h, current_s))
+    Some(s_for_content(
+        layout,
+        target.side,
+        row as f32 * row_h,
+        row_h,
+        current_s,
+    ))
 }
 
 /// Scroll parameter that puts the captured line back at its viewport y, clamped.
-pub fn s_for_anchor(layout: &Layout, cap: AnchorCap, view_h: f32, row_h: f32, current_s: f32) -> Option<f32> {
+pub fn s_for_anchor(
+    layout: &Layout,
+    cap: AnchorCap,
+    view_h: f32,
+    row_h: f32,
+    current_s: f32,
+) -> Option<f32> {
     let row = layout.side(cap.side).row_of_line(cap.ln)?;
     let want = anchor_of(view_h) + row as f32 * row_h - cap.view_y;
     let s = s_for_content(layout, cap.side, want, row_h, current_s);
@@ -557,7 +599,11 @@ fn interp(s: f32, knots: &[ScrollKnot], row_h: f32) -> (f32, f32) {
     };
     let ka = knots[b - 1];
     let (a_s, b_s) = (ka.s as f32 * row_h, kb.s as f32 * row_h);
-    let t = if b_s == a_s { 0. } else { (s - a_s) / (b_s - a_s) };
+    let t = if b_s == a_s {
+        0.
+    } else {
+        (s - a_s) / (b_s - a_s)
+    };
     let lerp = |a: u32, b: u32| (a as f32 + t * (b as f32 - a as f32)) * row_h;
     (lerp(ka.old_y, kb.old_y), lerp(ka.new_y, kb.new_y))
 }
@@ -629,7 +675,12 @@ mod tests {
             ),
             (
                 "delete in the middle",
-                format!("{}\n{}\n{}", lines(1, 20, "L"), lines(1, 8, "D"), lines(21, 40, "L")),
+                format!(
+                    "{}\n{}\n{}",
+                    lines(1, 20, "L"),
+                    lines(1, 8, "D"),
+                    lines(21, 40, "L")
+                ),
                 body.clone(),
                 vec![
                     eq(1, 1, 20),
@@ -896,7 +947,11 @@ mod tests {
         fold.expand(0);
         let expanded = build(&old, &new, ops.clone(), Some(&fold));
         let s2 = s_for_anchor(&expanded, cap, VIEW_H, ROW_H, vp.s()).unwrap();
-        assert_eq!(view_y(&expanded, s2, Side::Old, 32), before, "expand keeps L32");
+        assert_eq!(
+            view_y(&expanded, s2, Side::Old, 32),
+            before,
+            "expand keeps L32"
+        );
 
         // Collapse again from the expanded picture.
         let vp2 = Viewport::new(&expanded, s2, VIEW_H, ROW_H);
@@ -984,7 +1039,11 @@ mod tests {
             let (lo, hi) = s_range(&layout, VIEW_H, ROW_H);
             let vp = Viewport::new(&layout, (lo + hi) / 2., VIEW_H, ROW_H);
             let placed = vp.bridges();
-            assert!(!placed.is_empty() && placed.len() <= 5, "got {}", placed.len());
+            assert!(
+                !placed.is_empty() && placed.len() <= 5,
+                "got {}",
+                placed.len()
+            );
             for p in &placed {
                 assert!(p.y_l1 >= 0. && p.y_l0 <= VIEW_H);
             }
@@ -1008,7 +1067,11 @@ mod tests {
             ((0., 0., false), (0., 0.)),
         ];
         for ((dx, dy, shift), want) in cases {
-            assert_eq!(route_wheel(dx, dy, shift), want, "dx {dx} dy {dy} shift {shift}");
+            assert_eq!(
+                route_wheel(dx, dy, shift),
+                want,
+                "dx {dx} dy {dy} shift {shift}"
+            );
         }
     }
 

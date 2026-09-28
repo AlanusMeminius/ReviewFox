@@ -37,10 +37,7 @@ fn format_comment(comparison: &Comparison, comment: &crate::domain::DraftComment
             format!("{path}\n\n{}\n", comment.body)
         }
         Anchor::Line {
-            path,
-            side,
-            span,
-            ..
+            path, side, span, ..
         } => {
             let end = span.start + span.count.max(1) - 1;
             let header = if span.count <= 1 {
@@ -83,10 +80,7 @@ fn context_lines(
     let to = (end + CONTEXT_RADIUS).min(lines.len() as u32);
     let mut out = Vec::new();
     for ln in from..=to {
-        let text = lines
-            .get((ln - 1) as usize)
-            .cloned()
-            .unwrap_or_default();
+        let text = lines.get((ln - 1) as usize).cloned().unwrap_or_default();
         out.push((ln, text));
     }
     Some(out)
@@ -142,10 +136,7 @@ mod tests {
         // through export when we only have File — covered above.
         // Direct context marking:
         let mut s = String::new();
-        let span = LineSpan {
-            start: 2,
-            count: 1,
-        };
+        let span = LineSpan { start: 2, count: 1 };
         let end = span.start;
         for (ln, text) in [(1u32, "a"), (2, "b"), (3, "c")] {
             let mark = if ln >= span.start && ln <= end {

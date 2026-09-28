@@ -4,7 +4,9 @@
 //! maximize / close have to be drawn and tagged with [`WindowControlArea`] for the OS to act on.
 
 #[cfg(target_os = "windows")]
-use gpui::{Div, InteractiveElement, ParentElement, Styled, Window, WindowControlArea, div, px, rgb};
+use gpui::{
+    Div, InteractiveElement, ParentElement, Styled, Window, WindowControlArea, div, px, rgb,
+};
 #[cfg(not(target_os = "windows"))]
 use gpui::{Div, Window};
 

@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, App, Context, ElementId, Entity, FocusHandle, Focusable, Global, KeyBinding,
-    Render, ScrollHandle, Subscription, Window, WindowControlArea, WindowDecorations,
-    WindowHandle, actions, div, point, prelude::*, px, size,
+    Render, ScrollHandle, Subscription, Window, WindowControlArea, WindowDecorations, WindowHandle,
+    actions, div, point, prelude::*, px, size,
 };
 
 use std::cell::RefCell;
@@ -138,7 +138,9 @@ impl SettingsView {
                 .with_style(TextFieldStyle::Settings)
                 .tab_index(TAB_URL)
         });
-        base_url.update(cx, |field, cx| field.set_content(saved_base_url.clone(), cx));
+        base_url.update(cx, |field, cx| {
+            field.set_content(saved_base_url.clone(), cx)
+        });
 
         let pat = cx.new(|cx| {
             TextField::new(token_row::PLACEHOLDER, true, cx)
@@ -149,10 +151,15 @@ impl SettingsView {
 
         let base_url_focus = base_url.read(cx).focus_handle(cx);
         let subscriptions = vec![
-            cx.subscribe(&base_url, |view, _, event: &TextFieldEvent, cx| match event {
-                TextFieldEvent::Confirm => view.commit_base_url(cx),
+            cx.subscribe(
+                &base_url,
+                |view, _, event: &TextFieldEvent, cx| match event {
+                    TextFieldEvent::Confirm => view.commit_base_url(cx),
+                },
+            ),
+            cx.on_blur(&base_url_focus, window, |view, _, cx| {
+                view.commit_base_url(cx)
             }),
-            cx.on_blur(&base_url_focus, window, |view, _, cx| view.commit_base_url(cx)),
             // The token commits on Enter only, never on blur.
             cx.subscribe(&pat, |view, _, event: &TextFieldEvent, cx| match event {
                 TextFieldEvent::Confirm => view.commit_token(cx),
@@ -505,9 +512,13 @@ impl SettingsView {
         let mut tab_index = TAB_TOKEN;
         if can_retry {
             card = card.action(
-                card_button("settings-gitlab-token-retry", token_row::RETRY, "refresh.svg")
-                    .tab_index(tab_index)
-                    .on_click(cx.listener(|view, _, _, cx| view.refresh_connection(cx))),
+                card_button(
+                    "settings-gitlab-token-retry",
+                    token_row::RETRY,
+                    "refresh.svg",
+                )
+                .tab_index(tab_index)
+                .on_click(cx.listener(|view, _, _, cx| view.refresh_connection(cx))),
             );
             tab_index += 1;
         }
@@ -664,14 +675,13 @@ pub fn open_or_focus_settings(target: Option<SettingsTarget>, cx: &mut App) {
         (state.handle, state.gitlab_connection.clone())
     };
     if let Some(h) = handle
-        && h
-            .update(cx, |view, window, cx| {
-                window.activate_window();
-                if let Some(target) = target {
-                    view.open_target(target, window, cx);
-                }
-            })
-            .is_ok()
+        && h.update(cx, |view, window, cx| {
+            window.activate_window();
+            if let Some(target) = target {
+                view.open_target(target, window, cx);
+            }
+        })
+        .is_ok()
     {
         return;
     }

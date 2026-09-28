@@ -321,10 +321,7 @@ mod tests {
         };
         pin_in(&mut store, Path::new("/a"));
         pin_in(&mut store, Path::new("/c"));
-        assert_eq!(
-            store.pinned,
-            vec![PathBuf::from("/c"), PathBuf::from("/a")]
-        );
+        assert_eq!(store.pinned, vec![PathBuf::from("/c"), PathBuf::from("/a")]);
         let pins = pinned_entries(&store);
         assert_eq!(pins[0].path, PathBuf::from("/c"));
         assert_eq!(pins[1].path, PathBuf::from("/a"));
@@ -341,10 +338,7 @@ mod tests {
             workspaces: vec![entry("/a", "main"), entry("/b", "dev")],
         };
         pin_in(&mut store, Path::new("/a"));
-        assert_eq!(
-            store.pinned,
-            vec![PathBuf::from("/a"), PathBuf::from("/b")]
-        );
+        assert_eq!(store.pinned, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
     }
 
     #[test]

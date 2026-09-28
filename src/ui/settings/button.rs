@@ -1,6 +1,6 @@
 use gpui::{
-    App, ClickEvent, ElementId, Hsla, Pixels, SharedString, Window, div,
-    prelude::*, px, svg, transparent_black,
+    App, ClickEvent, ElementId, Hsla, Pixels, SharedString, Window, div, prelude::*, px, svg,
+    transparent_black,
 };
 
 use crate::ui::theme;

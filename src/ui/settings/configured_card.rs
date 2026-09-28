@@ -66,7 +66,13 @@ impl RenderOnce for ConfiguredCard {
                     .text_size(px(14.))
                     .text_color(theme::text())
                     .when_some(self.icon, |left, (icon, color)| {
-                        left.child(svg().size(theme::ICON_SIZE).flex_none().path(icon).text_color(color))
+                        left.child(
+                            svg()
+                                .size(theme::ICON_SIZE)
+                                .flex_none()
+                                .path(icon)
+                                .text_color(color),
+                        )
                     })
                     .child(self.label),
             )

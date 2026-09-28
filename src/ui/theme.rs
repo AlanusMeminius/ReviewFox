@@ -1,8 +1,8 @@
 //! Visual tokens aligned with BeadsViewer + accepted prototype A.
 
-use gpui::{BoxShadow, Hsla, Pixels, Rgba, hsla, point, px, rgb};
 #[cfg(target_os = "windows")]
 use gpui::rgba;
+use gpui::{BoxShadow, Hsla, Pixels, Rgba, hsla, point, px, rgb};
 
 pub const SIDEBAR_WIDTH: Pixels = gpui::px(188.);
 pub const FILES_WIDTH: Pixels = gpui::px(280.);
@@ -241,8 +241,5 @@ pub fn error_border() -> Rgba {
 /// Settings nav row under the pointer: a half-step toward the white
 /// [`capsule`] that marks the selected row, so hover never reads as selection.
 pub fn settings_nav_hover() -> Rgba {
-    Rgba {
-        a: 0.55,
-        ..white()
-    }
+    Rgba { a: 0.55, ..white() }
 }

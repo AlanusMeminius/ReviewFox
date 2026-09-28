@@ -65,7 +65,11 @@ pub(crate) struct ThumbGeom {
 
 impl ThumbGeom {
     /// Pure geometry seam: viewport + max scroll offset + current offset → thumb.
-    pub(crate) fn from_metrics(viewport: Pixels, max_offset: Pixels, offset_y: Pixels) -> Option<Self> {
+    pub(crate) fn from_metrics(
+        viewport: Pixels,
+        max_offset: Pixels,
+        offset_y: Pixels,
+    ) -> Option<Self> {
         let track_height = (viewport - px(PAD * 2.)).max(px(0.));
         if max_offset <= px(0.) || track_height <= px(0.) {
             return None;
@@ -120,11 +124,7 @@ pub fn sync_lockstep(handles: &[&ScrollHandle], last_y: &mut Option<Pixels>) {
     let ys: Vec<_> = handles.iter().map(|h| h.offset().y).collect();
     let driver_y = match *last_y {
         // First observation: never prefer "handle[0] at 0" over a pane that already moved.
-        None => ys
-            .iter()
-            .copied()
-            .find(|&y| y != px(0.))
-            .unwrap_or(ys[0]),
+        None => ys.iter().copied().find(|&y| y != px(0.)).unwrap_or(ys[0]),
         Some(last) => match ys.iter().copied().find(|&y| y != last) {
             Some(y) => y,
             None => return,
