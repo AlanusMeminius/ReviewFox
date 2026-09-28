@@ -1,8 +1,9 @@
 //! Settings: GitLab base URL and Appearance fonts in `settings.json`, PAT in
-//! OS keychain only.
+//! OS keychain only (read once per process; see [`load_pat`]).
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 pub const DEFAULT_BASE_URL: &str = "https://gitlab.com";
 const FILENAME: &str = "settings.json";
@@ -96,19 +97,37 @@ pub fn save_file(file: &SettingsFile) -> Result<(), SaveError> {
     save_file_at(&path, file)
 }
 
+// ponytail: one keychain read per process — unsigned Mac builds still ACL-prompt on that first get.
+/// `None` = not fetched yet; `Some(None)` = known empty; `Some(Some(_))` = value.
+static PAT_CACHE: Mutex<Option<Option<String>>> = Mutex::new(None);
+
+fn pat_cache() -> std::sync::MutexGuard<'static, Option<Option<String>>> {
+    PAT_CACHE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub fn load_pat() -> Option<String> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .ok()?
-        .get_password()
+    if let Some(cached) = pat_cache().as_ref() {
+        return cached.clone();
+    }
+    let pat = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
         .ok()
+        .and_then(|e| e.get_password().ok());
+    *pat_cache() = Some(pat.clone());
+    pat
 }
 
 pub fn save_pat(pat: &str) -> Result<(), keyring::Error> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)?.set_password(pat)
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)?.set_password(pat)?;
+    *pat_cache() = Some(Some(pat.to_string()));
+    Ok(())
 }
 
 pub fn clear_pat() -> Result<(), keyring::Error> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)?.delete_credential()
+    let result = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)?.delete_credential();
+    if result.is_ok() || matches!(&result, Err(keyring::Error::NoEntry)) {
+        *pat_cache() = Some(None);
+    }
+    result
 }
 
 pub fn store_path_for_tests(root: &std::path::Path) -> PathBuf {
