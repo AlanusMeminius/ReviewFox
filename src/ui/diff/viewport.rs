@@ -499,7 +499,6 @@ pub fn s_for_anchor(
 
 /// Rewrap / width / font / toggle: hold the logical line's first visual row on
 /// the anchor (§3.1.1), even when capture was on a continuation row.
-#[allow(dead_code)] // 05 toggle / resize
 pub fn s_for_rewrap(
     layout: &Layout,
     cap: AnchorCap,
@@ -513,6 +512,25 @@ pub fn s_for_rewrap(
         s_for_content(layout, cap.side, row as f32 * row_h, row_h, 0.),
         view_h,
         row_h,
+    ))
+}
+
+/// Match jump: land the visual row that contains `byte` on the anchor (§3.1.1).
+pub fn s_for_match_byte(
+    layout: &Layout,
+    side: Side,
+    ln: u32,
+    byte: usize,
+    row_h: f32,
+    current_s: f32,
+) -> Option<f32> {
+    let row = layout.row_of_match_byte(side, ln, byte)?;
+    Some(s_for_content(
+        layout,
+        side,
+        row as f32 * row_h,
+        row_h,
+        current_s,
     ))
 }
 
@@ -1354,16 +1372,29 @@ mod tests {
 
     #[test]
     fn anchor_keeps_place_across_expand_with_wrap() {
+        let pad = "x".repeat(30);
         let (old, new, ops) = ten_then_insert();
+        let old: String = old
+            .lines()
+            .map(|l| format!("{l}{pad}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new: String = new
+            .lines()
+            .map(|l| format!("{l}{pad}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut fold = FoldState::collapsed();
-        let collapsed = wrap_layout(&old, &new, ops.clone(), 100., Some(&fold));
-        let s = s_for_content(&collapsed, Side::Old, 8.5 * ROW_H, ROW_H, 0.);
+        let collapsed = wrap_layout(&old, &new, ops.clone(), 40., Some(&fold));
+        assert!(collapsed.old.rows() > 12, "lines should wrap");
+        let row = collapsed.old.row_of_line(8).unwrap() as f32;
+        let s = s_for_content(&collapsed, Side::Old, row * ROW_H, ROW_H, 0.);
         let cap = Viewport::new(&collapsed, s, VIEW_H, ROW_H)
             .capture_anchor()
             .expect("anchor");
         let before = view_y(&collapsed, s, Side::Old, 8);
         fold.expand(0);
-        let expanded = wrap_layout(&old, &new, ops, 100., Some(&fold));
+        let expanded = wrap_layout(&old, &new, ops, 40., Some(&fold));
         let s2 = s_for_anchor(&expanded, cap, VIEW_H, ROW_H, s).unwrap();
         assert_eq!(view_y(&expanded, s2, Side::Old, 8), before);
     }

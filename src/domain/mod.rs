@@ -270,6 +270,35 @@ pub struct SearchMatch {
     pub ln: u32,
 }
 
+/// Byte offset of the first case-insensitive match of `query` in `line`, if any.
+pub fn first_match_byte(line: &str, query: &str) -> Option<usize> {
+    let q = query.trim();
+    if q.is_empty() {
+        return None;
+    }
+    let lower = line.to_lowercase();
+    let pos = lower.find(&q.to_lowercase())?;
+    Some(pos)
+}
+
+/// Every non-overlapping case-insensitive match of `query` in `line` as byte ranges.
+pub fn match_byte_ranges(line: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let lower = line.to_lowercase();
+    let needle = q.to_lowercase();
+    let mut out = Vec::new();
+    let mut start = 0;
+    while let Some(rel) = lower[start..].find(&needle) {
+        let at = start + rel;
+        out.push(at..at + needle.len());
+        start = at + needle.len().max(1);
+    }
+    out
+}
+
 /// Case-insensitive substring search over old and/or new text.
 /// Empty / whitespace-only query yields no matches.
 pub fn search_file(

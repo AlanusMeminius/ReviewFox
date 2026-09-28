@@ -10,20 +10,21 @@ use gpui::{
     font, px,
 };
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use super::element::{
-    self, BarState, Decorations, FrameInput, Geom, ShapeCache, build_frame,
-    insert_scrollbar_hitboxes,
-    line_number_digits, ln_col_width, text_extent, thumb_for, top_at,
+    self, BarState, Decorations, FrameInput, Geom, ShapeCache, build_frame, code_wrap_width_px,
+    insert_scrollbar_hitboxes, line_number_digits, ln_col_width, text_extent, thumb_for, top_at,
+    wrap_plan_for_panes,
 };
 use super::layout::{HunkLand, Layout, Row, WrapPlan};
 use super::trace;
 use super::viewport::{self, Viewport};
 use crate::domain::{
-    Alignment, AlignmentOp, Anchor, DiffFontSize, FoldState, Side, hunk_jump_target,
-    match_jump_plan,
+    Alignment, AlignmentOp, Anchor, DiffFontSize, FoldState, Side, first_match_byte,
+    hunk_jump_target, match_jump_plan,
 };
 use crate::git::FileDiff;
 use crate::syntax::{self, Span};
@@ -75,6 +76,14 @@ pub struct DualPane {
     x_offsets: [f32; 2],
     /// §3.1.2: one shared offset when true.
     sync_horizontal: bool,
+    /// §3.1.1: soft wrap in the code columns.
+    soft_wrap: bool,
+    /// In-file search query for row highlights (mirrors DiffView).
+    search_query: SharedString,
+    /// Shaped non-ASCII advances per `(char, font px)`.
+    char_widths: HashMap<(char, u32), f32>,
+    /// Last prepaint pane widths; stable width triggers rewrap (§6 deferral).
+    prev_frame_pane_w: [f32; 2],
     /// Which side last received horizontal input; used when sync is turned on.
     last_x_side: Option<Side>,
     /// Horizontal travel per side from the last prepaint (`0..=max_x`).
@@ -132,6 +141,10 @@ impl DualPane {
             scroll_s: 0.,
             x_offsets: [0.; 2],
             sync_horizontal: true,
+            soft_wrap: false,
+            search_query: SharedString::default(),
+            char_widths: HashMap::new(),
+            prev_frame_pane_w: [0.; 2],
             last_x_side: None,
             max_x: [0.; 2],
             widest_seen: [0.; 2],
@@ -166,7 +179,14 @@ impl DualPane {
             self.code_font = family;
             self.mono_advance = None;
             self.ln_advance = None;
-            self.invalidate_shapes();
+            self.char_widths.clear();
+            if self.soft_wrap {
+                let cap = self.capture_anchor();
+                self.rebuild_layout(None);
+                self.restore_after_rewrap(cap);
+            } else {
+                self.invalidate_shapes();
+            }
             cx.notify();
         }
     }
@@ -252,7 +272,7 @@ impl DualPane {
         self.reset_scroll(cx);
         self.x_offsets = [0.; 2];
         self.last_x_side = None;
-        self.rebuild_layout();
+        self.rebuild_layout(None);
         self.reveal_bars(cx);
         cx.notify();
     }
@@ -311,23 +331,49 @@ impl DualPane {
     }
 
     /// Rebuild the Layout from the file, `fold` and the comment index.
-    fn rebuild_layout(&mut self) {
+    fn rebuild_layout(&mut self, window: Option<&mut Window>) {
         self.layout = None;
         self.invalidate_shapes();
         let Some(file) = self.file.as_ref() else {
             return;
         };
+        let old_text = file.old_text.clone();
+        let new_text = file.new_text.clone();
+        let alignment = file.alignment.clone();
         let t = trace::start();
-        let wrap: Option<(&WrapPlan, &mut dyn FnMut(char) -> f32)> = None;
+        let plan = wrap_plan_for_panes(self.pane_w[0], self.pane_w[1]);
+        let font_px = self.font_size.px();
+        let mono = self
+            .mono_advance
+            .map(|(_, a)| a)
+            .unwrap_or(font_px as f32 * 0.6);
+        let soft = self.soft_wrap;
+        let pane_w = self.pane_w;
+        let mut width_ctx = WrapCharWidth {
+            mono,
+            font_px,
+            family: &self.code_font,
+            cache: &mut self.char_widths,
+            window,
+        };
+        let mut char_width = |c: char| width_ctx.width(c);
+        let wrap = if soft && (pane_w[0] > 0. || pane_w[1] > 0.) {
+            Some((
+                &plan as &WrapPlan,
+                &mut char_width as &mut dyn FnMut(char) -> f32,
+            ))
+        } else {
+            None
+        };
         let mut layout = Layout::build(
-            file.old_text.clone(),
-            file.new_text.clone(),
-            &file.alignment,
+            old_text,
+            new_text,
+            &alignment,
             Some(&self.fold),
             wrap,
         );
         layout.set_comments(self.comments.iter());
-        debug_assert!(layout.wrap.is_none());
+        debug_assert!(!soft || pane_w[0] <= 0. || layout.wrap.is_some());
         if t.is_some() {
             trace::layout(
                 trace::since(t),
@@ -337,6 +383,70 @@ impl DualPane {
             );
         }
         self.layout = Some(layout);
+    }
+
+    fn restore_after_rewrap(&mut self, cap: Option<viewport::AnchorCap>) {
+        let (Some(cap), Some(layout)) = (cap, self.layout.as_ref()) else {
+            return;
+        };
+        if let Some(s) = viewport::s_for_rewrap(
+            layout,
+            cap,
+            self.view_h,
+            self.row_h(),
+            self.scroll_s,
+        ) {
+            self.scroll_s = s;
+        }
+    }
+
+    fn maybe_rewrap_for_width(&mut self, pane_w: [f32; 2], window: &mut Window, cx: &mut Context<Self>) {
+        if !self.soft_wrap {
+            return;
+        }
+        let stable =
+            pane_w[0] == self.prev_frame_pane_w[0] && pane_w[1] == self.prev_frame_pane_w[1];
+        self.prev_frame_pane_w = pane_w;
+        if !stable {
+            return;
+        }
+        let needs = self.layout.as_ref().is_none_or(|layout| {
+            layout.wrap.as_ref().is_none_or(|applied| {
+                applied.plan.old.width_px != code_wrap_width_px(pane_w[0])
+                    || applied.plan.new.width_px != code_wrap_width_px(pane_w[1])
+            })
+        });
+        if !needs {
+            return;
+        }
+        let cap = self.capture_anchor();
+        self.pane_w = pane_w;
+        self.rebuild_layout(Some(window));
+        self.restore_after_rewrap(cap);
+        cx.notify();
+    }
+
+    pub fn set_soft_wrap(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.soft_wrap {
+            return;
+        }
+        let cap = self.capture_anchor();
+        self.soft_wrap = on;
+        if on {
+            self.x_offsets = [0.; 2];
+        }
+        self.rebuild_layout(None);
+        self.restore_after_rewrap(cap);
+        cx.notify();
+    }
+
+    pub fn set_search_query(&mut self, query: SharedString, cx: &mut Context<Self>) {
+        if query == self.search_query {
+            return;
+        }
+        self.search_query = query;
+        self.invalidate_shapes();
+        cx.notify();
     }
 
     /// Back to the file start. The first measured frame clamps `scroll_s` up
@@ -352,7 +462,7 @@ impl DualPane {
     fn with_anchor(&mut self, mutate: impl FnOnce(&mut Self)) {
         let cap = self.capture_anchor();
         mutate(self);
-        self.rebuild_layout();
+        self.rebuild_layout(None);
         self.restore_anchor(cap);
         self.hunk_s = None;
     }
@@ -461,13 +571,28 @@ impl DualPane {
         let plan = match_jump_plan(&file.alignment, &self.fold, side, ln);
         if let Some(id) = plan.expand {
             self.fold.expand(id);
-            self.rebuild_layout();
+            self.rebuild_layout(None);
         }
         let Some(layout) = self.layout.as_ref() else {
             return;
         };
         let row_h = self.row_h();
-        let s = viewport::s_for_target(layout, plan.target, row_h, self.scroll_s)
+        let line_text = layout.side(plan.target.side).line_text(plan.target.ln);
+        let s = line_text
+            .and_then(|text| first_match_byte(text, &self.search_query))
+            .and_then(|byte| {
+                viewport::s_for_match_byte(
+                    layout,
+                    plan.target.side,
+                    plan.target.ln,
+                    byte,
+                    row_h,
+                    self.scroll_s,
+                )
+            })
+            .or_else(|| {
+                viewport::s_for_target(layout, plan.target, row_h, self.scroll_s)
+            })
             .unwrap_or(self.scroll_s);
         self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
         self.hunk_s = Some(s / row_h);
@@ -502,7 +627,14 @@ impl DualPane {
                 *x *= next_px / prev_px;
             }
         }
-        self.invalidate_shapes();
+        if self.soft_wrap {
+            self.char_widths.clear();
+            let cap = self.capture_anchor();
+            self.rebuild_layout(None);
+            self.restore_after_rewrap(cap);
+        } else {
+            self.invalidate_shapes();
+        }
         cx.notify();
     }
 
@@ -550,6 +682,9 @@ impl DualPane {
     /// Horizontal wheel / trackpad over `side`'s code pane. When synced, both
     /// sides move; otherwise only that side. `scroll_s` is unchanged.
     pub(super) fn scroll_x_by(&mut self, side: Side, dx: f32, cx: &mut Context<Self>) {
+        if self.soft_wrap {
+            return;
+        }
         self.last_x_side = Some(side);
         let x = if self.sync_horizontal {
             viewport::clamp_x_synced(self.x_offsets[0] + dx, self.max_x)
@@ -834,16 +969,20 @@ impl DualPane {
         let font_px = self.font_size.px() as f32;
         let advance = self.mono_advance(font_px, window);
         let ln_advance = self.ln_advance(window);
+        let ln_w = ln_col_width(
+            line_number_digits(self.layout.as_ref()?),
+            ln_advance,
+        );
+        let geom = Geom::new(bounds, ln_w, self.scale);
+        for side in [Side::Old, Side::New] {
+            self.pane_w[side_ix(side)] = f32::from(geom.pane(side).size.width);
+        }
+        self.maybe_rewrap_for_width(self.pane_w, window, cx);
         let layout = self.layout.as_ref()?;
         let t_vp = trace::start();
         let vp = Viewport::new(layout, self.scroll_s, self.view_h, row_h).snapped(self.scale);
         let viewport_took = trace::since(t_vp);
         let s = vp.s();
-        let ln_w = ln_col_width(line_number_digits(layout), ln_advance);
-        let geom = Geom::new(bounds, ln_w, self.scale);
-        for side in [Side::Old, Side::New] {
-            self.pane_w[side_ix(side)] = f32::from(geom.pane(side).size.width);
-        }
         let mut frame = build_frame(
             FrameInput {
                 layout,
@@ -856,6 +995,8 @@ impl DualPane {
                 scale: self.scale,
                 decorations: Decorations {
                     drafting: self.drafting,
+                    search_query: (!self.search_query.is_empty())
+                        .then(|| Arc::from(self.search_query.as_str())),
                 },
                 bars: &self.bars,
             },
@@ -866,21 +1007,26 @@ impl DualPane {
         // estimated as chars × mono advance (no shaping off screen), raised
         // by any wider line actually shaped. Re-clamp here so resize, fold
         // and font changes pull an offset back inside its travel.
-        for side in [Side::Old, Side::New] {
-            let ix = side_ix(side);
-            self.widest_seen[ix] = self.widest_seen[ix].max(frame.widest(side));
-            let longest =
-                (layout.side(side).max_chars() as f32 * advance).max(self.widest_seen[ix]);
-            let pane_w = f32::from(geom.pane(side).size.width);
-            self.max_x[ix] = viewport::max_x(text_extent(longest), pane_w);
-        }
-        if self.sync_horizontal {
-            let x = viewport::clamp_x_synced(self.x_offsets[0], self.max_x);
-            self.x_offsets = [x, x];
+        if self.soft_wrap {
+            self.max_x = [0.; 2];
+            self.x_offsets = [0.; 2];
         } else {
             for side in [Side::Old, Side::New] {
                 let ix = side_ix(side);
-                self.x_offsets[ix] = viewport::clamp_x(self.x_offsets[ix], self.max_x[ix]);
+                self.widest_seen[ix] = self.widest_seen[ix].max(frame.widest(side));
+                let longest =
+                    (layout.side(side).max_chars() as f32 * advance).max(self.widest_seen[ix]);
+                let pane_w = f32::from(geom.pane(side).size.width);
+                self.max_x[ix] = viewport::max_x(text_extent(longest), pane_w);
+            }
+            if self.sync_horizontal {
+                let x = viewport::clamp_x_synced(self.x_offsets[0], self.max_x);
+                self.x_offsets = [x, x];
+            } else {
+                for side in [Side::Old, Side::New] {
+                    let ix = side_ix(side);
+                    self.x_offsets[ix] = viewport::clamp_x(self.x_offsets[ix], self.max_x[ix]);
+                }
             }
         }
         for side in [Side::Old, Side::New] {
@@ -889,7 +1035,11 @@ impl DualPane {
         }
         let v_tracks = [Side::Old, Side::New]
             .map(|side| thumb_for(self.view_h, vp.max_top(side), vp.top(side)).is_some());
-        let h_tracks = [Side::Old, Side::New].map(|side| self.max_x[side_ix(side)] > 0.);
+        let h_tracks = if self.soft_wrap {
+            [false, false]
+        } else {
+            [Side::Old, Side::New].map(|side| self.max_x[side_ix(side)] > 0.)
+        };
         let (tracks, h_track_boxes) =
             insert_scrollbar_hitboxes(&geom, v_tracks, h_tracks, window);
         frame.tracks = tracks;
@@ -914,6 +1064,41 @@ impl DualPane {
         frame.stats.prepaint = trace::since(t_prepaint);
         Some(frame)
     }
+}
+
+struct WrapCharWidth<'a, 'w> {
+    mono: f32,
+    font_px: u32,
+    family: &'a SharedString,
+    cache: &'a mut HashMap<(char, u32), f32>,
+    window: Option<&'w mut Window>,
+}
+
+impl WrapCharWidth<'_, '_> {
+    fn width(&mut self, c: char) -> f32 {
+        if c.is_ascii() {
+            return self.mono;
+        }
+        let key = (c, self.font_px);
+        if let Some(&w) = self.cache.get(&key) {
+            return w;
+        }
+        if let Some(window) = self.window.as_deref_mut() {
+            if let Some(w) = char_advance(self.family, self.font_px as f32, c, window) {
+                self.cache.insert(key, w);
+                return w;
+            }
+        }
+        self.mono * 2.
+    }
+}
+
+fn char_advance(family: &SharedString, font_px: f32, c: char, window: &mut Window) -> Option<f32> {
+    let text = window.text_system();
+    let id = text.resolve_font(&font(family.clone()));
+    text.advance(id, px(font_px), c)
+        .ok()
+        .map(|s| f32::from(s.width))
 }
 
 /// Advance of `'0'` in `family` at `font_px`.

@@ -31,7 +31,6 @@ pub struct AppliedWrap {
 }
 
 impl AppliedWrap {
-    #[allow(dead_code)] // 05 shaped rows
     pub fn breaks(&self, side: crate::domain::Side, ln: u32) -> Option<&WrapBreaks> {
         match side {
             crate::domain::Side::Old => self.old_breaks.get(&ln),

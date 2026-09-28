@@ -440,6 +440,37 @@ fn wrap_display_line_inner(
     }
 }
 
+/// Display-byte ranges for each visual row of a wrapped line.
+pub fn display_row_segments(display_len: usize, breaks: &[usize]) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::with_capacity(1 + breaks.len());
+    let mut start = 0usize;
+    for &b in breaks {
+        out.push(start..b);
+        start = b;
+    }
+    out.push(start..display_len);
+    out
+}
+
+/// Clip original-line byte runs into one display segment; output is relative to `segment.start`.
+pub fn clip_runs_to_display_segment(
+    runs: &[(usize, usize)],
+    tabs: &super::tabs::TabExpansion,
+    segment: std::ops::Range<usize>,
+) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for &(a, b) in runs {
+        let d0 = tabs.display_offset(a);
+        let d1 = tabs.display_offset(b);
+        let start = d0.max(segment.start);
+        let end = d1.min(segment.end);
+        if end > start {
+            out.push((start - segment.start, end - segment.start));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,14 +496,30 @@ mod tests {
     }
 
     fn row_segments<'a>(text: &'a str, breaks: &[usize]) -> Vec<&'a str> {
-        let mut segs = Vec::new();
-        let mut start = 0;
-        for &b in breaks {
-            segs.push(&text[start..b]);
-            start = b;
-        }
-        segs.push(&text[start..]);
-        segs
+        display_row_segments(text.len(), breaks)
+            .into_iter()
+            .map(|r| &text[r])
+            .collect()
+    }
+
+    #[test]
+    fn clip_runs_to_display_segment_respects_tabs() {
+        use crate::ui::diff::tabs::TabExpansion;
+        let line = "\tfoo\tbar";
+        let tabs = TabExpansion::new(line);
+        let segs = display_row_segments(tabs.text.len(), &[]);
+        let runs = clip_runs_to_display_segment(&[(1, 4), (4, 8)], &tabs, segs[0].clone());
+        assert_eq!(runs, vec![(4, 7), (7, 11)]);
+    }
+
+    #[test]
+    fn clip_runs_to_display_segment_splits_across_wrap_row() {
+        let text = "aaaa bbbb";
+        let breaks = vec![5];
+        let segs = display_row_segments(text.len(), &breaks);
+        let tabs = TabExpansion::new(text);
+        let runs = clip_runs_to_display_segment(&[(0, 9)], &tabs, segs[1].clone());
+        assert_eq!(runs, vec![(0, 4)]);
     }
 
     fn assert_width_invariant(

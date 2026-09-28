@@ -57,15 +57,22 @@ impl LineRow {
     }
 
     /// Line number column: first visual row of a logical line only (§3.1.1).
-    #[allow(dead_code)] // 05 paint
     pub fn shows_line_number(&self) -> bool {
         self.part == LinePart::First
     }
 
     /// Equal padding beside a longer wrapped partner: blank, no hatch (§3.1.1).
-    #[allow(dead_code)] // 05 paint
     pub fn is_equal_padding(&self) -> bool {
         self.part == LinePart::EqualPad
+    }
+
+    /// Which wrapped segment of the logical line this row shows (0 = first).
+    pub fn segment_index(&self, side: &SideLayout) -> usize {
+        side.lines
+            .iter()
+            .filter(|l| l.ln == self.ln && l.row <= self.row && l.part != LinePart::EqualPad)
+            .count()
+            .saturating_sub(1)
     }
 }
 
@@ -271,6 +278,15 @@ impl SideLayout {
         &self.text[line.bytes.clone()]
     }
 
+    /// Full logical line text (first visual row's bytes).
+    pub fn line_text(&self, ln: u32) -> Option<&str> {
+        let line = self
+            .lines
+            .iter()
+            .find(|l| l.ln == ln && l.part == LinePart::First)?;
+        Some(self.text(line))
+    }
+
     /// Display columns of the longest shown line (folded-away lines
     /// excluded; tabs expanded to their stops, see `tabs`).
     /// One pass over the side's text the first time it is asked; with a mono
@@ -445,7 +461,6 @@ impl Layout {
     }
 
     /// Visual row of a match byte in `ln` (§3.5); without wrap, the line's first row.
-    #[allow(dead_code)] // 05 match jump
     pub fn row_of_match_byte(&self, side: Side, ln: u32, byte: usize) -> Option<u32> {
         let first = self.side(side).row_of_line(ln)?;
         let Some(applied) = self.wrap.as_ref() else {
@@ -1645,13 +1660,30 @@ ab	c
 
     #[test]
     fn folded_file_with_wrap_keeps_omits_and_seams() {
+        let pad = "x".repeat(30);
         let (old, new, ops) = ten_then_insert();
+        let old: String = old
+            .lines()
+            .map(|l| format!("{l}{pad}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new: String = new
+            .lines()
+            .map(|l| format!("{l}{pad}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let fold = FoldState::collapsed();
         let reference = build(&old, &new, ops.clone(), Some(&fold));
-        let folded = wrap_layout(&old, &new, ops, 100., Some(&fold));
-        assert_eq!(folded.old.omits(), reference.old.omits());
-        assert_eq!(folded.new.omits(), reference.new.omits());
-        assert_eq!(folded.old.seams(), reference.old.seams());
-        assert_eq!(folded.old.rows(), reference.old.rows());
+        let folded = wrap_layout(&old, &new, ops, 40., Some(&fold));
+        assert!(
+            folded.old.rows() > reference.old.rows(),
+            "wrap should add visual rows beside fold"
+        );
+        let omit_key = |o: &OmitRow| (o.id, o.from, o.to);
+        assert_eq!(
+            folded.old.omits().iter().map(omit_key).collect::<Vec<_>>(),
+            reference.old.omits().iter().map(omit_key).collect::<Vec<_>>()
+        );
+        assert_eq!(folded.old.seams().len(), reference.old.seams().len());
     }
 }
