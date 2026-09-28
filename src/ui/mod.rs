@@ -71,8 +71,6 @@ const ICON_ASSETS: &[(&str, &[u8])] = icon_assets![
     "refresh.svg",
     "chevron_right.svg",
     "chevron_down.svg",
-    "arrow_up.svg",
-    "arrow_down.svg",
     "unfold_vertical.svg",
     "fold_vertical.svg",
     "pilcrow.svg",
@@ -86,6 +84,9 @@ const ICON_ASSETS: &[(&str, &[u8])] = icon_assets![
     "square_plus.svg",
     "diff.svg",
     "chevrons_up_down.svg",
+    "chevron_left.svg",
+    "chevrons_left.svg",
+    "chevrons_right.svg",
 ];
 
 impl AssetSource for Assets {

@@ -82,6 +82,17 @@ pub fn flatten(paths: &[ChangedPath], collapsed: &HashSet<String>) -> Vec<TreeRo
     out
 }
 
+/// File paths in the order the fully expanded tree lists them.
+pub fn file_order(paths: &[ChangedPath]) -> Vec<String> {
+    flatten(paths, &HashSet::new())
+        .into_iter()
+        .filter_map(|row| match row {
+            TreeRow::File { path, .. } => Some(path.path),
+            TreeRow::Dir { .. } => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +136,11 @@ mod tests {
             })
             .collect();
         assert_eq!(dirs, ["src", "src/ui"]);
+    }
+
+    #[test]
+    fn file_order_follows_tree_not_input() {
+        let paths = vec![cp("z.rs"), cp("a/y.rs"), cp("a/b/x.rs")];
+        assert_eq!(file_order(&paths), ["a/b/x.rs", "a/y.rs", "z.rs"]);
     }
 }

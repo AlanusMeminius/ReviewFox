@@ -235,6 +235,37 @@ impl DiffView {
         self.with_pane(cx, |pane, cx| pane.jump_hunk(dir, cx));
     }
 
+    /// Selected path's position in tree order, as `(index, total)`.
+    fn file_position(&self) -> (usize, usize) {
+        let Some(snap) = &self.snapshot else {
+            return (0, 0);
+        };
+        let order = file_tree::file_order(&snap.changed_paths);
+        let index = order
+            .iter()
+            .position(|p| *p == snap.selected_path)
+            .unwrap_or(0);
+        (index, order.len())
+    }
+
+    /// Steps to the neighbouring file in tree order; stops at either end.
+    fn jump_file(&mut self, dir: i32, cx: &mut Context<Self>) {
+        let Some(snap) = &self.snapshot else {
+            return;
+        };
+        let order = file_tree::file_order(&snap.changed_paths);
+        let (index, _) = self.file_position();
+        let target = if dir < 0 {
+            index.checked_sub(1)
+        } else {
+            Some(index + 1)
+        };
+        if let Some(path) = target.and_then(|i| order.get(i).cloned()) {
+            self.select_path(path, cx);
+            cx.notify();
+        }
+    }
+
     fn jump_match(&mut self, side: Side, ln: u32, cx: &mut Context<Self>) {
         self.with_pane(cx, |pane, cx| pane.jump_match(side, ln, cx));
     }
@@ -423,6 +454,10 @@ impl DiffView {
         }
         if self.drafting.is_none() {
             match event.keystroke.key.as_str() {
+                "}" => self.jump_file(1, cx),
+                "{" => self.jump_file(-1, cx),
+                "]" if mods.shift => self.jump_file(1, cx),
+                "[" if mods.shift => self.jump_file(-1, cx),
                 "]" => self.jump_hunk(1, cx),
                 "[" => self.jump_hunk(-1, cx),
                 "/" => {
@@ -750,16 +785,7 @@ fn render_titlebar(
                         .window_control_area(WindowControlArea::Drag)
                         .occlude(),
                 )
-                .child(
-                    IconButton::new("prev-hunk", "arrow_up.svg", "Previous Hunk")
-                        .shortcut("[")
-                        .on_click(cx.listener(|this, _, _, cx| this.jump_hunk(-1, cx))),
-                )
-                .child(
-                    IconButton::new("next-hunk", "arrow_down.svg", "Next Hunk")
-                        .shortcut("]")
-                        .on_click(cx.listener(|this, _, _, cx| this.jump_hunk(1, cx))),
-                )
+                .child(render_nav_capsule(view, cx))
                 .child(toolbar_divider())
                 .child(
                     IconButton::new("expand-all", "unfold_vertical.svg", "Expand All").on_click(
@@ -1178,7 +1204,125 @@ fn render_draft_bar(view: &DiffView, mono: SharedString, cx: &App) -> impl IntoE
         .into_any_element()
 }
 
-/// Short rule between toolbar groups: hunk navigation, folding and whitespace,
+/// Inset between the nav capsule's border and its buttons.
+const NAV_INSET: f32 = 2.;
+const NAV_BUTTON_RADIUS: f32 = 5.;
+
+/// `« ‹ File 3/12 · Hunk 2/5 › »`: outer chevrons step files, inner ones hunks.
+/// Sized to `TOGGLE_SIZE` so it sits in the toolbar like any other button.
+fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
+    let (index, total) = view.file_position();
+    let file = if total == 0 {
+        "—".to_string()
+    } else {
+        format!("{}/{total}", index + 1)
+    };
+    let hunk_count = view.pane.read(cx).hunk_count().unwrap_or(0);
+    let hunk = if hunk_count == 0 {
+        "—".to_string()
+    } else {
+        format!("{}/{hunk_count}", view.hunk_index.unwrap_or(0) + 1)
+    };
+    div()
+        .flex_none()
+        .h(theme::TOGGLE_SIZE)
+        .flex()
+        .items_center()
+        .p(px(NAV_INSET))
+        // Concentric with the buttons' hover: button radius + inset + border.
+        .rounded(px(NAV_BUTTON_RADIUS + NAV_INSET + 1.))
+        .border_1()
+        .border_color(theme::line())
+        .bg(theme::white())
+        .child(nav_button(
+            "prev-file",
+            "chevrons_left.svg",
+            "Previous File",
+            "{",
+            index > 0,
+            cx.listener(|this, _, _, cx| this.jump_file(-1, cx)),
+        ))
+        .child(nav_button(
+            "prev-hunk",
+            "chevron_left.svg",
+            "Previous Hunk",
+            "[",
+            true,
+            cx.listener(|this, _, _, cx| this.jump_hunk(-1, cx)),
+        ))
+        .child(
+            div()
+                .flex_none()
+                .h_full()
+                .px_2()
+                // The line box reserves descender room, so figures and caps sit
+                // high against the geometrically centred chevrons (measured ~1.5px).
+                .relative()
+                .top(px(1.5))
+                .flex()
+                .items_center()
+                .gap_1()
+                .ui_text_size(12., cx)
+                .child(div().text_color(theme::faint()).child("File"))
+                .child(div().text_color(theme::text()).child(file))
+                .child(div().text_color(theme::faint()).child("·"))
+                .child(div().text_color(theme::faint()).child("Hunk"))
+                .child(div().text_color(theme::text()).child(hunk)),
+        )
+        .child(nav_button(
+            "next-hunk",
+            "chevron_right.svg",
+            "Next Hunk",
+            "]",
+            true,
+            cx.listener(|this, _, _, cx| this.jump_hunk(1, cx)),
+        ))
+        .child(nav_button(
+            "next-file",
+            "chevrons_right.svg",
+            "Next File",
+            "}",
+            index + 1 < total,
+            cx.listener(|this, _, _, cx| this.jump_file(1, cx)),
+        ))
+}
+
+/// Fills the capsule's height: `TOGGLE_SIZE` less border and inset on both sides.
+fn nav_button(
+    id: &'static str,
+    icon: &'static str,
+    tooltip: &'static str,
+    shortcut: &'static str,
+    enabled: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .h_full()
+        .w(px(24.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(NAV_BUTTON_RADIUS))
+        .tooltip(Tooltip::text(tooltip, Some(shortcut.into())))
+        .when(enabled, |button| {
+            button
+                .cursor_pointer()
+                .hover(|button| button.bg(theme::hover()))
+                .active(|button| button.bg(theme::element_active()))
+                .on_click(on_click)
+        })
+        .child(
+            gpui::svg()
+                .size(theme::ICON_SIZE)
+                .flex_none()
+                .path(icon)
+                .text_color(if enabled { theme::muted() } else { theme::faint() }),
+        )
+}
+
+/// Short rule between toolbar groups: file and hunk navigation, folding and whitespace,
 /// text size, find, export.
 fn toolbar_divider() -> impl IntoElement {
     div().flex_none().w(px(1.)).h(px(14.)).bg(theme::line())
