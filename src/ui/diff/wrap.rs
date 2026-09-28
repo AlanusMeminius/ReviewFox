@@ -144,7 +144,6 @@ fn tail_fit_break(
 fn adjust_char_break_ix(
     text: &str,
     indices: &[(usize, char)],
-    _char_bounds: &[usize],
     ix: usize,
     char_width: &mut dyn FnMut(char) -> f32,
     wrap_width: f32,
@@ -180,7 +179,6 @@ fn adjust_char_break_ix(
 fn legalize_break_ix(
     text: &str,
     indices: &[(usize, char)],
-    char_bounds: &[usize],
     ix: usize,
     char_width: &mut dyn FnMut(char) -> f32,
     wrap_width: f32,
@@ -195,16 +193,60 @@ fn legalize_break_ix(
         return ix;
     };
     if forbids_break_between(prev, cur) {
-        adjust_char_break_ix(text, indices, char_bounds, ix, char_width, wrap_width)
+        adjust_char_break_ix(text, indices, ix, char_width, wrap_width)
     } else {
         ix
     }
 }
 
-#[derive(Clone, Copy)]
-enum WrapFit {
-    Unknown,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WrapFit {
+    /// Run the full breaker (measure total width, then break if needed).
+    Measure,
+    /// Caller already knows the line exceeds `wrap_width`.
     MustWrap,
+    /// Uniform-width ASCII line fits on one row (no breaks).
+    FitsOneRow,
+}
+
+pub(crate) fn classify_uniform_ascii_fit(
+    text: &str,
+    width: f32,
+    cw: &mut dyn FnMut(char) -> f32,
+) -> WrapFit {
+    if !text.is_ascii() {
+        return WrapFit::Measure;
+    }
+    let mut unit = None;
+    let mut w = 0_f32;
+    for c in text.chars() {
+        let cw_c = cw(c);
+        match unit {
+            Some(u) if cw_c != u => return WrapFit::Measure,
+            None => unit = Some(cw_c),
+            _ => {}
+        }
+        w += cw_c;
+        if w > width {
+            return WrapFit::MustWrap;
+        }
+    }
+    WrapFit::FitsOneRow
+}
+
+pub(crate) fn wrap_breaks_for_line(
+    text: &str,
+    width: f32,
+    cw: &mut dyn FnMut(char) -> f32,
+) -> WrapBreaks {
+    match classify_uniform_ascii_fit(text, width, cw) {
+        WrapFit::FitsOneRow => WrapBreaks {
+            breaks: Vec::new(),
+            continuation_indent_px: 0.,
+        },
+        WrapFit::MustWrap => wrap_display_line_must_wrap(text, width, cw),
+        WrapFit::Measure => wrap_display_line_dyn(text, width, cw),
+    }
 }
 
 pub fn wrap_display_line(
@@ -212,7 +254,7 @@ pub fn wrap_display_line(
     wrap_width: f32,
     mut char_width: impl FnMut(char) -> f32,
 ) -> WrapBreaks {
-    wrap_display_line_inner(text, wrap_width, &mut char_width, WrapFit::Unknown)
+    wrap_display_line_inner(text, wrap_width, &mut char_width, WrapFit::Measure)
 }
 
 pub(crate) fn wrap_display_line_dyn(
@@ -220,7 +262,7 @@ pub(crate) fn wrap_display_line_dyn(
     wrap_width: f32,
     cw: &mut dyn FnMut(char) -> f32,
 ) -> WrapBreaks {
-    wrap_display_line_inner(text, wrap_width, cw, WrapFit::Unknown)
+    wrap_display_line_inner(text, wrap_width, cw, WrapFit::Measure)
 }
 
 pub(crate) fn wrap_display_line_must_wrap(
@@ -327,20 +369,12 @@ fn wrap_display_line_inner(
             let break_ix = legalize_break_ix(
                 text,
                 &indices,
-                &char_bounds,
                 if last_candidate_ix > last_wrap_ix {
                     let b = last_candidate_ix;
                     row_width -= last_candidate_width;
                     b
                 } else {
-                    let b = adjust_char_break_ix(
-                        text,
-                        &indices,
-                        &char_bounds,
-                        ix,
-                        char_width,
-                        wrap_width,
-                    );
+                    let b = adjust_char_break_ix(text, &indices, ix, char_width, wrap_width);
                     if b <= last_wrap_ix {
                         break;
                     }
@@ -364,7 +398,6 @@ fn wrap_display_line_inner(
                 let inner = legalize_break_ix(
                     text,
                     &indices,
-                    &char_bounds,
                     tail_fit_break(
                         &width_at,
                         &char_bounds,
@@ -374,14 +407,8 @@ fn wrap_display_line_inner(
                         indent,
                     )
                     .unwrap_or_else(|| {
-                        let forced = adjust_char_break_ix(
-                            text,
-                            &indices,
-                            &char_bounds,
-                            end_ix,
-                            char_width,
-                            wrap_width,
-                        );
+                        let forced =
+                            adjust_char_break_ix(text, &indices, end_ix, char_width, wrap_width);
                         if forced <= last_wrap_ix {
                             next_char_boundary(text, last_wrap_ix)
                         } else {
