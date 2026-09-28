@@ -1288,6 +1288,7 @@ mod tests {
             path: PathBuf::from("/tmp/reviewfox-no-such-repo-xyz"),
             branch: "main".into(),
             mr: None,
+            last_mr: None,
         };
         // drop_path on failure is covered by workspace_store tests; here we only
         // assert the open path errors (and does not panic).

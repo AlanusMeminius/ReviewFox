@@ -272,6 +272,7 @@ impl AppView {
         })
     }
 
+    /// Clears the selected MR Entry label only; last-MR memory is preserved (ADR-0011).
     fn clear_persisted_mr_label(&mut self) {
         if let MainState::Ready(loaded) = &self.state {
             workspace_store::remember_with_mr(
@@ -307,17 +308,18 @@ impl AppView {
                 return;
             }
         }
-        let (branch, pending_mr) = self
+        let (branch, pending_mr, last_mr) = self
             .store
             .workspaces
             .iter()
             .find(|e| e.path == path)
-            .map(|e| (e.branch.clone(), e.mr.clone()))
-            .unwrap_or_else(|| ("HEAD".into(), None));
+            .map(|e| (e.branch.clone(), e.mr.clone(), e.last_mr.clone()))
+            .unwrap_or_else(|| ("HEAD".into(), None, None));
         match BranchBrowser::open_workspace(&WorkspaceEntry {
             path: path.clone(),
             branch,
             mr: pending_mr.clone(),
+            last_mr,
         }) {
             Ok(bb) => {
                 self.state = MainState::Ready(bb);

@@ -9,12 +9,12 @@ A local Git worktree root identified by its canonical absolute path (symlinks re
 _Avoid_: project, clone, repo path (unspecified canonicalization), working copy
 
 **Workspace**:
-The user's current place in the app: which Repository is open and which Entry is selected; not Comparison identity (OIDs). Survives relaunch as a set of Workspaces plus which one is last (persisted only; not a sidebar section) and which are pinned; last is opened on launch.
-_Avoid_: session, last opened (as a domain term), MRU
+The user's current place in the app: which Repository is open and which single Entry is selected; not Comparison identity (OIDs). Survives relaunch as a set of Workspaces plus which one is last (persisted only; not a sidebar section) and which are pinned; last is opened on launch, with Branch Browser as the default selected Entry. May also persist a last MR Entry label for return after the selected Entry is a Branch Browser selection—that memory is not the selected Entry and does not drive Comparison until the user selects an MR Entry again.
+_Avoid_: session, last opened (as a domain term), MRU, concurrent Entries, entry mode
 
 **Entry**:
-How the user arrives at a Comparison inside a Workspace: a Branch Browser selection, or a forge Merge Request (MR) / Pull Request label. An MR Entry may carry read-only remote context—title, description, author, status, source/target branch labels, and forge check state (pipeline / approval)—to help understand the commits; that context is not Comparison identity and is never a publish target. Discussion threads are out of this context for now. MR Entries for a Repository are discovered from the forge (project MR list) and may also be opened by URL/IID; the Comparison OID pair for an MR Entry is the forge-reported diff pair (`diff_refs`), not branch-tip guesswork. Typical use: Branch Entry for reviewing one's own work, MR Entry for reviewing someone else's—capability is not restricted by that story.
-_Avoid_: review mode, session mode, PR/MR as Comparison identity, workflow (as a domain type), published discussion
+How the user arrives at a Comparison inside a Workspace: a Branch Browser selection, or a forge Merge Request (MR) / Pull Request label. Exactly one Entry is selected in a Workspace at a time. An MR Entry may carry read-only remote context—title, description, author, status, source/target branch labels, and forge check state (pipeline / approval)—to help understand the commits; that context is not Comparison identity and is never a publish target. Discussion threads are out of this context for now. MR Entries for a Repository are discovered from the forge (project MR list) and may also be opened by URL/IID; the Comparison OID pair for an MR Entry is the forge-reported diff pair (`diff_refs`), not branch-tip guesswork. Typical use: Branch Entry for reviewing one's own work, MR Entry for reviewing someone else's—capability is not restricted by that story.
+_Avoid_: review mode, session mode, PR/MR as Comparison identity, workflow (as a domain type), published discussion, simultaneous Branch+MR selection
 
 **Pin**:
 A user-pinned Workspace shown in the Pin section and excluded from the Repositories list; not Comparison identity.
