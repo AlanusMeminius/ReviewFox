@@ -89,7 +89,7 @@ impl BarState {
         self.visible || self.hovered[side_ix(side)] || self.drag.is_some_and(|(s, _)| s == side)
     }
 
-    fn h_shown(&self, side: Side) -> bool {
+    pub(super) fn h_shown(&self, side: Side) -> bool {
         self.visible
             || self.h_hovered[side_ix(side)]
             || self.h_drag.is_some_and(|(s, _)| s == side)
@@ -1168,7 +1168,13 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
             {
                 let track = geom.h_track(side);
                 let local = f32::from(event.position.x - track.left());
-                entity.update(cx, |pane, cx| pane.press_h_track(side, local, cx));
+                entity.update(cx, |pane, cx| {
+                    if pane.h_bar_shown(side) {
+                        pane.press_h_track(side, local, cx);
+                    } else {
+                        pane.press_row(side, y);
+                    }
+                });
                 return;
             }
         }

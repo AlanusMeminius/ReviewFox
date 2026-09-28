@@ -1202,4 +1202,19 @@ mod tests {
         assert_eq!(x_at(&geom, -40.), 0.);
         assert_eq!(x_at(&geom, 10_000.), 800.);
     }
+
+    #[test]
+    fn synced_h_thumbs_use_shared_max_for_geometry() {
+        let view_w = 400.;
+        let max_per_side = [200., 600.];
+        let shared = max_x_synced(max_per_side);
+        let x_offset = 300.;
+        let g_short = h_thumb_for(view_w, shared, x_offset).unwrap();
+        let g_long = h_thumb_for(view_w, shared, x_offset).unwrap();
+        assert_eq!(g_short.thumb_left, g_long.thumb_left);
+        let per_side_short = h_thumb_for(view_w, max_per_side[0], x_offset).unwrap();
+        assert_ne!(g_short.thumb_left, per_side_short.thumb_left);
+        let travel = g_short.track_width - g_short.thumb_width;
+        assert!((x_at(&g_short, travel) - shared).abs() < 0.01);
+    }
 }

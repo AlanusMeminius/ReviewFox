@@ -660,9 +660,33 @@ impl DualPane {
         cx.notify();
     }
 
-    fn drag_h_thumb(&mut self, side: Side, thumb_left: f32, pane_w: f32) {
+    /// `max_x` passed to thumb geometry: shared bound when synced, else per side.
+    fn h_thumb_scroll_max(&self, side: Side) -> f32 {
+        if self.sync_horizontal {
+            viewport::max_x_synced(self.max_x)
+        } else {
+            self.max_x[side_ix(side)]
+        }
+    }
+
+    fn h_thumb_geom(&self, side: Side) -> Option<viewport::HThumbGeom> {
         let ix = side_ix(side);
-        let Some(geom) = viewport::h_thumb_for(pane_w, self.max_x[ix], self.x_offsets[ix]) else {
+        if self.max_x[ix] <= 0. {
+            return None;
+        }
+        viewport::h_thumb_for(
+            self.pane_w[ix],
+            self.h_thumb_scroll_max(side),
+            self.x_offsets[ix],
+        )
+    }
+
+    pub(super) fn h_bar_shown(&self, side: Side) -> bool {
+        self.bars.h_shown(side)
+    }
+
+    fn drag_h_thumb(&mut self, side: Side, thumb_left: f32) {
+        let Some(geom) = self.h_thumb_geom(side) else {
             return;
         };
         let x = viewport::x_at(&geom, thumb_left);
@@ -670,22 +694,21 @@ impl DualPane {
         if self.sync_horizontal {
             self.x_offsets = [viewport::clamp_x_synced(x, self.max_x); 2];
         } else {
+            let ix = side_ix(side);
             self.x_offsets[ix] = viewport::clamp_x(x, self.max_x[ix]);
         }
     }
 
     /// Left press in `side`'s horizontal track at track x `x`.
     pub(super) fn press_h_track(&mut self, side: Side, x: f32, cx: &mut Context<Self>) {
-        let ix = side_ix(side);
-        let pane_w = self.pane_w[side_ix(side)];
-        let Some(geom) = viewport::h_thumb_for(pane_w, self.max_x[ix], self.x_offsets[ix]) else {
+        let Some(geom) = self.h_thumb_geom(side) else {
             return;
         };
         let (left, w) = (geom.thumb_left, geom.thumb_width);
         let grab = if x >= left && x <= left + w {
             x - left
         } else {
-            self.drag_h_thumb(side, x - w / 2., pane_w);
+            self.drag_h_thumb(side, x - w / 2.);
             w / 2.
         };
         self.bars.h_drag = Some((side, grab));
@@ -779,7 +802,7 @@ impl DualPane {
         }
         if let Some((side, grab)) = self.bars.h_drag {
             let ix = side_ix(side);
-            self.drag_h_thumb(side, h_track_x[ix] - grab, self.pane_w[ix]);
+            self.drag_h_thumb(side, h_track_x[ix] - grab);
             dirty = true;
         }
         // Hover copy only reaches the shell's chrome; the pane does not redraw.
@@ -862,18 +885,13 @@ impl DualPane {
         }
         let v_tracks = [Side::Old, Side::New]
             .map(|side| thumb_for(self.view_h, vp.max_top(side), vp.top(side)).is_some());
-        let h_tracks = [Side::Old, Side::New].map(|side| {
-            let ix = side_ix(side);
-            viewport::h_thumb_for(self.pane_w[ix], self.max_x[ix], self.x_offsets[ix]).is_some()
-        });
+        let h_tracks = [Side::Old, Side::New].map(|side| self.max_x[side_ix(side)] > 0.);
         let (tracks, h_track_boxes) =
             insert_scrollbar_hitboxes(&geom, v_tracks, h_tracks, window);
         frame.tracks = tracks;
         frame.h_tracks = h_track_boxes;
         for side in [Side::Old, Side::New] {
-            let ix = side_ix(side);
-            if let Some(g) = viewport::h_thumb_for(self.pane_w[ix], self.max_x[ix], self.x_offsets[ix])
-            {
+            if let Some(g) = self.h_thumb_geom(side) {
                 frame.set_h_thumb(side, g, &self.bars);
             }
         }
