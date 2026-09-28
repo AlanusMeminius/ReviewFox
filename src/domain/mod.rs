@@ -276,27 +276,61 @@ pub fn first_match_byte(line: &str, query: &str) -> Option<usize> {
 }
 
 /// Every non-overlapping case-insensitive match of `query` in `line` as byte ranges
-/// into the original line (not a lowercased copy).
+/// on the original UTF-8 (char-boundary aligned).
 pub fn match_byte_ranges(line: &str, query: &str) -> Vec<std::ops::Range<usize>> {
     let q = query.trim();
     if q.is_empty() {
         return Vec::new();
     }
-    let needle = q.to_lowercase();
     let mut out = Vec::new();
     let mut i = 0;
     while i < line.len() {
-        let Some(rel) = line[i..].to_lowercase().find(&needle) else {
-            break;
-        };
-        let start = i + rel;
-        let end = start + q.len().min(line.len().saturating_sub(start));
-        if end > start {
-            out.push(start..end);
+        if let Some(r) = ci_match_range(line, i, q) {
+            out.push(r.clone());
+            i = r.end;
+        } else {
+            i = next_char_index(line, i);
         }
-        i = start + 1;
     }
     out
+}
+
+fn next_char_index(line: &str, byte: usize) -> usize {
+    if byte >= line.len() {
+        return line.len();
+    }
+    let char_start = if line.is_char_boundary(byte) {
+        byte
+    } else {
+        line[..byte]
+            .char_indices()
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(byte)
+    };
+    line[char_start..]
+        .chars()
+        .next()
+        .map(|c| char_start + c.len_utf8())
+        .unwrap_or(line.len())
+}
+
+fn char_eq_ci(a: char, b: char) -> bool {
+    a.to_lowercase().eq(b.to_lowercase())
+}
+
+fn ci_match_range(line: &str, start_byte: usize, needle: &str) -> Option<std::ops::Range<usize>> {
+    let tail = line.get(start_byte..)?;
+    let mut hay = tail.chars();
+    let mut end = start_byte;
+    for n in needle.chars() {
+        let c = hay.next()?;
+        if !char_eq_ci(c, n) {
+            return None;
+        }
+        end += c.len_utf8();
+    }
+    Some(start_byte..end)
 }
 
 /// Case-insensitive substring search over old and/or new text.
@@ -917,6 +951,28 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["new"]
         );
+    }
+
+    #[test]
+    fn match_byte_ranges_cjk_and_multi_hit() {
+        let line = "中文中文x";
+        let hits = match_byte_ranges(line, "中文");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(&line[hits[0].clone()], "中文");
+        assert_eq!(&line[hits[1].clone()], "中文");
+        assert_eq!(first_match_byte("中x", "中"), Some(0));
+    }
+
+    #[test]
+    fn match_byte_ranges_turkish_i_and_mixed() {
+        // ẞ (3 UTF-8 bytes) case-folds to ß (2 bytes); indices must stay on the original line.
+        let line = "ẞxα";
+        assert_eq!(first_match_byte(line, "ß"), Some(0));
+        assert_eq!(&line[match_byte_ranges(line, "ß")[0].clone()], "ẞ");
+        let mixed = "a中文needle中文";
+        let m = match_byte_ranges(mixed, "needle");
+        assert_eq!(m.len(), 1);
+        assert_eq!(&mixed[m[0].clone()], "needle");
     }
 
     #[test]

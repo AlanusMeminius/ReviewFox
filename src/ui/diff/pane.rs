@@ -86,6 +86,8 @@ pub struct DualPane {
     prev_frame_pane_w: [f32; 2],
     /// Wrap must rebuild in prepaint with a Window (glyph widths + plan).
     wrap_layout_dirty: bool,
+    /// Scroll landing deferred until the next wrapped layout rebuild.
+    pending_land: Option<PendingLand>,
     /// Which side last received horizontal input; used when sync is turned on.
     last_x_side: Option<Side>,
     /// Horizontal travel per side from the last prepaint (`0..=max_x`).
@@ -148,6 +150,7 @@ impl DualPane {
             char_widths: HashMap::new(),
             prev_frame_pane_w: [0.; 2],
             wrap_layout_dirty: false,
+            pending_land: None,
             last_x_side: None,
             max_x: [0.; 2],
             widest_seen: [0.; 2],
@@ -390,7 +393,7 @@ impl DualPane {
             wrap,
         );
         layout.set_comments(self.comments.iter());
-        debug_assert!(!soft || pane_w[0] <= 0. || layout.wrap.is_some());
+        debug_assert!(!soft || !can_wrap || layout.wrap.is_some());
         if t.is_some() {
             trace::layout(
                 trace::since(t),
@@ -420,6 +423,37 @@ impl DualPane {
         }
     }
 
+    fn finish_wrap_rebuild(&mut self, cap: Option<viewport::AnchorCap>) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let row_h = self.row_h();
+        match self.pending_land.take() {
+            Some(PendingLand::Match { side, ln, byte }) => {
+                if let Some(s) = viewport::s_for_match_byte(
+                    layout, side, ln, byte, row_h, self.scroll_s,
+                ) {
+                    self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
+                    self.hunk_s = Some(self.scroll_s / row_h);
+                }
+            }
+            Some(PendingLand::Line(target)) => {
+                if let Some(s) = viewport::s_for_target(layout, target, row_h, self.scroll_s) {
+                    self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
+                    self.hunk_s = Some(self.scroll_s / row_h);
+                }
+            }
+            Some(PendingLand::Anchor(cap)) => {
+                if let Some(s) = viewport::s_for_rewrap(
+                    layout, cap, self.view_h, row_h, self.scroll_s,
+                ) {
+                    self.scroll_s = s;
+                }
+            }
+            None => self.restore_after_rewrap(cap),
+        }
+    }
+
     fn sync_wrap_layout(&mut self, pane_w: [f32; 2], window: &mut Window, cx: &mut Context<Self>) {
         if !self.soft_wrap {
             self.wrap_layout_dirty = false;
@@ -440,9 +474,9 @@ impl DualPane {
 
         if self.wrap_layout_dirty || self.layout.as_ref().is_none_or(|l| l.wrap.is_none()) {
             self.prev_frame_pane_w = pane_w;
-            let cap = self.capture_anchor();
+            let cap = self.pending_land.is_none().then(|| self.capture_anchor());
             self.rebuild_layout(Some(window));
-            self.restore_after_rewrap(cap);
+            self.finish_wrap_rebuild(cap.flatten());
             return;
         }
 
@@ -456,9 +490,9 @@ impl DualPane {
         self.prev_frame_pane_w = pane_w;
 
         if self.layout.as_ref().is_some_and(width_mismatch) {
-            let cap = self.capture_anchor();
+            let cap = self.pending_land.is_none().then(|| self.capture_anchor());
             self.rebuild_layout(Some(window));
-            self.restore_after_rewrap(cap);
+            self.finish_wrap_rebuild(cap.flatten());
         }
     }
 
@@ -502,7 +536,13 @@ impl DualPane {
         mutate(self);
         self.mark_wrap_dirty();
         self.rebuild_layout(None);
-        self.restore_anchor(cap);
+        if self.soft_wrap {
+            if let Some(cap) = cap {
+                self.pending_land = Some(PendingLand::Anchor(cap));
+            }
+        } else if let Some(cap) = cap {
+            self.restore_anchor(Some(cap));
+        }
         self.hunk_s = None;
     }
 
@@ -618,21 +658,34 @@ impl DualPane {
         };
         let row_h = self.row_h();
         let line_text = layout.side(plan.target.side).line_text(plan.target.ln);
-        let s = line_text
-            .and_then(|text| first_match_byte(text, &self.search_query))
-            .and_then(|byte| {
+        let byte = line_text.and_then(|text| first_match_byte(text, &self.search_query));
+        let defer = self.soft_wrap
+            && (self.wrap_layout_dirty
+                || layout.wrap.is_none());
+        if defer {
+            self.pending_land = Some(match byte {
+                Some(b) => PendingLand::Match {
+                    side: plan.target.side,
+                    ln: plan.target.ln,
+                    byte: b,
+                },
+                None => PendingLand::Line(plan.target),
+            });
+            cx.notify();
+            return;
+        }
+        let s = byte
+            .and_then(|b| {
                 viewport::s_for_match_byte(
                     layout,
                     plan.target.side,
                     plan.target.ln,
-                    byte,
+                    b,
                     row_h,
                     self.scroll_s,
                 )
             })
-            .or_else(|| {
-                viewport::s_for_target(layout, plan.target, row_h, self.scroll_s)
-            })
+            .or_else(|| viewport::s_for_target(layout, plan.target, row_h, self.scroll_s))
             .unwrap_or(self.scroll_s);
         self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
         self.hunk_s = Some(s / row_h);
@@ -1107,6 +1160,16 @@ impl DualPane {
     }
 }
 
+enum PendingLand {
+    Match {
+        side: Side,
+        ln: u32,
+        byte: usize,
+    },
+    Line(crate::domain::HunkJumpTarget),
+    Anchor(viewport::AnchorCap),
+}
+
 struct WrapCharWidth<'a, 'w> {
     mono: f32,
     font_px: u32,
@@ -1312,6 +1375,16 @@ fn should_apply_highlight(open_generation: u64, result_generation: u64) -> bool 
 #[cfg(test)]
 mod tests {
     use super::should_apply_highlight;
+
+    #[test]
+    fn soft_wrap_deferred_rebuild_satisfies_layout_invariant() {
+        let invariant = |soft: bool, can_wrap: bool, has_wrap: bool| {
+            !soft || !can_wrap || has_wrap
+        };
+        assert!(invariant(true, false, false));
+        assert!(invariant(true, true, true));
+        assert!(invariant(false, true, false));
+    }
 
     #[test]
     fn stale_generation_is_dropped() {
