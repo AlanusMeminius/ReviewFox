@@ -30,11 +30,7 @@ pub fn user_api_url(base_url: &str) -> String {
     format!("{}/api/v4/user", base_url.trim_end_matches('/'))
 }
 
-pub async fn verify_pat(
-    http: Arc<dyn HttpClient>,
-    base_url: &str,
-    pat: &str,
-) -> VerifyResult {
+pub async fn verify_pat(http: Arc<dyn HttpClient>, base_url: &str, pat: &str) -> VerifyResult {
     if pat.trim().is_empty() {
         return VerifyResult::Err(VerifyError::Unauthorized);
     }
@@ -106,11 +102,17 @@ pub struct ParsedGitRemote {
 pub enum ResolveProjectError {
     Remote(RemoteUrlError),
     Parse(ParseRemoteError),
-    HostMismatch { settings_host: String, remote_host: String },
+    HostMismatch {
+        settings_host: String,
+        remote_host: String,
+    },
     Network(String),
     Unauthorized,
     NotFound,
-    Other { status: u16, detail: String },
+    Other {
+        status: u16,
+        detail: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -331,8 +333,7 @@ pub enum ListMergeRequestsResult {
 impl ListMergeRequestsError {
     /// Where in Settings the user fixes this (missing or rejected token), if anywhere.
     pub fn settings_fix(&self) -> Option<SettingsTarget> {
-        matches!(self, Self::MissingPat | Self::Unauthorized)
-            .then_some(SettingsTarget::GitLabToken)
+        matches!(self, Self::MissingPat | Self::Unauthorized).then_some(SettingsTarget::GitLabToken)
     }
 }
 
@@ -371,9 +372,7 @@ pub fn format_resolve_project_error(e: &ResolveProjectError) -> String {
             "No git remote host matches Settings Base URL host `{settings_host}` (remotes: {remote_host})."
         ),
         ResolveProjectError::Network(msg) => format!("Network error: {msg}"),
-        ResolveProjectError::Unauthorized => {
-            "Unauthorized (401). Check token and scopes.".into()
-        }
+        ResolveProjectError::Unauthorized => "Unauthorized (401). Check token and scopes.".into(),
         ResolveProjectError::NotFound => {
             "Project not found on GitLab (404). Check path and token access.".into()
         }
@@ -422,7 +421,9 @@ pub async fn list_open_merge_requests(
 
     let mut response = match http.send(request).await {
         Ok(r) => r,
-        Err(e) => return ListMergeRequestsResult::Err(ListMergeRequestsError::Network(e.to_string())),
+        Err(e) => {
+            return ListMergeRequestsResult::Err(ListMergeRequestsError::Network(e.to_string()));
+        }
     };
 
     let status = response.status().as_u16();
@@ -508,8 +509,7 @@ pub enum FetchMergeRequestResult {
 impl FetchMergeRequestError {
     /// Where in Settings the user fixes this (missing or rejected token), if anywhere.
     pub fn settings_fix(&self) -> Option<SettingsTarget> {
-        matches!(self, Self::MissingPat | Self::Unauthorized)
-            .then_some(SettingsTarget::GitLabToken)
+        matches!(self, Self::MissingPat | Self::Unauthorized).then_some(SettingsTarget::GitLabToken)
     }
 }
 
@@ -525,7 +525,10 @@ pub fn merge_request_approvals_api_url(
     path_with_namespace: &str,
     iid: u64,
 ) -> String {
-    format!("{}/approvals", merge_request_api_url(base_url, path_with_namespace, iid))
+    format!(
+        "{}/approvals",
+        merge_request_api_url(base_url, path_with_namespace, iid)
+    )
 }
 
 /// First 7 hex chars for display (not identity).
@@ -542,9 +545,7 @@ pub fn format_fetch_merge_request_error(e: &FetchMergeRequestError) -> String {
         FetchMergeRequestError::Unauthorized => {
             "Unauthorized (401). Check token and scopes.".into()
         }
-        FetchMergeRequestError::NotFound => {
-            "Merge request not found on GitLab (404).".into()
-        }
+        FetchMergeRequestError::NotFound => "Merge request not found on GitLab (404).".into(),
         FetchMergeRequestError::MissingDiffRefs => {
             "GitLab did not return diff_refs for this merge request.".into()
         }
@@ -603,9 +604,7 @@ fn parse_diff_refs(raw: Option<GitLabDiffRefs>) -> Result<MrDiffRefs, FetchMerge
     Ok(MrDiffRefs {
         base_sha: refs.base_sha,
         head_sha: refs.head_sha,
-        start_sha: refs
-            .start_sha
-            .filter(|s| !s.trim().is_empty()),
+        start_sha: refs.start_sha.filter(|s| !s.trim().is_empty()),
     })
 }
 
@@ -750,14 +749,8 @@ pub async fn fetch_merge_request(
         Err(e) => return FetchMergeRequestResult::Err(e),
     };
 
-    let check_state = fetch_merge_request_approvals(
-        http,
-        base_url,
-        pat,
-        path_with_namespace,
-        iid,
-    )
-    .await;
+    let check_state =
+        fetch_merge_request_approvals(http, base_url, pat, path_with_namespace, iid).await;
 
     FetchMergeRequestResult::Ok(detail_from_payload(payload, diff_refs, check_state))
 }
@@ -775,8 +768,7 @@ pub fn matching_remote_for_settings(
     repo_path: &Path,
     settings_base_url: &str,
 ) -> Result<(String, String), ResolveProjectError> {
-    let remotes =
-        crate::git::list_remote_urls(repo_path).map_err(ResolveProjectError::Remote)?;
+    let remotes = crate::git::list_remote_urls(repo_path).map_err(ResolveProjectError::Remote)?;
     let (name, url, _) = pick_remote_for_settings(&remotes, settings_base_url)?;
     Ok((name, url))
 }
@@ -810,8 +802,7 @@ pub enum ListMergeRequestCommitsResult {
 impl ListMergeRequestCommitsError {
     /// Where in Settings the user fixes this (missing or rejected token), if anywhere.
     pub fn settings_fix(&self) -> Option<SettingsTarget> {
-        matches!(self, Self::MissingPat | Self::Unauthorized)
-            .then_some(SettingsTarget::GitLabToken)
+        matches!(self, Self::MissingPat | Self::Unauthorized).then_some(SettingsTarget::GitLabToken)
     }
 }
 
@@ -1033,8 +1024,7 @@ mod tests {
 
     #[test]
     fn parse_https_with_user() {
-        let p =
-            parse_git_remote_url("https://oauth2:token@gitlab.example.com/foo/bar").unwrap();
+        let p = parse_git_remote_url("https://oauth2:token@gitlab.example.com/foo/bar").unwrap();
         assert_eq!(p.host, "gitlab.example.com");
         assert_eq!(p.path_with_namespace, "foo/bar");
     }
@@ -1056,17 +1046,17 @@ mod tests {
     #[test]
     fn hosts_match_case_insensitive() {
         assert!(hosts_match("https://GitLab.COM", "gitlab.com"));
-        assert!(hosts_match("https://gitlab.example.com/", "gitlab.example.com"));
+        assert!(hosts_match(
+            "https://gitlab.example.com/",
+            "gitlab.example.com"
+        ));
         assert!(!hosts_match("https://gitlab.com", "github.com"));
     }
 
     #[test]
     fn host_mismatch_error() {
-        let err = map_remote_url_to_project(
-            "git@github.com:org/repo.git",
-            "https://gitlab.com",
-        )
-        .unwrap_err();
+        let err = map_remote_url_to_project("git@github.com:org/repo.git", "https://gitlab.com")
+            .unwrap_err();
         assert_eq!(
             err,
             ResolveProjectError::HostMismatch {
@@ -1079,20 +1069,14 @@ mod tests {
     #[test]
     fn pick_remote_skips_github_origin_for_gitlab_settings() {
         let remotes = vec![
-            (
-                "origin".into(),
-                "git@github.com:org/mirror.git".into(),
-            ),
+            ("origin".into(), "git@github.com:org/mirror.git".into()),
             (
                 "gitlab".into(),
                 "git@gitlab.lan.example.com:group/repo.git".into(),
             ),
         ];
-        let (name, _url, parsed) = pick_remote_for_settings(
-            &remotes,
-            "https://gitlab.lan.example.com",
-        )
-        .unwrap();
+        let (name, _url, parsed) =
+            pick_remote_for_settings(&remotes, "https://gitlab.lan.example.com").unwrap();
         assert_eq!(name, "gitlab");
         assert_eq!(parsed.path_with_namespace, "group/repo");
     }
@@ -1100,17 +1084,10 @@ mod tests {
     #[test]
     fn pick_remote_prefers_matching_origin() {
         let remotes = vec![
-            (
-                "gitlab".into(),
-                "https://gitlab.com/other/repo.git".into(),
-            ),
-            (
-                "origin".into(),
-                "https://gitlab.com/main/repo.git".into(),
-            ),
+            ("gitlab".into(), "https://gitlab.com/other/repo.git".into()),
+            ("origin".into(), "https://gitlab.com/main/repo.git".into()),
         ];
-        let (name, _, parsed) =
-            pick_remote_for_settings(&remotes, "https://gitlab.com").unwrap();
+        let (name, _, parsed) = pick_remote_for_settings(&remotes, "https://gitlab.com").unwrap();
         assert_eq!(name, "origin");
         assert_eq!(parsed.path_with_namespace, "main/repo");
     }
@@ -1181,12 +1158,7 @@ mod tests {
             .status()
             .unwrap();
         std::process::Command::new("git")
-            .args([
-                "remote",
-                "add",
-                "origin",
-                "https://gitlab.com/my/group.git",
-            ])
+            .args(["remote", "add", "origin", "https://gitlab.com/my/group.git"])
             .current_dir(dir.path())
             .status()
             .unwrap();
@@ -1218,12 +1190,7 @@ mod tests {
             .status()
             .unwrap();
         std::process::Command::new("git")
-            .args([
-                "remote",
-                "add",
-                "origin",
-                "git@gitlab.com:acme/widget.git",
-            ])
+            .args(["remote", "add", "origin", "git@gitlab.com:acme/widget.git"])
             .current_dir(dir.path())
             .status()
             .unwrap();
@@ -1234,9 +1201,7 @@ mod tests {
             );
             Ok(http::Response::builder()
                 .status(StatusCode::OK)
-                .body(AsyncBody::from(
-                    r#"{"path_with_namespace":"acme/widget"}"#,
-                ))
+                .body(AsyncBody::from(r#"{"path_with_namespace":"acme/widget"}"#))
                 .unwrap())
         });
         let result = futures::executor::block_on(resolve_project(
@@ -1491,7 +1456,10 @@ mod tests {
     fn settings_fix_targets_token_or_url_only() {
         use SettingsTarget::{GitLabToken, GitLabUrl};
 
-        assert_eq!(ResolveProjectError::Unauthorized.settings_fix(), Some(GitLabToken));
+        assert_eq!(
+            ResolveProjectError::Unauthorized.settings_fix(),
+            Some(GitLabToken)
+        );
         assert_eq!(
             ResolveProjectError::HostMismatch {
                 settings_host: "gitlab.com".into(),
@@ -1500,19 +1468,40 @@ mod tests {
             .settings_fix(),
             Some(GitLabUrl)
         );
-        assert_eq!(ResolveProjectError::Network("timeout".into()).settings_fix(), None);
+        assert_eq!(
+            ResolveProjectError::Network("timeout".into()).settings_fix(),
+            None
+        );
         assert_eq!(ResolveProjectError::NotFound.settings_fix(), None);
 
-        assert_eq!(ListMergeRequestsError::MissingPat.settings_fix(), Some(GitLabToken));
-        assert_eq!(ListMergeRequestsError::Unauthorized.settings_fix(), Some(GitLabToken));
+        assert_eq!(
+            ListMergeRequestsError::MissingPat.settings_fix(),
+            Some(GitLabToken)
+        );
+        assert_eq!(
+            ListMergeRequestsError::Unauthorized.settings_fix(),
+            Some(GitLabToken)
+        );
         assert_eq!(ListMergeRequestsError::NotFound.settings_fix(), None);
 
-        assert_eq!(FetchMergeRequestError::MissingPat.settings_fix(), Some(GitLabToken));
-        assert_eq!(FetchMergeRequestError::Unauthorized.settings_fix(), Some(GitLabToken));
+        assert_eq!(
+            FetchMergeRequestError::MissingPat.settings_fix(),
+            Some(GitLabToken)
+        );
+        assert_eq!(
+            FetchMergeRequestError::Unauthorized.settings_fix(),
+            Some(GitLabToken)
+        );
         assert_eq!(FetchMergeRequestError::MissingDiffRefs.settings_fix(), None);
 
-        assert_eq!(ListMergeRequestCommitsError::MissingPat.settings_fix(), Some(GitLabToken));
-        assert_eq!(ListMergeRequestCommitsError::Unauthorized.settings_fix(), Some(GitLabToken));
+        assert_eq!(
+            ListMergeRequestCommitsError::MissingPat.settings_fix(),
+            Some(GitLabToken)
+        );
+        assert_eq!(
+            ListMergeRequestCommitsError::Unauthorized.settings_fix(),
+            Some(GitLabToken)
+        );
         assert_eq!(
             ListMergeRequestCommitsError::Other {
                 status: 500,

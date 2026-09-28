@@ -29,7 +29,7 @@
 - Real branch switcher / commit filter
 - True diagonal gap hatch (flat `gap_bg` + `╱` stand-in)
 - Bundle IBM Plex fonts if OS lacks them
-- Syntax highlighting
+- ~~Syntax highlighting~~ → settled 2026-09-28: tree-sitter, Rust / C++ / CMake (ADR-0010, `.scratch/code-highlighting/`)
 - Rename detection, remote publish (comments stay local; Export is egress)
 - GitLab discussion-thread UI, OAuth (deferred—not rejected; see ADR-0006), remote-only (no local Repository) Diff
 
@@ -53,7 +53,8 @@ Shared understanding confirmed 2026-09-26; **Phase A aligned 2026-09-26**. Not o
 - Draft text input polish (Diff draft bar is still keystroke-only)
 - UnresolvedAnchor when Comparison changes with open comments
 - Review / DraftComment disk persistence (parked)
-- ViewOptions UI toggle / syntax highlighting / rename detection (later polish)
+- **Syntax highlighting** — spec + issues in `.scratch/code-highlighting/` (ADR-0010); start at 01
+- ViewOptions UI toggle / rename detection (later polish)
 
 ## Run
 
@@ -69,6 +70,7 @@ Smoke: `cargo test --bin reviewfox`
 ## Constraints (settled)
 
 - crates.io GPUI only; custom diff, not Zed editor
+- Syntax highlighting: tree-sitter, compiled-in curated grammars (ADR-0010)
 - Comparison is the only reviewable surface
 - v1: no rename detection, no remote publish
 - GitLab MR = read-only Entry (`diff_refs` → Comparison); see ADR-0006

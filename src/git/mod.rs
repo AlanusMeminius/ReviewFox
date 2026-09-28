@@ -97,9 +97,8 @@ pub struct BranchBrowser {
 impl BranchBrowser {
     /// Open repo at HEAD; default Comparison = tip's parent..tip.
     pub fn open(path: &Path) -> Result<Self> {
-        let canonical = std::fs::canonicalize(path).map_err(|e| {
-            err(format!("cannot resolve path {}: {e}", path.display()))
-        })?;
+        let canonical = std::fs::canonicalize(path)
+            .map_err(|e| err(format!("cannot resolve path {}: {e}", path.display())))?;
 
         let repo = git2::Repository::open(&canonical).map_err(|e| {
             err(format!(
@@ -152,8 +151,7 @@ impl BranchBrowser {
     }
 
     pub fn switch_branch(&mut self, name: &str) -> Result<()> {
-        let repo =
-            git2::Repository::open(self.comparison.repository.path()).map_err(map_git)?;
+        let repo = git2::Repository::open(self.comparison.repository.path()).map_err(map_git)?;
         let branches = list_branches(self.comparison.repository.path())?;
         let branch = branches
             .iter()
@@ -180,11 +178,7 @@ impl BranchBrowser {
         }
 
         if shift {
-            let first = self
-                .in_range
-                .iter()
-                .position(|&v| v)
-                .unwrap_or(index);
+            let first = self.in_range.iter().position(|&v| v).unwrap_or(index);
             let from = first.min(index);
             let to = first.max(index);
             for (i, flag) in self.in_range.iter_mut().enumerate() {
@@ -196,8 +190,7 @@ impl BranchBrowser {
             }
         }
 
-        let repo =
-            git2::Repository::open(self.comparison.repository.path()).map_err(map_git)?;
+        let repo = git2::Repository::open(self.comparison.repository.path()).map_err(map_git)?;
         apply_range_fold(&repo, self)
     }
 
@@ -237,7 +230,8 @@ pub enum RemoteUrlError {
 pub fn list_remote_urls(
     repo_path: &Path,
 ) -> std::result::Result<Vec<(String, String)>, RemoteUrlError> {
-    let repo = git2::Repository::open(repo_path).map_err(|e| RemoteUrlError::Open(e.to_string()))?;
+    let repo =
+        git2::Repository::open(repo_path).map_err(|e| RemoteUrlError::Open(e.to_string()))?;
     let names: Vec<String> = repo
         .remotes()
         .map_err(|e| RemoteUrlError::Open(e.to_string()))?
@@ -459,12 +453,16 @@ pub fn list_branches(path: &Path) -> Result<Vec<BranchInfo>> {
             tip,
         });
     }
-    let remote_upstreams: std::collections::HashSet<String> = branches
-        .iter()
-        .filter_map(|b| b.upstream.clone())
-        .collect();
+    let remote_upstreams: std::collections::HashSet<String> =
+        branches.iter().filter_map(|b| b.upstream.clone()).collect();
     branches.retain(|b| !b.is_remote || !remote_upstreams.contains(&format!("origin/{}", b.name)));
-    branches.sort_by_key(|b| (!b.is_head, b.is_remote, std::cmp::Reverse(b.tip.oid.to_string())));
+    branches.sort_by_key(|b| {
+        (
+            !b.is_head,
+            b.is_remote,
+            std::cmp::Reverse(b.tip.oid.to_string()),
+        )
+    });
     Ok(branches)
 }
 
@@ -591,10 +589,7 @@ fn delta_status(delta: &git2::DiffDelta<'_>) -> Option<PathStatus> {
 fn delta_path(delta: &git2::DiffDelta<'_>, status: PathStatus) -> Option<String> {
     let path = match status {
         PathStatus::Delete => delta.old_file().path(),
-        _ => delta
-            .new_file()
-            .path()
-            .or_else(|| delta.old_file().path()),
+        _ => delta.new_file().path().or_else(|| delta.old_file().path()),
     }?;
     Some(path.to_string_lossy().replace('\\', "/"))
 }
@@ -694,10 +689,7 @@ pub fn side_lines(comparison: &Comparison, side: Side, path: &str) -> Result<Vec
         return Err(err("binary file"));
     }
     let text = String::from_utf8_lossy(&bytes);
-    Ok(split_lines(&text)
-        .into_iter()
-        .map(str::to_string)
-        .collect())
+    Ok(split_lines(&text).into_iter().map(str::to_string).collect())
 }
 
 /// Blob bytes of `path` at `commit_oid`; `None` commit = empty tree (no blob).
@@ -951,7 +943,10 @@ mod tests {
         let remote = root.join("remote.git");
         let local = root.join("local");
         let remote_str = remote.to_str().unwrap();
-        git(&root, &["clone", "--bare", upstream.to_str().unwrap(), remote_str]);
+        git(
+            &root,
+            &["clone", "--bare", upstream.to_str().unwrap(), remote_str],
+        );
         git(&root, &["clone", remote_str, local.to_str().unwrap()]);
 
         // MR commit reachable only via refs/merge-requests/1/head.
@@ -960,7 +955,10 @@ mod tests {
         git(&upstream, &["add", "mr.txt"]);
         git(&upstream, &["commit", "-m", "mr"]);
         let mr_sha = git_out(&upstream, &["rev-parse", "HEAD"]);
-        git(&upstream, &["push", remote_str, "mr:refs/merge-requests/1/head"]);
+        git(
+            &upstream,
+            &["push", remote_str, "mr:refs/merge-requests/1/head"],
+        );
         // Target-branch commit the local clone has not fetched yet.
         git(&upstream, &["checkout", "-"]);
         std::fs::write(upstream.join("c.txt"), "base\n").unwrap();
@@ -970,12 +968,21 @@ mod tests {
         git(&upstream, &["push", remote_str, "HEAD"]);
 
         let refs_before = git_out(&local, &["for-each-ref"]);
-        let url = format!("file:///{}", remote_str.replace('\\', "/").trim_start_matches('/'));
+        let url = format!(
+            "file:///{}",
+            remote_str.replace('\\', "/").trim_start_matches('/')
+        );
         fetch_oids(&local, &url, 1, &[mr_sha.clone(), base_sha.clone()]).expect("fetch");
 
         let repo = git2::Repository::open(&local).unwrap();
-        assert!(repo.find_commit(git2::Oid::from_str(&mr_sha).unwrap()).is_ok());
-        assert!(repo.find_commit(git2::Oid::from_str(&base_sha).unwrap()).is_ok());
+        assert!(
+            repo.find_commit(git2::Oid::from_str(&mr_sha).unwrap())
+                .is_ok()
+        );
+        assert!(
+            repo.find_commit(git2::Oid::from_str(&base_sha).unwrap())
+                .is_ok()
+        );
         assert!(!local.join(".git").join("FETCH_HEAD").exists());
         assert_eq!(git_out(&local, &["for-each-ref"]), refs_before);
 
@@ -1151,15 +1158,23 @@ mod tests {
             }]
         );
 
-        match file_diff(&bb.comparison, "a.txt", PathStatus::Add, &ViewOptions::default()) {
+        match file_diff(
+            &bb.comparison,
+            "a.txt",
+            PathStatus::Add,
+            &ViewOptions::default(),
+        ) {
             FileDiff::Text {
                 alignment,
                 old_text,
                 new_text,
             } => {
                 assert!(old_text.is_empty());
-                assert_eq!(&*new_text, "one
-");
+                assert_eq!(
+                    &*new_text,
+                    "one
+"
+                );
                 assert_eq!(
                     alignment.ops,
                     vec![AlignmentOp::Insert {
@@ -1170,7 +1185,11 @@ mod tests {
             }
             other => panic!("expected text diff, got {other:?}"),
         }
-        assert!(side_lines(&bb.comparison, Side::Old, "a.txt").unwrap().is_empty());
+        assert!(
+            side_lines(&bb.comparison, Side::Old, "a.txt")
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             side_lines(&bb.comparison, Side::New, "a.txt").unwrap(),
             vec!["one".to_string()]
@@ -1210,11 +1229,21 @@ mod tests {
                 },
             ]
         );
-        match file_diff(&bb.comparison, "b.txt", PathStatus::Add, &ViewOptions::default()) {
-            FileDiff::Text { old_text, new_text, .. } => {
+        match file_diff(
+            &bb.comparison,
+            "b.txt",
+            PathStatus::Add,
+            &ViewOptions::default(),
+        ) {
+            FileDiff::Text {
+                old_text, new_text, ..
+            } => {
                 assert!(old_text.is_empty());
-                assert_eq!(&*new_text, "new
-");
+                assert_eq!(
+                    &*new_text,
+                    "new
+"
+                );
             }
             other => panic!("expected text diff, got {other:?}"),
         }
@@ -1227,13 +1256,20 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "reviewfox-root-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         git(&dir, &["init"]);
-        std::fs::write(dir.join("x.txt"), "1
+        std::fs::write(
+            dir.join("x.txt"),
+            "1
 2
-").unwrap();
+",
+        )
+        .unwrap();
         git(&dir, &["add", "x.txt"]);
         git(&dir, &["commit", "-m", "only"]);
 

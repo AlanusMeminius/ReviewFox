@@ -78,7 +78,10 @@ mod tests {
     fn no_tabs_is_identity() {
         let e = TabExpansion::new("abc");
         assert_eq!(e.text, "abc");
-        assert_eq!((0..=3).map(|b| e.display_offset(b)).collect::<Vec<_>>(), [0, 1, 2, 3]);
+        assert_eq!(
+            (0..=3).map(|b| e.display_offset(b)).collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
         assert_eq!(display_columns("abc"), 3);
         assert_eq!(display_columns(""), 0);
     }

@@ -192,9 +192,9 @@ pub fn bounds_intersects_any(
     }
     let right = x + width;
     let bottom = y + height;
-    displays.iter().any(|&(dx, dy, dw, dh)| {
-        x < dx + dw && right > dx && y < dy + dh && bottom > dy
-    })
+    displays
+        .iter()
+        .any(|&(dx, dy, dw, dh)| x < dx + dw && right > dx && y < dy + dh && bottom > dy)
 }
 
 #[cfg(test)]

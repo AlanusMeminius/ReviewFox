@@ -13,13 +13,6 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::domain::{
-    Alignment, AlignmentOp, Anchor, DiffFontSize, FoldState, Side, hunk_jump_target,
-    match_jump_plan,
-};
-use crate::git::FileDiff;
-use crate::ui::appearance::{Appearance, UiTextSize};
-use crate::ui::{scrollbar, theme};
 use super::element::{
     self, BarState, Decorations, FrameInput, Geom, ShapeCache, build_frame, insert_hitboxes,
     line_number_digits, ln_col_width, text_extent, thumb_for, top_at,
@@ -27,6 +20,15 @@ use super::element::{
 use super::layout::{HunkLand, Layout, Row};
 use super::trace;
 use super::viewport::{self, Viewport};
+use crate::domain::{
+    Alignment, AlignmentOp, Anchor, DiffFontSize, FoldState, Side, hunk_jump_target,
+    match_jump_plan,
+};
+use crate::git::FileDiff;
+use crate::syntax::{self, Span};
+use crate::ui::appearance::{Appearance, UiTextSize};
+use crate::ui::{scrollbar, theme};
+use std::path::Path;
 
 /// What the shell (DiffView) hears from the pane. Hunk index and hover copy
 /// are emitted only when they change.
@@ -51,6 +53,9 @@ pub struct DualPane {
     /// View projection of `file` under `fold`. Rebuilt on file / fold /
     /// Alignment change, never per frame.
     layout: Option<Layout>,
+    /// Per-side syntax spans over the side's full text. Kept across
+    /// `rebuild_layout` (fold / ignore-whitespace); cleared on file open.
+    highlights: [Option<Arc<[Span]>>; 2],
     /// Shaped text per (side, visual row), visible ± one screen.
     shapes: ShapeCache,
     /// Anchors of the selected path's DraftComments (comment index).
@@ -96,6 +101,9 @@ pub struct DualPane {
     /// Code Font family the caches were shaped with.
     code_font: SharedString,
     _appearance: Subscription,
+    /// Bumped on every [`Self::open`]; background highlight results with a
+    /// different generation are dropped.
+    open_generation: u64,
 }
 
 impl EventEmitter<PaneEvent> for DualPane {}
@@ -109,6 +117,7 @@ impl DualPane {
             file: None,
             fold: FoldState::collapsed(),
             layout: None,
+            highlights: [None, None],
             shapes: ShapeCache::default(),
             comments: Vec::new(),
             drafting: None,
@@ -129,6 +138,7 @@ impl DualPane {
             font_size,
             code_font,
             _appearance: cx.observe_global::<Appearance>(Self::apply_appearance),
+            open_generation: 0,
         }
     }
 
@@ -158,7 +168,15 @@ impl DualPane {
     }
 
     /// Open a file at its start with everything folded.
-    pub fn open(&mut self, file: &FileDiff, comments: Vec<Anchor>, cx: &mut Context<Self>) {
+    pub fn open(
+        &mut self,
+        path: &str,
+        file: &FileDiff,
+        comments: Vec<Anchor>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_generation = self.open_generation.wrapping_add(1);
+        let generation = self.open_generation;
         self.file = match file {
             FileDiff::Text {
                 alignment,
@@ -171,6 +189,51 @@ impl DualPane {
             }),
             _ => None,
         };
+        // Plain text until the background task finishes (or the size guard skips).
+        self.highlights = [None, None];
+        if let Some(file) = self.file.as_ref() {
+            let first = first_line(&file.new_text).or_else(|| first_line(&file.old_text));
+            if let Some(lang) = syntax::detect(Path::new(path), first.unwrap_or("")) {
+                let old_text = file.old_text.clone();
+                let new_text = file.new_text.clone();
+                let any_under_guard = !syntax::exceeds_size_guard(&old_text, syntax::DEFAULT_SIZE_GUARD)
+                    || !syntax::exceeds_size_guard(&new_text, syntax::DEFAULT_SIZE_GUARD);
+                if any_under_guard {
+                    cx.spawn(async move |this, cx| {
+                        let (sides, took) = cx
+                            .background_executor()
+                            .spawn(async move {
+                                let t = std::time::Instant::now();
+                                // Query compile + palette resolve stay off the UI thread.
+                                let _ = theme::syntax_colors();
+                                let side = |text: &str| {
+                                    if syntax::exceeds_size_guard(text, syntax::DEFAULT_SIZE_GUARD)
+                                    {
+                                        None
+                                    } else {
+                                        Some(Arc::from(syntax::highlight(lang, text)))
+                                    }
+                                };
+                                ([side(&old_text), side(&new_text)], t.elapsed())
+                            })
+                            .await;
+                        this.update(cx, |this, cx| {
+                            if !should_apply_highlight(this.open_generation, generation) {
+                                return;
+                            }
+                            this.highlights = sides;
+                            this.shapes.clear();
+                            if trace::enabled() {
+                                trace::highlight(took);
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+            }
+        }
         self.comments = comments;
         self.fold = FoldState::collapsed();
         self.set_hunk_index(None, cx);
@@ -291,7 +354,9 @@ impl DualPane {
         let (Some(cap), Some(layout)) = (cap, self.layout.as_ref()) else {
             return;
         };
-        if let Some(s) = viewport::s_for_anchor(layout, cap, self.view_h, self.row_h(), self.scroll_s) {
+        if let Some(s) =
+            viewport::s_for_anchor(layout, cap, self.view_h, self.row_h(), self.scroll_s)
+        {
             self.scroll_s = s;
         }
     }
@@ -350,14 +415,12 @@ impl DualPane {
                     .unwrap_or(false)
             })
         } else {
-            (0..hunk_count)
-                .rev()
-                .find(|&i| {
-                    lands
-                        .get(i)
-                        .map(|h| (h.s as f32) < s_rows - 0.5)
-                        .unwrap_or(false)
-                })
+            (0..hunk_count).rev().find(|&i| {
+                lands
+                    .get(i)
+                    .map(|h| (h.s as f32) < s_rows - 0.5)
+                    .unwrap_or(false)
+            })
         };
         let Some(i) = next else {
             return;
@@ -365,7 +428,8 @@ impl DualPane {
         let Some(target) = hunk_jump_target(&file.alignment, i) else {
             return;
         };
-        let s = viewport::s_for_target(layout, target, row_h, self.scroll_s).unwrap_or(self.scroll_s);
+        let s =
+            viewport::s_for_target(layout, target, row_h, self.scroll_s).unwrap_or(self.scroll_s);
         self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
         self.hunk_s = Some(s / row_h);
         self.set_hunk_index(Some(i), cx);
@@ -657,6 +721,7 @@ impl DualPane {
         let mut frame = build_frame(
             FrameInput {
                 layout,
+                highlights: &self.highlights,
                 vp: &vp,
                 geom,
                 row_h,
@@ -679,7 +744,8 @@ impl DualPane {
         for side in [Side::Old, Side::New] {
             let ix = side_ix(side);
             self.widest_seen[ix] = self.widest_seen[ix].max(frame.widest(side));
-            let longest = (layout.side(side).max_chars() as f32 * advance).max(self.widest_seen[ix]);
+            let longest =
+                (layout.side(side).max_chars() as f32 * advance).max(self.widest_seen[ix]);
             let pane_w = f32::from(geom.pane(side).size.width);
             self.max_x[ix] = viewport::max_x(text_extent(longest), pane_w);
             self.x_offsets[ix] = viewport::clamp_x(self.x_offsets[ix], self.max_x[ix]);
@@ -693,7 +759,8 @@ impl DualPane {
             // Emitting mid-draw would not schedule the shell's redraw.
             let this = cx.entity().downgrade();
             cx.defer(move |cx| {
-                this.update(cx, |pane, cx| pane.set_hunk_index(index, cx)).ok();
+                this.update(cx, |pane, cx| pane.set_hunk_index(index, cx))
+                    .ok();
             });
         }
         frame.stats.prepaint = trace::since(t_prepaint);
@@ -835,6 +902,14 @@ fn side_ix(side: Side) -> usize {
     }
 }
 
+fn first_line(text: &str) -> Option<&str> {
+    if text.is_empty() {
+        None
+    } else {
+        text.lines().next()
+    }
+}
+
 /// Last Hunk landing at or above `s_rows` (the first one if none does).
 /// `lands` are in Alignment order, so `s` is non-decreasing.
 pub(super) fn nearest_hunk_index(s_rows: f32, lands: &[HunkLand]) -> Option<usize> {
@@ -843,4 +918,24 @@ pub(super) fn nearest_hunk_index(s_rows: f32, lands: &[HunkLand]) -> Option<usiz
     }
     let past = lands.partition_point(|land| land.s as f32 <= s_rows + 0.5);
     Some(past.saturating_sub(1))
+}
+
+/// Background highlight results apply only while this open is still current.
+fn should_apply_highlight(open_generation: u64, result_generation: u64) -> bool {
+    open_generation == result_generation
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_apply_highlight;
+
+    #[test]
+    fn stale_generation_is_dropped() {
+        assert!(should_apply_highlight(3, 3));
+        assert!(!should_apply_highlight(4, 3));
+        assert!(!should_apply_highlight(3, 4));
+        assert!(should_apply_highlight(0, 0));
+        assert!(!should_apply_highlight(u64::MAX, 0));
+        assert!(should_apply_highlight(u64::MAX, u64::MAX));
+    }
 }

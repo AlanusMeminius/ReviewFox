@@ -58,8 +58,7 @@ pub fn default_files_width() -> f32 {
 
 /// Changes floats over commits — sidebar only needs to leave a readable commits strip.
 pub fn clamp_sidebar_width(requested: f32, available: f32) -> f32 {
-    let maximum = MAX_SIDEBAR_WIDTH
-        .min((available - MIN_COMMITS_WIDTH).max(MIN_SIDEBAR_WIDTH));
+    let maximum = MAX_SIDEBAR_WIDTH.min((available - MIN_COMMITS_WIDTH).max(MIN_SIDEBAR_WIDTH));
     requested.clamp(MIN_SIDEBAR_WIDTH, maximum)
 }
 
@@ -68,15 +67,14 @@ pub fn clamp_sidebar_width(requested: f32, available: f32) -> f32 {
 pub fn clamp_files_width(requested: f32, available: f32, sidebar_width: f32) -> f32 {
     let stage = (available - sidebar_width).max(0.);
     let clear = theme::CHANGES_INSET * 2. + theme::CHANGES_SHADOW_GAP;
-    let maximum = MAX_FILES_WIDTH
-        .min((stage - MIN_COMMITS_WIDTH - clear).max(MIN_FILES_WIDTH));
+    let maximum = MAX_FILES_WIDTH.min((stage - MIN_COMMITS_WIDTH - clear).max(MIN_FILES_WIDTH));
     requested.clamp(MIN_FILES_WIDTH, maximum)
 }
 
 /// Diff window tree|dual only — same sidebar min/max, no main commits reservation.
 pub fn clamp_diff_tree_width(requested: f32, available: f32) -> f32 {
-    let maximum = MAX_SIDEBAR_WIDTH
-        .min((available - MIN_DIFF_CONTENT_WIDTH).max(MIN_SIDEBAR_WIDTH));
+    let maximum =
+        MAX_SIDEBAR_WIDTH.min((available - MIN_DIFF_CONTENT_WIDTH).max(MIN_SIDEBAR_WIDTH));
     requested.clamp(MIN_SIDEBAR_WIDTH, maximum)
 }
 
@@ -118,53 +116,44 @@ pub fn handle(
     let down_state = resize_state.clone();
     let move_state = resize_state.clone();
     let up_state = resize_state;
-    let mut el = div()
-        .id(id)
-        .flex_none()
-        .child(
-            canvas(
-                |_, _, _| (),
-                move |bounds, _, window, _| {
-                    let down_state = down_state.clone();
-                    window.on_mouse_event(move |event: &MouseDownEvent, _, _, _| {
-                        if event.button == MouseButton::Left && bounds.contains(&event.position) {
-                            down_state.active.set(true);
-                        }
-                    });
+    let mut el = div().id(id).flex_none().child(
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let down_state = down_state.clone();
+                window.on_mouse_event(move |event: &MouseDownEvent, _, _, _| {
+                    if event.button == MouseButton::Left && bounds.contains(&event.position) {
+                        down_state.active.set(true);
+                    }
+                });
 
-                    let move_state = move_state.clone();
-                    let on_resize = on_resize.clone();
-                    window.on_mouse_event(move |event: &MouseMoveEvent, _, window, cx| {
-                        if !move_state.active.get() {
-                            return;
-                        }
-                        let size = size_at_pointer(axis, event.position, window.viewport_size());
-                        on_resize(size, window, cx);
-                    });
+                let move_state = move_state.clone();
+                let on_resize = on_resize.clone();
+                window.on_mouse_event(move |event: &MouseMoveEvent, _, window, cx| {
+                    if !move_state.active.get() {
+                        return;
+                    }
+                    let size = size_at_pointer(axis, event.position, window.viewport_size());
+                    on_resize(size, window, cx);
+                });
 
-                    let up_state = up_state.clone();
-                    window.on_mouse_event(move |event: &MouseUpEvent, _, _, _| {
-                        if event.button == MouseButton::Left {
-                            up_state.active.set(false);
-                        }
-                    });
-                },
-            )
-            .size_full(),
-        );
+                let up_state = up_state.clone();
+                window.on_mouse_event(move |event: &MouseUpEvent, _, _, _| {
+                    if event.button == MouseButton::Left {
+                        up_state.active.set(false);
+                    }
+                });
+            },
+        )
+        .size_full(),
+    );
 
     el = match axis {
         // Leading sits over column vibrancy on macOS — leave clear.
-        Axis::HorizontalLeading => el
-            .w(px(HANDLE_WIDTH))
-            .h_full()
-            .cursor_col_resize(),
+        Axis::HorizontalLeading => el.w(px(HANDLE_WIDTH)).h_full().cursor_col_resize(),
         // Trailing is the Changes capsule's left-edge hit target — leave clear
         // so the soft cast shadow is not covered by an opaque strip.
-        Axis::HorizontalTrailing => el
-            .w(px(HANDLE_WIDTH))
-            .h_full()
-            .cursor_col_resize(),
+        Axis::HorizontalTrailing => el.w(px(HANDLE_WIDTH)).h_full().cursor_col_resize(),
         // Vertical sits between white panes inside the capsule; fill so a
         // Transparent window root doesn't punch through the 5px seam.
         Axis::Vertical => el
@@ -173,10 +162,7 @@ pub fn handle(
             .bg(theme::white())
             .cursor_row_resize(),
         // MR detail ↔ Commit island: clear hit strip doubles as the frost gap.
-        Axis::VerticalNorth => el
-            .h(px(theme::CHANGES_INSET))
-            .w_full()
-            .cursor_row_resize(),
+        Axis::VerticalNorth => el.h(px(theme::CHANGES_INSET)).w_full().cursor_row_resize(),
     };
     el
 }

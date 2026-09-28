@@ -36,6 +36,13 @@ pub struct LineRow {
     block: Option<u32>,
 }
 
+impl LineRow {
+    /// Byte range of this line in the side's shared text (no trailing `\n`/`\r`).
+    pub fn bytes(&self) -> Range<usize> {
+        self.bytes.clone()
+    }
+}
+
 /// One side's view of one collapsed Equal span (§3.3). Takes a visual row but
 /// is not a line; the old and new separators of a span share `id`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,7 +93,9 @@ impl Bridge {
     /// Short position copy for hover/status. Same facts as the op, not a second model.
     pub fn position_copy(&self) -> String {
         match *self {
-            Self::Insert { after_old, news, .. } => {
+            Self::Insert {
+                after_old, news, ..
+            } => {
                 let after = if after_old == 0 {
                     "file start".to_string()
                 } else {
@@ -98,7 +107,11 @@ impl Bridge {
                 format!("Delete old {} at new {at_new}", span_label(olds))
             }
             Self::Replace { olds, news, .. } => {
-                format!("Replace old {} ↔ new {}", span_label(olds), span_label(news))
+                format!(
+                    "Replace old {} ↔ new {}",
+                    span_label(olds),
+                    span_label(news)
+                )
             }
         }
     }
@@ -116,11 +129,31 @@ impl Bridge {
     pub fn rows(&self, side: Side) -> (u32, u32) {
         match (*self, side) {
             (Self::Insert { old_seam, .. }, Side::Old) => (old_seam, old_seam),
-            (Self::Insert { new_from, new_to, .. }, Side::New) => (new_from, new_to),
-            (Self::Delete { old_from, old_to, .. }, Side::Old) => (old_from, old_to),
+            (
+                Self::Insert {
+                    new_from, new_to, ..
+                },
+                Side::New,
+            ) => (new_from, new_to),
+            (
+                Self::Delete {
+                    old_from, old_to, ..
+                },
+                Side::Old,
+            ) => (old_from, old_to),
             (Self::Delete { new_seam, .. }, Side::New) => (new_seam, new_seam),
-            (Self::Replace { old_from, old_to, .. }, Side::Old) => (old_from, old_to),
-            (Self::Replace { new_from, new_to, .. }, Side::New) => (new_from, new_to),
+            (
+                Self::Replace {
+                    old_from, old_to, ..
+                },
+                Side::Old,
+            ) => (old_from, old_to),
+            (
+                Self::Replace {
+                    new_from, new_to, ..
+                },
+                Side::New,
+            ) => (new_from, new_to),
         }
     }
 }
@@ -276,7 +309,13 @@ impl SideLayout {
         self.commented.contains(&ln)
     }
 
-    fn push_lines(&mut self, ranges: &[Range<usize>], span: LineSpan, kind: LineKind, block: Option<u32>) {
+    fn push_lines(
+        &mut self,
+        ranges: &[Range<usize>],
+        span: LineSpan,
+        kind: LineKind,
+        block: Option<u32>,
+    ) {
         for i in 0..span.count {
             let ln = span.start + i;
             let row = self.rows() as u32;
@@ -587,8 +626,14 @@ fn advance(knots: &mut Vec<ScrollKnot>, d_old: u32, d_new: u32) {
 }
 
 fn land_from_op(op: &AlignmentOp) -> Option<HunkJumpTarget> {
-    let old = |ln| HunkJumpTarget { side: Side::Old, ln };
-    let new = |ln| HunkJumpTarget { side: Side::New, ln };
+    let old = |ln| HunkJumpTarget {
+        side: Side::Old,
+        ln,
+    };
+    let new = |ln| HunkJumpTarget {
+        side: Side::New,
+        ln,
+    };
     match *op {
         AlignmentOp::Equal { .. } => None,
         AlignmentOp::Insert { news, .. } => (news.count > 0).then(|| new(news.start)),
@@ -609,7 +654,12 @@ fn land_from_op(op: &AlignmentOp) -> Option<HunkJumpTarget> {
 pub(crate) mod tests {
     use super::*;
 
-    pub(crate) fn build(old: &str, new: &str, ops: Vec<AlignmentOp>, fold: Option<&FoldState>) -> Layout {
+    pub(crate) fn build(
+        old: &str,
+        new: &str,
+        ops: Vec<AlignmentOp>,
+        fold: Option<&FoldState>,
+    ) -> Layout {
         Layout::build(old.into(), new.into(), &Alignment { ops }, fold)
     }
 
@@ -625,6 +675,28 @@ pub(crate) mod tests {
             .map(|i| format!("{prefix}{i}"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// `str::lines` (and thus Layout) drops a trailing `\r`, same as word-mark
+    /// text — so a highlight span that ate `\r`/`\n` clips away at the line end.
+    #[test]
+    fn line_ranges_exclude_crlf_terminators() {
+        let text = "// c\r\nfn x\n";
+        let ranges = line_ranges(text);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(&text[ranges[0].clone()], "// c");
+        assert_eq!(&text[ranges[1].clone()], "fn x");
+        let layout = build(
+            text,
+            text,
+            vec![AlignmentOp::Equal {
+                old: span(1, 2),
+                new: span(1, 2),
+            }],
+            None,
+        );
+        assert_eq!(layout.old.text(&layout.old.lines()[0]), "// c");
+        assert_eq!(layout.old.lines()[0].bytes(), ranges[0]);
     }
 
     /// Rows as `ln text Kind` / `~id from-to`, for table-style asserts.
@@ -660,13 +732,29 @@ c
         );
         assert_eq!(layout.old.max_chars(), 11);
         assert_eq!(layout.new.max_chars(), 4);
-        let empty = build("", "é€x
-", vec![AlignmentOp::Insert { after_old: 0, news: span(1, 1) }], None);
+        let empty = build(
+            "",
+            "é€x
+",
+            vec![AlignmentOp::Insert {
+                after_old: 0,
+                news: span(1, 1),
+            }],
+            None,
+        );
         assert_eq!(empty.old.max_chars(), 0);
         assert_eq!(empty.new.max_chars(), 3);
-        let tabs = build("", "		x
+        let tabs = build(
+            "",
+            "		x
 ab	c
-", vec![AlignmentOp::Insert { after_old: 0, news: span(1, 2) }], None);
+",
+            vec![AlignmentOp::Insert {
+                after_old: 0,
+                news: span(1, 2),
+            }],
+            None,
+        );
         assert_eq!(tabs.new.max_chars(), 9);
     }
 
@@ -690,7 +778,12 @@ ab	c
         assert_eq!(dump(&layout.old), ["1 alpha Equal", "2 beta Equal"]);
         assert_eq!(
             dump(&layout.new),
-            ["1 HEAD Insert", "2 NECK Insert", "3 alpha Equal", "4 beta Equal"]
+            [
+                "1 HEAD Insert",
+                "2 NECK Insert",
+                "3 alpha Equal",
+                "4 beta Equal"
+            ]
         );
         assert_eq!(
             layout.bridges,
@@ -773,7 +866,12 @@ ab	c
         );
         assert_eq!(
             dump(&layout.old),
-            ["1 keep Equal", "2 gone-a Delete", "3 gone-b Delete", "4 keep2 Equal"]
+            [
+                "1 keep Equal",
+                "2 gone-a Delete",
+                "3 gone-b Delete",
+                "4 keep2 Equal"
+            ]
         );
         assert_eq!(dump(&layout.new), ["1 keep Equal", "2 keep2 Equal"]);
         assert_eq!(
@@ -828,9 +926,21 @@ ab	c
         assert_eq!(
             layout.knots,
             vec![
-                ScrollKnot { s: 0, old_y: 0, new_y: 0 },
-                ScrollKnot { s: 1, old_y: 1, new_y: 1 },
-                ScrollKnot { s: 3, old_y: 3, new_y: 1 },
+                ScrollKnot {
+                    s: 0,
+                    old_y: 0,
+                    new_y: 0
+                },
+                ScrollKnot {
+                    s: 1,
+                    old_y: 1,
+                    new_y: 1
+                },
+                ScrollKnot {
+                    s: 3,
+                    old_y: 3,
+                    new_y: 1
+                },
             ]
         );
     }
@@ -847,7 +957,10 @@ ab	c
             Some(&FoldState::collapsed()),
         );
         assert!(layout.old.is_empty());
-        assert_eq!(dump(&layout.new), ["1 a Insert", "2 b Insert", "3 c Insert"]);
+        assert_eq!(
+            dump(&layout.new),
+            ["1 a Insert", "2 b Insert", "3 c Insert"]
+        );
         assert_eq!(layout.old.seams(), [0]);
         assert_eq!(layout.hunk_count, 1);
         assert_eq!(layout.hunk_lands.len(), 1);
@@ -942,7 +1055,12 @@ ab	c
     #[test]
     fn no_hunk_file_shows_every_line_and_no_separator() {
         let text = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj";
-        let layout = build(text, text, vec![eq(1, 1, 10)], Some(&FoldState::collapsed()));
+        let layout = build(
+            text,
+            text,
+            vec![eq(1, 1, 10)],
+            Some(&FoldState::collapsed()),
+        );
         assert_eq!(layout.old.rows(), 10);
         assert_eq!(layout.new.rows(), 10);
         assert!(layout.old.omits().is_empty() && layout.new.omits().is_empty());
@@ -966,11 +1084,21 @@ ab	c
         let expanded = build(&old, &new, ops, Some(&fold));
         assert!(expanded.old.omits().is_empty() && expanded.new.omits().is_empty());
         assert_eq!(
-            expanded.old.lines().iter().map(|l| l.ln).collect::<Vec<_>>(),
+            expanded
+                .old
+                .lines()
+                .iter()
+                .map(|l| l.ln)
+                .collect::<Vec<_>>(),
             (1..=10).collect::<Vec<_>>()
         );
         assert_eq!(
-            expanded.new.lines().iter().map(|l| l.ln).collect::<Vec<_>>(),
+            expanded
+                .new
+                .lines()
+                .iter()
+                .map(|l| l.ln)
+                .collect::<Vec<_>>(),
             (1..=11).collect::<Vec<_>>()
         );
         assert_eq!(expanded.new.lines()[10].kind, LineKind::Insert);
@@ -984,13 +1112,27 @@ ab	c
         let (old, new, ops) = ten_then_insert();
         let alignment = Alignment { ops };
         let mut fold = FoldState::collapsed();
-        let collapsed = Layout::build(old.as_str().into(), new.as_str().into(), &alignment, Some(&fold));
-        assert_eq!(collapsed.old.row_of_line(5), None, "line 5 hidden while collapsed");
+        let collapsed = Layout::build(
+            old.as_str().into(),
+            new.as_str().into(),
+            &alignment,
+            Some(&fold),
+        );
+        assert_eq!(
+            collapsed.old.row_of_line(5),
+            None,
+            "line 5 hidden while collapsed"
+        );
 
         let plan = crate::domain::match_jump_plan(&alignment, &fold, Side::Old, 5);
         assert_eq!(plan.expand, Some(0));
         fold.expand(0);
-        let expanded = Layout::build(old.as_str().into(), new.as_str().into(), &alignment, Some(&fold));
+        let expanded = Layout::build(
+            old.as_str().into(),
+            new.as_str().into(),
+            &alignment,
+            Some(&fold),
+        );
         // Post-expansion: line 5 is the 5th Equal row (index 4).
         assert_eq!(expanded.old.row_of_line(5), Some(4));
     }
@@ -1021,11 +1163,17 @@ ab	c
             layout.hunk_lands,
             vec![
                 HunkLand {
-                    target: HunkJumpTarget { side: Side::New, ln: 2 },
+                    target: HunkJumpTarget {
+                        side: Side::New,
+                        ln: 2
+                    },
                     s: 1,
                 },
                 HunkLand {
-                    target: HunkJumpTarget { side: Side::Old, ln: 4 },
+                    target: HunkJumpTarget {
+                        side: Side::Old,
+                        ln: 4
+                    },
                     s: 5,
                 },
             ]

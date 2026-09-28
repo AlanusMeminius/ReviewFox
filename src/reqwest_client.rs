@@ -62,7 +62,6 @@ impl ReqwestClient {
         let client = Self::builder(None).default_headers(map).build()?;
         Ok(client.into())
     }
-
 }
 
 pub fn runtime() -> &'static tokio::runtime::Runtime {

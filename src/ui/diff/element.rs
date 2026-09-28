@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use gpui::{
     App, Bounds, ContentMask, CursorStyle, DispatchPhase, Element, ElementId, Entity,
@@ -21,6 +22,7 @@ use super::tabs::TabExpansion;
 use super::trace::{self, FrameStats};
 use super::viewport::{Viewport, route_wheel, snap};
 use crate::domain::Side;
+use crate::syntax::Span;
 use crate::ui::scrollbar::{self, ThumbGeom};
 use crate::ui::theme;
 
@@ -65,7 +67,8 @@ impl ShapeCache {
     }
 
     fn retain(&mut self, keep: &[Range<usize>; 2]) {
-        self.rows.retain(|&(side, row), _| keep[side_ix(side)].contains(&(row as usize)));
+        self.rows
+            .retain(|&(side, row), _| keep[side_ix(side)].contains(&(row as usize)));
     }
 }
 
@@ -235,6 +238,8 @@ pub struct Frame {
 
 pub(super) struct FrameInput<'a> {
     pub layout: &'a Layout,
+    /// Per-side highlight spans; `None` means plain text (no language).
+    pub highlights: &'a [Option<Arc<[Span]>>; 2],
     pub vp: &'a Viewport<'a>,
     pub geom: Geom,
     pub row_h: f32,
@@ -255,6 +260,7 @@ pub(super) fn build_frame(
 ) -> Frame {
     let FrameInput {
         layout,
+        highlights,
         vp,
         geom,
         row_h,
@@ -280,20 +286,18 @@ pub(super) fn build_frame(
         let drafting = decorations
             .drafting
             .and_then(|(s, ln)| (s == side).then_some(ln));
+        let side_spans = highlights[side_ix(side)].as_deref();
         let mut out = Vec::with_capacity(visible.len());
         let mut widest = 0f32;
         for i in visible {
             let Some(row) = rows.row(i) else { continue };
-            let shape = shapes
-                .rows
-                .entry((side, i as u32))
-                .or_insert_with(|| {
-                    let t = trace::start();
-                    let shape = shape_row(layout, side, row, font_px, code_family, window);
-                    stats.shaped += 1;
-                    stats.shape += trace::since(t);
-                    shape
-                });
+            let shape = shapes.rows.entry((side, i as u32)).or_insert_with(|| {
+                let t = trace::start();
+                let shape = shape_row(layout, side, row, side_spans, font_px, code_family, window);
+                stats.shaped += 1;
+                stats.shape += trace::since(t);
+                shape
+            });
             let (kind, commented, drafting_here, marks) = match row {
                 Row::Line(l) => {
                     let marks = match (layout.mark_runs(side, l), &shape.text, &shape.tabs) {
@@ -317,7 +321,11 @@ pub(super) fn build_frame(
                 y0: y_of(i),
                 y1: y_of(i + 1),
                 kind_bg,
-                bg: if drafting_here { rgb(DRAFTING_BG) } else { kind_bg },
+                bg: if drafting_here {
+                    rgb(DRAFTING_BG)
+                } else {
+                    kind_bg
+                },
                 commented,
                 text: shape.text.clone(),
                 marks,
@@ -405,6 +413,7 @@ fn shape_row(
     layout: &Layout,
     side: Side,
     row: Row<'_>,
+    spans: Option<&[Span]>,
     font_px: f32,
     family: &SharedString,
     window: &mut Window,
@@ -420,13 +429,16 @@ fn shape_row(
     let tabs = (!text.is_empty()).then(|| TabExpansion::new(text));
     RowShape {
         text: tabs.as_ref().map(|t| {
-            shape(
-                window,
-                SharedString::from(t.text.clone()),
-                family.clone(),
-                font_px,
-                theme::text(),
-            )
+            let display = SharedString::from(t.text.clone());
+            match spans {
+                Some(spans) => {
+                    let line_spans: Vec<_> = crate::syntax::spans_in(spans, line.bytes()).collect();
+                    let runs =
+                        runs_for_line(text, &line_spans, t, theme::syntax_colors(), theme::text());
+                    shape_runs(window, display, family.clone(), font_px, &runs)
+                }
+                None => shape(window, display, family.clone(), font_px, theme::text()),
+            }
         }),
         tabs,
         label: Some(shape(
@@ -439,7 +451,13 @@ fn shape_row(
     }
 }
 
-fn shape(window: &mut Window, text: SharedString, family: SharedString, font_px: f32, color: Rgba) -> ShapedLine {
+fn shape(
+    window: &mut Window,
+    text: SharedString,
+    family: SharedString,
+    font_px: f32,
+    color: Rgba,
+) -> ShapedLine {
     let run = TextRun {
         len: text.len(),
         font: font(family),
@@ -453,6 +471,82 @@ fn shape(window: &mut Window, text: SharedString, family: SharedString, font_px:
         .shape_line(text, px(font_px), &[run], None)
 }
 
+fn shape_runs(
+    window: &mut Window,
+    text: SharedString,
+    family: SharedString,
+    font_px: f32,
+    runs: &[(usize, Rgba)],
+) -> ShapedLine {
+    let face = font(family);
+    let text_runs: Vec<TextRun> = runs
+        .iter()
+        .filter(|&&(len, _)| len > 0)
+        .map(|&(len, color)| TextRun {
+            len,
+            font: face.clone(),
+            color: color.into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        })
+        .collect();
+    window
+        .text_system()
+        .shape_line(text, px(font_px), &text_runs, None)
+}
+
+/// Display-byte `(len, color)` runs for one line: `spans` are byte ranges into
+/// `line_text` (as from [`crate::syntax::spans_in`]), mapped through `tabs`.
+/// Gaps use `default`; `palette` is indexed by [`CaptureId`].
+fn runs_for_line(
+    line_text: &str,
+    spans: &[(Range<usize>, crate::syntax::CaptureId)],
+    tabs: &TabExpansion,
+    palette: &[Rgba],
+    default: Rgba,
+) -> Vec<(usize, Rgba)> {
+    let display_len = tabs.text.len();
+    if display_len == 0 {
+        return Vec::new();
+    }
+    if spans.is_empty() {
+        return vec![(display_len, default)];
+    }
+    let color = |id: crate::syntax::CaptureId| {
+        palette
+            .get(usize::from(id.0))
+            .copied()
+            .unwrap_or(default)
+    };
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    for (range, capture) in spans {
+        let start = range.start.min(line_text.len());
+        let end = range.end.min(line_text.len());
+        if end <= start {
+            continue;
+        }
+        let d0 = tabs.display_offset(start).min(display_len);
+        let d1 = tabs.display_offset(end).min(display_len);
+        if d1 <= d0 {
+            continue;
+        }
+        if d0 > cursor {
+            out.push((d0 - cursor, default));
+        }
+        let from = d0.max(cursor);
+        if d1 > from {
+            out.push((d1 - from, color(*capture)));
+        }
+        cursor = cursor.max(d1);
+    }
+    if cursor < display_len {
+        out.push((display_len - cursor, default));
+    }
+    out
+}
+
 /// x spans of highlight runs (byte ranges into the original line text,
 /// mapped through the tab expansion `text` was shaped from).
 fn mark_spans(runs: &[(usize, usize)], tabs: &TabExpansion, text: &ShapedLine) -> Vec<(f32, f32)> {
@@ -460,7 +554,12 @@ fn mark_spans(runs: &[(usize, usize)], tabs: &TabExpansion, text: &ShapedLine) -
         .map(|&(a, b)| (tabs.display_offset(a), tabs.display_offset(b)))
         .map(|(a, b)| (a.min(text.len()), b.min(text.len())))
         .filter(|(a, b)| b > a)
-        .map(|(a, b)| (f32::from(text.x_for_index(a)), f32::from(text.x_for_index(b))))
+        .map(|(a, b)| {
+            (
+                f32::from(text.x_for_index(a)),
+                f32::from(text.x_for_index(b)),
+            )
+        })
         .collect()
 }
 
@@ -507,9 +606,14 @@ impl Frame {
         for side in [Side::Old, Side::New] {
             self.paint_code(side, window, cx);
         }
-        window.with_content_mask(Some(ContentMask { bounds: geom.gutter }), |window| {
-            self.paint_gutter(window, cx);
-        });
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: geom.gutter,
+            }),
+            |window| {
+                self.paint_gutter(window, cx);
+            },
+        );
         paint_omit_waves(window, geom, &self.waves);
         for frame in &self.sides {
             let Some(thumb) = frame.thumb.as_ref().filter(|t| t.shown) else {
@@ -544,11 +648,17 @@ impl Frame {
                     text_x += COMMENT_BAR;
                 }
                 for &(a, b) in &row.marks {
-                    let rect = hline(text_x + a, text_x + b, row.y0 + (self.row_h - mark_h) / 2., mark_h);
+                    let rect = hline(
+                        text_x + a,
+                        text_x + b,
+                        row.y0 + (self.row_h - mark_h) / 2.,
+                        mark_h,
+                    );
                     window.paint_quad(fill(rect, theme::mod_chg()).corner_radii(px(2.)));
                 }
                 if let Some(text) = &row.text {
-                    text.paint(point(px(text_x), px(row.y0)), row_h, window, cx).ok();
+                    text.paint(point(px(text_x), px(row.y0)), row_h, window, cx)
+                        .ok();
                 }
                 // Row marker, pinned to the pane edge above scrolled text.
                 if row.commented {
@@ -605,7 +715,9 @@ impl Frame {
                     Side::Old => c1 - LN_PAD - f32::from(label.width),
                     Side::New => c0 + LN_PAD,
                 };
-                label.paint(point(px(x), px(row.y0)), row_h, window, cx).ok();
+                label
+                    .paint(point(px(x), px(row.y0)), row_h, window, cx)
+                    .ok();
             }
         }
     }
@@ -613,7 +725,8 @@ impl Frame {
 
 fn paint_bridges(window: &mut Window, placed: &[WinBridge], ln_w: f32) {
     for bridge in placed {
-        let parallel = (bridge.y_l0 - bridge.y_r0).abs() < 1. && (bridge.y_l1 - bridge.y_r1).abs() < 1.;
+        let parallel =
+            (bridge.y_l0 - bridge.y_r0).abs() < 1. && (bridge.y_l1 - bridge.y_r1).abs() < 1.;
         let mut path = PathBuilder::fill();
         if parallel {
             path.move_to(point(px(bridge.x_l), px(bridge.y_l0)));
@@ -734,7 +847,9 @@ const WAVE_STEP: f32 = 2.;
 
 fn wave_y(x: f32, base: f32, crest_at: Option<f32>) -> f32 {
     let phase = match crest_at {
-        Some(lock) => (x - lock) / WAVE_PERIOD * std::f32::consts::TAU + std::f32::consts::FRAC_PI_2,
+        Some(lock) => {
+            (x - lock) / WAVE_PERIOD * std::f32::consts::TAU + std::f32::consts::FRAC_PI_2
+        }
         None => x / WAVE_PERIOD * std::f32::consts::TAU,
     };
     base + phase.sin() * WAVE_AMP
@@ -917,9 +1032,11 @@ pub(super) fn insert_hitboxes(
     window: &mut Window,
 ) -> (Hitbox, [Hitbox; 2], [Option<Hitbox>; 2]) {
     let whole = window.insert_hitbox(geom.bounds, HitboxBehavior::Normal);
-    let code = [Side::Old, Side::New].map(|side| window.insert_hitbox(geom.pane(side), HitboxBehavior::Normal));
+    let code = [Side::Old, Side::New]
+        .map(|side| window.insert_hitbox(geom.pane(side), HitboxBehavior::Normal));
     let tracks = [Side::Old, Side::New].map(|side| {
-        tracks[side_ix(side)].then(|| window.insert_hitbox(geom.track(side), HitboxBehavior::Normal))
+        tracks[side_ix(side)]
+            .then(|| window.insert_hitbox(geom.track(side), HitboxBehavior::Normal))
     });
     (whole, code, tracks)
 }
@@ -940,7 +1057,11 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
         let delta = event.delta.pixel_delta(window.line_height());
         // Deltas are negative when the user scrolls down / right (AppKit
         // scrollingDelta, Windows wheel); flip to "content moves" signs.
-        let (dx, dy) = route_wheel(-f32::from(delta.x), -f32::from(delta.y), event.modifiers.shift);
+        let (dx, dy) = route_wheel(
+            -f32::from(delta.x),
+            -f32::from(delta.y),
+            event.modifiers.shift,
+        );
         if dy != 0. {
             entity.update(cx, |pane, cx| pane.scroll_by(dy, cx));
             cx.stop_propagation();
@@ -967,7 +1088,10 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
         let y = f32::from(event.position.y) - geom.top();
         for side in [Side::Old, Side::New] {
             let ix = side_ix(side);
-            if down_tracks[ix].as_ref().is_some_and(|t| t.is_hovered(window)) {
+            if down_tracks[ix]
+                .as_ref()
+                .is_some_and(|t| t.is_hovered(window))
+            {
                 let track = geom.track(side);
                 let local = f32::from(event.position.y - track.top());
                 entity.update(cx, |pane, cx| pane.press_track(side, local, cx));
@@ -1000,8 +1124,11 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
             return;
         }
         let pos = event.position;
-        let hovered = [Side::Old, Side::New]
-            .map(|side| tracks[side_ix(side)].as_ref().is_some_and(|t| t.is_hovered(window)));
+        let hovered = [Side::Old, Side::New].map(|side| {
+            tracks[side_ix(side)]
+                .as_ref()
+                .is_some_and(|t| t.is_hovered(window))
+        });
         let in_gutter = hitbox.is_hovered(window) && geom.gutter.contains(&pos);
         let y = f32::from(pos.y) - geom.top();
         let track_y = [Side::Old, Side::New].map(|side| f32::from(pos.y - geom.track(side).top()));
@@ -1044,5 +1171,46 @@ mod tests {
         assert_eq!(ln_col_width(5, 6.), 5. * 8. + LN_PAD);
         // A wider Code Font widens the column instead of spilling into the code.
         assert_eq!(ln_col_width(3, 9.5), 3. * 9.5 + LN_PAD);
+    }
+
+    fn rgba(c: Rgba) -> (u8, u8, u8) {
+        (
+            (c.r * 255.).round() as u8,
+            (c.g * 255.).round() as u8,
+            (c.b * 255.).round() as u8,
+        )
+    }
+
+    #[test]
+    fn runs_for_line_table() {
+        use crate::syntax::CaptureId;
+        let kw = rgb(0xaa00aa);
+        let str_c = rgb(0x00aa00);
+        let def = theme::text();
+        let palette = [kw, str_c];
+        let got = |line: &str, spans: &[(Range<usize>, CaptureId)]| {
+            let tabs = TabExpansion::new(line);
+            runs_for_line(line, spans, &tabs, &palette, def)
+                .into_iter()
+                .map(|(len, c)| (len, rgba(c)))
+                .collect::<Vec<_>>()
+        };
+        let kw_c = rgba(kw);
+        let str_rgb = rgba(str_c);
+        let def_c = rgba(def);
+
+        // Tabs before a token: "\tfn" → four spaces then "fn".
+        assert_eq!(
+            got("\tfn", &[(1..3, CaptureId(0))]),
+            [(4, def_c), (2, kw_c)]
+        );
+        // Token spanning the whole line.
+        assert_eq!(got("fn", &[(0..2, CaptureId(0))]), [(2, kw_c)]);
+        // Line with no spans → single default run.
+        assert_eq!(got("plain", &[]), [(5, def_c)]);
+        // Multibyte chars inside a string span.
+        let line = "\"中文\"";
+        assert_eq!(line.len(), 8);
+        assert_eq!(got(line, &[(0..8, CaptureId(1))]), [(8, str_rgb)]);
     }
 }

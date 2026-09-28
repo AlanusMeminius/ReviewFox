@@ -28,12 +28,8 @@ fn dock_icon(image: &NSImage) -> Retained<NSImage> {
     );
     let icon = NSImage::initWithSize(NSImage::alloc(), NSSize::new(CANVAS, CANVAS));
     icon.lockFocus();
-    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-        artwork,
-        CORNER_RADIUS,
-        CORNER_RADIUS,
-    )
-    .addClip();
+    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(artwork, CORNER_RADIUS, CORNER_RADIUS)
+        .addClip();
     unsafe { image.drawInRect(artwork) };
     icon.unlockFocus();
     icon

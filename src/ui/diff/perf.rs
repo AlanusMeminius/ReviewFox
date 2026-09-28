@@ -28,7 +28,9 @@ fn synthetic(lines: u32, hunks: u32) -> (String, String, Alignment, FoldState) {
     let equal = (lines / hunks).saturating_sub(3).max(1);
     let span = |start, count| LineSpan { start, count };
     let push = |text: &mut String, ln: u32, tag: &str| {
-        text.push_str(&format!("    let value_{ln} = compute({tag}, {ln}) + offset * {ln};\n"));
+        text.push_str(&format!(
+            "    let value_{ln} = compute({tag}, {ln}) + offset * {ln};\n"
+        ));
     };
     for h in 0..hunks {
         if h % 5 == 0 {
@@ -138,7 +140,12 @@ fn frame(layout: &Layout, scroll_s: &mut f32, dy: f32) -> usize {
         }
         black_box(&out);
         black_box(vp.gaps(side));
-        black_box(vp.visible_seams(side).iter().map(|&r| y_of(r as usize)).collect::<Vec<_>>());
+        black_box(
+            vp.visible_seams(side)
+                .iter()
+                .map(|&r| y_of(r as usize))
+                .collect::<Vec<_>>(),
+        );
         black_box(vp.max_top(side));
     }
     black_box(vp.bridges());
@@ -226,7 +233,10 @@ fn frame_cost_is_flat_in_file_length() {
         eprintln!("warm per-frame ratio 20k / 2k: {ratio:.2}");
         // Visible-rows-only: 10x the file must not cost anywhere near 10x per
         // frame (a few binary searches grow by log n).
-        assert!(ratio < 2.5, "per-frame cost grew {ratio:.2}x with 10x the file");
+        assert!(
+            ratio < 2.5,
+            "per-frame cost grew {ratio:.2}x with 10x the file"
+        );
         // Far under a 120 fps budget (8.3 ms) for the pure part.
         assert!(large.warm < Duration::from_millis(1));
     }

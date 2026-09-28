@@ -85,10 +85,8 @@ impl ColumnVibrancy {
     fn sync(&self, width_px: f32, height_px: f32) {
         if width_px <= 0.0 || height_px <= 0.0 {
             self.view.setHidden(true);
-            self.view.setFrame(NSRect::new(
-                NSPoint::new(0.0, 0.0),
-                NSSize::new(0.0, 0.0),
-            ));
+            self.view
+                .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)));
             return;
         }
         // Full-height left strip: AppKit origin is bottom-left; y=0 spans the

@@ -1,32 +1,32 @@
 use gpui::{
     AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, StatefulInteractiveElement,
-    StyleRefinement, Styled, Subscription, WeakEntity, Window, WindowControlArea, canvas, div,
-    SharedString, prelude::*, px, rgb,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, StyleRefinement, Styled, Subscription, WeakEntity, Window,
+    WindowControlArea, canvas, div, prelude::*, px, rgb,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::domain::{
-    Anchor, ChangedPath, Comparison, DiffFontSize, PathStatus, Review, SearchMatch, SearchScope, Side,
-    ViewOptions, search_file,
+    Anchor, ChangedPath, Comparison, DiffFontSize, PathStatus, Review, SearchMatch, SearchScope,
+    Side, ViewOptions, search_file,
 };
 
-use crate::export;
-use crate::git::{self, FileDiff};
-use crate::window_geometry_store;
+use super::appearance::{self, UiTextSize};
 use super::diff::pane::{self, DualPane, FontOp, PaneEvent, SlotBounds, placeholder};
 use super::file_tree::{self, TreeRow};
 use super::file_tree_rows;
+use super::icon_button::IconButton;
 #[cfg(target_os = "macos")]
 use super::mac_column_vibrancy::ColumnVibrancy;
 use super::scrollbar;
 use super::splitter::{self, Axis, ResizeState};
-use super::appearance::{self, UiTextSize};
-use super::icon_button::IconButton;
 use super::theme;
 use super::tooltip::{self, Tooltip};
 use super::window_geometry;
+use crate::export;
+use crate::git::{self, FileDiff};
+use crate::window_geometry_store;
 
 /// Own snapshot for the Diff window — not a live shared model with main.
 #[derive(Clone, Debug)]
@@ -98,7 +98,11 @@ impl Render for DiffShell {
 }
 
 impl DiffView {
-    pub fn with_snapshot(snapshot: DiffSnapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn with_snapshot(
+        snapshot: DiffSnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let review = Review::new(snapshot.comparison.clone());
         let pane = cx.new(DualPane::new);
         let pane_events = cx.subscribe_in(&pane, window, |this, _, event, window, cx| match event {
@@ -166,8 +170,9 @@ impl DiffView {
             return;
         };
         let file = snap.file.clone();
+        let path = snap.selected_path.clone();
         let comments = self.path_anchors();
-        self.with_pane(cx, |pane, cx| pane.open(&file, comments, cx));
+        self.with_pane(cx, |pane, cx| pane.open(&path, &file, comments, cx));
     }
 
     fn refresh_comments(&mut self, cx: &mut Context<Self>) {
@@ -423,7 +428,6 @@ impl DiffView {
         }
     }
 
-
     fn font_size(&mut self, op: FontOp, cx: &mut Context<Self>) {
         self.with_pane(cx, |pane, cx| pane.set_font_size(op, cx));
         // The toolbar shows the size, so it re-renders with the pane.
@@ -592,10 +596,7 @@ fn file_status(view: &DiffView, cx: &mut Context<DiffView>) -> (String, String) 
                         let n = view.hunk_index.unwrap_or(0) + 1;
                         format!("hunk {n} of {hunk_count}")
                     };
-                    format!(
-                        "{hunk_part} · {n} comment{}",
-                        if n == 1 { "" } else { "s" }
-                    )
+                    format!("{hunk_part} · {n} comment{}", if n == 1 { "" } else { "s" })
                 }
                 FileDiff::Binary => "binary file".into(),
                 FileDiff::Error(e) => e.clone(),
@@ -633,12 +634,7 @@ fn render_status_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
                 .whitespace_nowrap()
                 .child(path),
         )
-        .child(
-            div()
-                .flex_none()
-                .whitespace_nowrap()
-                .child(subtitle),
-        )
+        .child(div().flex_none().whitespace_nowrap().child(subtitle))
 }
 
 /// The status bar's band below the island. It replaces the stage's bottom inset,
@@ -729,10 +725,11 @@ fn render_titlebar(
                 )
                 .child(toolbar_divider())
                 .child(
-                    IconButton::new("expand-all", "unfold_vertical.svg", "Expand All")
-                        .on_click(cx.listener(|this, _, _, cx| {
+                    IconButton::new("expand-all", "unfold_vertical.svg", "Expand All").on_click(
+                        cx.listener(|this, _, _, cx| {
                             this.with_pane(cx, |pane, cx| pane.expand_all(cx));
-                        })),
+                        }),
+                    ),
                 )
                 .child(
                     IconButton::new("collapse-eq", "fold_vertical.svg", "Collapse Unchanged")
@@ -1199,7 +1196,11 @@ fn toggle_button(
     collapsed: bool,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
-    let label = if collapsed { "Show Files" } else { "Hide Files" };
+    let label = if collapsed {
+        "Show Files"
+    } else {
+        "Hide Files"
+    };
     IconButton::new(id, "sidebar_title.svg", label)
         .pressed(collapsed)
         .on_click(cx.listener(|this, _, _, cx| {
