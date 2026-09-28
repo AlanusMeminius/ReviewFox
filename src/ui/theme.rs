@@ -134,9 +134,13 @@ pub fn sidebar() -> Rgba {
 pub fn hover() -> Rgba {
     rgb(0xe9ebef)
 }
-/// Chrome pill fill (branch / MR toggles) — white on the frosted desk.
+/// Chrome pill fill (branch / value / unselected kind toggles) — white on the frosted desk.
 pub fn capsule() -> Rgba {
     white()
+}
+/// Hover fill on capsule chrome (prototype `--capsule-bg-hover`).
+pub fn capsule_track_hover() -> Rgba {
+    rgb(0xe4e7ed)
 }
 /// Sidebar active row — same blue as the app icon; chroma survives vibrancy.
 pub fn sidebar_selected() -> Rgba {

@@ -1,5 +1,9 @@
-//! Workspace set + last + pinned: (repo path, branch label, optional MR Entry label).
-//! No Review/Comparison persistence. MR label is project + IID only (ADR-0006).
+//! Workspace set + last + pinned: (repo path, branch label, optional MR labels).
+//! No Review/Comparison persistence. MR labels are project + IID only (ADR-0006).
+//!
+//! `mr` is the selected MR Entry (drives Comparison when present). `last_mr` is
+//! Workspace memory for return after Branch is selected (ADR-0011)—not a second
+//! selected Entry and does not drive Comparison while Branch Browser is selected.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -18,8 +22,12 @@ pub struct MrEntryLabel {
 pub struct WorkspaceEntry {
     pub path: PathBuf,
     pub branch: String,
+    /// Selected MR Entry label. When Some, MR drives Comparison.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mr: Option<MrEntryLabel>,
+    /// Last MR label for return (ADR-0011). May remain while `mr` is None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_mr: Option<MrEntryLabel>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,12 +46,15 @@ pub fn load() -> WorkspaceStore {
     let Ok(bytes) = std::fs::read(path) else {
         return WorkspaceStore::default();
     };
-    if let Ok(store) = serde_json::from_slice::<WorkspaceStore>(&bytes) {
+    if let Ok(mut store) = serde_json::from_slice::<WorkspaceStore>(&bytes) {
+        seed_last_mr_from_selected(&mut store);
         return store;
     }
     // Old format: bare JSON array of {path, branch}
     if let Ok(entries) = serde_json::from_slice::<Vec<WorkspaceEntry>>(&bytes) {
-        return migrate_array(entries);
+        let mut store = migrate_array(entries);
+        seed_last_mr_from_selected(&mut store);
+        return store;
     }
     WorkspaceStore::default()
 }
@@ -65,18 +76,44 @@ pub fn save(store: &WorkspaceStore) {
     }
 }
 
-/// Upsert by path (preserves `mr`), set `last`, write immediately.
+/// Upsert by path (preserves `mr` and `last_mr`), set `last`, write immediately.
 pub fn remember(path: &Path, branch: &str) {
     let mut store = load();
     remember_in(&mut store, path.to_path_buf(), branch.to_string());
     save(&store);
 }
 
-/// Upsert path/branch and set or clear the MR Entry label.
+/// Upsert path/branch and set or clear the selected MR Entry label.
+/// When `mr` is Some, also updates last-MR memory. When None, clears selected
+/// only — last-MR memory is preserved (ADR-0011).
 pub fn remember_with_mr(path: &Path, branch: &str, mr: Option<MrEntryLabel>) {
     let mut store = load();
     remember_in(&mut store, path.to_path_buf(), branch.to_string());
     set_mr_in(&mut store, path, mr);
+    save(&store);
+}
+
+/// Clear selected MR Entry only; last-MR memory is preserved (ADR-0011).
+pub fn clear_selected_mr(path: &Path) {
+    let mut store = load();
+    clear_selected_mr_in(&mut store, path);
+    save(&store);
+}
+
+/// Clear last-MR memory and any selected MR Entry for this path.
+/// Product may call this for an explicit clear (ADR-0011); ticket 01 exports the capability.
+#[allow(dead_code)]
+pub fn clear_last_mr_memory(path: &Path) {
+    let mut store = load();
+    clear_last_mr_memory_in(&mut store, path);
+    save(&store);
+}
+
+/// On Workspace open/launch: move selected `mr` into `last_mr` and clear `mr`
+/// so Comparison stays Branch-driven until the user picks MR kind (ADR-0011).
+pub fn demote_selected_mr_to_memory(path: &Path) {
+    let mut store = load();
+    demote_selected_mr_to_memory_in(&mut store, path);
     save(&store);
 }
 
@@ -147,6 +184,7 @@ fn remember_in(store: &mut WorkspaceStore, path: PathBuf, branch: String) {
             path: path.clone(),
             branch,
             mr: None,
+            last_mr: None,
         });
     }
     store.last = Some(path);
@@ -154,7 +192,40 @@ fn remember_in(store: &mut WorkspaceStore, path: PathBuf, branch: String) {
 
 fn set_mr_in(store: &mut WorkspaceStore, path: &Path, mr: Option<MrEntryLabel>) {
     if let Some(entry) = store.workspaces.iter_mut().find(|e| e.path == path) {
-        entry.mr = mr;
+        if let Some(label) = mr {
+            entry.last_mr = Some(label.clone());
+            entry.mr = Some(label);
+        } else {
+            entry.mr = None;
+        }
+    }
+}
+
+fn clear_selected_mr_in(store: &mut WorkspaceStore, path: &Path) {
+    set_mr_in(store, path, None);
+}
+
+fn clear_last_mr_memory_in(store: &mut WorkspaceStore, path: &Path) {
+    if let Some(entry) = store.workspaces.iter_mut().find(|e| e.path == path) {
+        entry.mr = None;
+        entry.last_mr = None;
+    }
+}
+
+fn demote_selected_mr_to_memory_in(store: &mut WorkspaceStore, path: &Path) {
+    if let Some(entry) = store.workspaces.iter_mut().find(|e| e.path == path) {
+        if let Some(label) = entry.mr.take() {
+            entry.last_mr = Some(label);
+        }
+    }
+}
+
+/// Old rows persisted only `mr`; treat that label as last-MR memory too (ADR-0011).
+fn seed_last_mr_from_selected(store: &mut WorkspaceStore) {
+    for entry in &mut store.workspaces {
+        if entry.last_mr.is_none() {
+            entry.last_mr = entry.mr.clone();
+        }
     }
 }
 
@@ -203,7 +274,21 @@ mod tests {
             path: PathBuf::from(path),
             branch: branch.into(),
             mr: None,
+            last_mr: None,
         }
+    }
+
+    fn label(project: &str, iid: u64) -> MrEntryLabel {
+        MrEntryLabel {
+            project: project.into(),
+            iid,
+        }
+    }
+
+    fn parse_store(json: &str) -> WorkspaceStore {
+        let mut store: WorkspaceStore = serde_json::from_str(json).unwrap();
+        seed_last_mr_from_selected(&mut store);
+        store
     }
 
     #[test]
@@ -228,21 +313,14 @@ mod tests {
             workspaces: vec![WorkspaceEntry {
                 path: PathBuf::from("/a"),
                 branch: "main".into(),
-                mr: Some(MrEntryLabel {
-                    project: "g/p".into(),
-                    iid: 7,
-                }),
+                mr: Some(label("g/p", 7)),
+                last_mr: Some(label("g/p", 7)),
             }],
         };
         remember_in(&mut store, PathBuf::from("/a"), "develop".into());
         assert_eq!(store.workspaces[0].branch, "develop");
-        assert_eq!(
-            store.workspaces[0].mr,
-            Some(MrEntryLabel {
-                project: "g/p".into(),
-                iid: 7,
-            })
-        );
+        assert_eq!(store.workspaces[0].mr, Some(label("g/p", 7)));
+        assert_eq!(store.workspaces[0].last_mr, Some(label("g/p", 7)));
     }
 
     #[test]
@@ -252,14 +330,120 @@ mod tests {
         set_mr_in(
             &mut store,
             Path::new("/a"),
-            Some(MrEntryLabel {
-                project: "acme/app".into(),
-                iid: 42,
-            }),
+            Some(label("acme/app", 42)),
         );
         assert_eq!(store.workspaces[0].mr.as_ref().unwrap().iid, 42);
         set_mr_in(&mut store, Path::new("/a"), None);
         assert!(store.workspaces[0].mr.is_none());
+    }
+
+    #[test]
+    fn selecting_mr_records_selected_and_last_mr() {
+        let mut store = WorkspaceStore::default();
+        remember_in(&mut store, PathBuf::from("/a"), "main".into());
+        set_mr_in(&mut store, Path::new("/a"), Some(label("acme/app", 42)));
+        assert_eq!(store.workspaces[0].mr, Some(label("acme/app", 42)));
+        assert_eq!(store.workspaces[0].last_mr, Some(label("acme/app", 42)));
+    }
+
+    #[test]
+    fn clearing_selected_mr_keeps_last_mr_memory() {
+        let mut store = WorkspaceStore::default();
+        remember_in(&mut store, PathBuf::from("/a"), "main".into());
+        set_mr_in(&mut store, Path::new("/a"), Some(label("acme/app", 42)));
+        set_mr_in(&mut store, Path::new("/a"), None);
+        assert!(store.workspaces[0].mr.is_none());
+        assert_eq!(store.workspaces[0].last_mr, Some(label("acme/app", 42)));
+    }
+
+    #[test]
+    fn clear_last_mr_memory_clears_memory_and_selected() {
+        let mut store = WorkspaceStore::default();
+        remember_in(&mut store, PathBuf::from("/a"), "main".into());
+        set_mr_in(&mut store, Path::new("/a"), Some(label("acme/app", 42)));
+        clear_last_mr_memory_in(&mut store, Path::new("/a"));
+        assert!(store.workspaces[0].mr.is_none());
+        assert!(store.workspaces[0].last_mr.is_none());
+    }
+
+    #[test]
+    fn demote_selected_mr_moves_to_last_mr_memory() {
+        let mut store = WorkspaceStore::default();
+        remember_in(&mut store, PathBuf::from("/a"), "main".into());
+        set_mr_in(&mut store, Path::new("/a"), Some(label("acme/app", 42)));
+        demote_selected_mr_to_memory_in(&mut store, Path::new("/a"));
+        assert!(store.workspaces[0].mr.is_none(), "open defaults to Branch Browser");
+        assert_eq!(store.workspaces[0].last_mr, Some(label("acme/app", 42)));
+    }
+
+    #[test]
+    fn demote_selected_mr_keeps_existing_last_mr_when_already_cleared() {
+        let mut store = WorkspaceStore {
+            last: None,
+            pinned: Vec::new(),
+            workspaces: vec![WorkspaceEntry {
+                path: PathBuf::from("/a"),
+                branch: "main".into(),
+                mr: None,
+                last_mr: Some(label("acme/app", 42)),
+            }],
+        };
+        demote_selected_mr_to_memory_in(&mut store, Path::new("/a"));
+        assert!(store.workspaces[0].mr.is_none());
+        assert_eq!(store.workspaces[0].last_mr, Some(label("acme/app", 42)));
+    }
+
+    #[test]
+    fn mr_selected_json_roundtrip_then_demote_yields_branch_with_memory() {
+        let store = WorkspaceStore {
+            last: Some(PathBuf::from("/a")),
+            pinned: Vec::new(),
+            workspaces: vec![WorkspaceEntry {
+                path: PathBuf::from("/a"),
+                branch: "main".into(),
+                mr: Some(label("acme/app", 42)),
+                last_mr: Some(label("acme/app", 42)),
+            }],
+        };
+        let json = serde_json::to_string(&store).unwrap();
+        assert!(json.contains("\"mr\""));
+        assert!(json.contains("\"last_mr\""));
+        let mut loaded: WorkspaceStore = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.workspaces[0].mr, Some(label("acme/app", 42)));
+        assert_eq!(loaded.workspaces[0].last_mr, Some(label("acme/app", 42)));
+        demote_selected_mr_to_memory_in(&mut loaded, Path::new("/a"));
+        let e = last_entry(&loaded).unwrap();
+        assert!(e.mr.is_none(), "after open demote: Branch selected");
+        assert_eq!(e.last_mr, Some(label("acme/app", 42)));
+    }
+
+    #[test]
+    fn branch_with_last_mr_roundtrips_without_selected_mr() {
+        let store = WorkspaceStore {
+            last: Some(PathBuf::from("/a")),
+            pinned: Vec::new(),
+            workspaces: vec![WorkspaceEntry {
+                path: PathBuf::from("/a"),
+                branch: "main".into(),
+                mr: None,
+                last_mr: Some(label("acme/app", 42)),
+            }],
+        };
+        let json = serde_json::to_string(&store).unwrap();
+        assert!(!json.contains("\"mr\":"));
+        assert!(json.contains("\"last_mr\""));
+        let loaded: WorkspaceStore = serde_json::from_str(&json).unwrap();
+        let e = last_entry(&loaded).unwrap();
+        assert!(e.mr.is_none(), "Branch selected: last_mr must not drive Comparison");
+        assert_eq!(e.last_mr, Some(label("acme/app", 42)));
+    }
+
+    #[test]
+    fn old_json_mr_field_seeds_last_mr_on_load() {
+        let json = r#"{"last":"/a","pinned":[],"workspaces":[{"path":"/a","branch":"main","mr":{"project":"g/p","iid":7}}]}"#;
+        let store = parse_store(json);
+        assert_eq!(store.workspaces[0].last_mr, Some(label("g/p", 7)));
+        assert_eq!(store.workspaces[0].mr, Some(label("g/p", 7)));
     }
 
     #[test]
@@ -269,6 +453,7 @@ mod tests {
         assert_eq!(store.last, Some(PathBuf::from("/z")));
         assert_eq!(store.workspaces.len(), 1);
         assert!(store.workspaces[0].mr.is_none());
+        assert!(store.workspaces[0].last_mr.is_none());
     }
 
     #[test]
@@ -360,5 +545,6 @@ mod tests {
         let json = r#"{"last":"/a","pinned":[],"workspaces":[{"path":"/a","branch":"main"}]}"#;
         let store: WorkspaceStore = serde_json::from_str(json).unwrap();
         assert!(store.workspaces[0].mr.is_none());
+        assert!(store.workspaces[0].last_mr.is_none());
     }
 }

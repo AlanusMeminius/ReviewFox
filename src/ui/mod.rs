@@ -2,6 +2,7 @@
 mod app_icon;
 mod appearance;
 mod app_view;
+mod entry_chrome;
 mod diff;
 mod diff_window;
 mod file_tree;
