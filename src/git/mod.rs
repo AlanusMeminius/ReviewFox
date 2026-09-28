@@ -140,7 +140,10 @@ impl BranchBrowser {
         });
         match result {
             Ok(bb) => {
-                workspace_store::remember(bb.comparison.repository.path(), &bb.branch);
+                let path = bb.comparison.repository.path();
+                workspace_store::remember(path, &bb.branch);
+                // Launch/open defaults to Branch Browser (ADR-0011).
+                workspace_store::demote_selected_mr_to_memory(path);
                 Ok(bb)
             }
             Err(e) => {

@@ -108,9 +108,9 @@ impl AppView {
             cx.entity().downgrade(),
             cx,
         );
-        let pending_mr = workspace_store::last_entry(&workspace_store::load())
-            .and_then(|e| e.mr.clone());
-        let mut view = Self {
+        // ADR-0011: launch defaults to Branch Browser. Persisted `mr` is demoted
+        // in open_workspace; ticket 02 restores from last_mr via chrome.
+        let view = Self {
             focus: cx.focus_handle(),
             repos_collapsed: false,
             state,
@@ -137,9 +137,6 @@ impl AppView {
             #[cfg(target_os = "macos")]
             window_vibrancy: None,
         };
-        if let Some(label) = pending_mr {
-            view.begin_restore_mr(label, cx);
-        }
         if let Some(reopen) = restore_diff {
             cx.spawn(async move |this, cx| {
                 this.update(cx, |this, cx| {
@@ -273,17 +270,15 @@ impl AppView {
     }
 
     /// Clears the selected MR Entry label only; last-MR memory is preserved (ADR-0011).
-    fn clear_persisted_mr_label(&mut self) {
+    fn clear_selected_mr_label(&mut self) {
         if let MainState::Ready(loaded) = &self.state {
-            workspace_store::remember_with_mr(
-                loaded.comparison.repository.path(),
-                &loaded.branch,
-                None,
-            );
+            workspace_store::clear_selected_mr(loaded.comparison.repository.path());
             self.refresh_store();
         }
     }
 
+    /// Restore MR Entry from a label (used when chrome selects MR kind; ticket 02).
+    #[allow(dead_code)] // ticket 02: restore from last_mr via chrome
     fn begin_restore_mr(&mut self, label: MrEntryLabel, cx: &mut Context<Self>) {
         if !gitlab_chrome_visible(self) {
             return;
@@ -308,17 +303,18 @@ impl AppView {
                 return;
             }
         }
-        let (branch, pending_mr, last_mr) = self
+        let (branch, last_mr) = self
             .store
             .workspaces
             .iter()
             .find(|e| e.path == path)
-            .map(|e| (e.branch.clone(), e.mr.clone(), e.last_mr.clone()))
-            .unwrap_or_else(|| ("HEAD".into(), None, None));
+            .map(|e| (e.branch.clone(), e.last_mr.clone()))
+            .unwrap_or_else(|| ("HEAD".into(), None));
+        // open_workspace demotes any selected `mr` into last_mr (ADR-0011).
         match BranchBrowser::open_workspace(&WorkspaceEntry {
             path: path.clone(),
             branch,
-            mr: pending_mr.clone(),
+            mr: None,
             last_mr,
         }) {
             Ok(bb) => {
@@ -327,9 +323,6 @@ impl AppView {
                 self.branch_picker = None;
                 self.mr_picker = None;
                 self.mr_entry = None;
-                if let Some(label) = pending_mr {
-                    self.begin_restore_mr(label, cx);
-                }
             }
             Err(_) => {
                 // Stale entry already dropped by open_workspace; keep current Ready if any.
@@ -639,7 +632,7 @@ impl AppView {
 
     fn clear_mr_entry(&mut self, cx: &mut Context<Self>) {
         self.mr_entry = None;
-        self.clear_persisted_mr_label();
+        self.clear_selected_mr_label();
         self.restore_branch_commits();
         cx.notify();
     }
