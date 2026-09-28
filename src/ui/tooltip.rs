@@ -6,6 +6,7 @@ use gpui::{
     prelude::FluentBuilder, rgb,
 };
 
+use super::appearance::{self, UiTextSize};
 use super::theme;
 
 pub struct Tooltip {
@@ -29,14 +30,14 @@ impl Tooltip {
 }
 
 impl Render for Tooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .px_2()
             .py_1()
             .rounded_md()
             .bg(rgb(0x273142))
-            .font_family(theme::UI_FONT)
-            .text_xs()
+            .font_family(appearance::ui_font(cx))
+            .ui_text_size(12., cx)
             .text_color(theme::white())
             .flex()
             .items_center()

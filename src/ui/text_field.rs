@@ -9,6 +9,7 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::appearance::{self, UiTextSize};
 use super::theme;
 
 actions!(
@@ -38,12 +39,16 @@ pub enum TextFieldEvent {
 }
 
 /// Visual variant. `Default` is the original full-width field; `Settings`
-/// follows Zed's settings input (min 256px wide, focused border).
+/// follows Zed's settings input (min 256px wide, focused border); `Number` is
+/// the bare centered value inside a `NumberField`, which draws the frame;
+/// `Search` is the frameless full-width query bar atop a picker popover.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TextFieldStyle {
     #[default]
     Default,
     Settings,
+    Number,
+    Search,
 }
 
 pub struct TextField {
@@ -507,6 +512,7 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
+        let centered = input.style == TextFieldStyle::Number;
         let focused = input.focus_handle.is_focused(window);
         let content = input.display_text(focused);
         let selected_range = input.selected_range.clone();
@@ -563,9 +569,14 @@ impl Element for TextElement {
         let cursor_width = px(2.);
         let visible = bounds.size.width - cursor_width;
         let cursor_x = line.x_for_index(cursor);
-        let mut scroll_x = input.scroll_x;
+        // A centered line that fits is drawn as a negative scroll.
+        let mut scroll_x = input.scroll_x.max(px(0.));
         if line.width <= visible {
-            scroll_x = px(0.);
+            scroll_x = if centered {
+                -((bounds.size.width - line.width) / 2.).floor()
+            } else {
+                px(0.)
+            };
         } else {
             if cursor_x - scroll_x > visible {
                 scroll_x = cursor_x - visible;
@@ -688,20 +699,27 @@ impl Render for TextField {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .h(px(32.))
-            .map(|field| match self.style {
-                TextFieldStyle::Default => field.w_full(),
-                TextFieldStyle::Settings => field
-                    .min_w(px(256.))
-                    .focus(|field| field.border_color(theme::border_focused())),
+            .map(|field| {
+                let framed = |field: gpui::Div| {
+                    field
+                        .h(px(32.))
+                        .px_2()
+                        .bg(theme::white())
+                        .border_1()
+                        .border_color(theme::line())
+                        .rounded(px(6.))
+                };
+                match self.style {
+                    TextFieldStyle::Default => framed(field).w_full(),
+                    TextFieldStyle::Settings => framed(field)
+                        .min_w(px(256.))
+                        .focus(|field| field.border_color(theme::border_focused())),
+                    TextFieldStyle::Number => field.size_full().px_1(),
+                    TextFieldStyle::Search => field.w_full().h(px(32.)).px_2(),
+                }
             })
-            .px_2()
-            .bg(theme::white())
-            .border_1()
-            .border_color(theme::line())
-            .rounded(px(6.))
-            .text_size(px(13.))
-            .font_family(theme::UI_FONT)
+            .ui_text_size(13., cx)
+            .font_family(appearance::ui_font(cx))
             .child(TextElement { input: cx.entity() })
     }
 }

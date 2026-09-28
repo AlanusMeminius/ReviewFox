@@ -10,15 +10,21 @@ use std::rc::Rc;
 use crate::gitlab::SettingsTarget;
 use crate::settings_store::{self, DEFAULT_BASE_URL};
 
+use super::font_picker;
 use super::nav::{NavItem, SettingsNav};
 use super::nav_tree::{NavEntry, NavPage, NavState};
+use super::number_field;
 use super::token_row::{self, CardStatus, KeychainError, TokenRow};
-use super::{Button, ButtonSize, ButtonStyle, ConfiguredCard, SectionHeader, SettingRow};
+use super::{
+    Button, ButtonSize, ButtonStyle, ConfiguredCard, FontPicker, FontPickerEvent, NumberField,
+    NumberFieldEvent, SectionHeader, SettingRow,
+};
 use crate::ui::gitlab_connection::{self, GitLabConnection};
 #[cfg(target_os = "macos")]
 use crate::ui::mac_column_vibrancy::ColumnVibrancy;
 use crate::ui::scrollbar;
 use crate::ui::text_field::{TextField, TextFieldEvent, TextFieldStyle};
+use crate::ui::appearance::{self, Appearance, FontRole, UiTextSize};
 use crate::ui::theme;
 use crate::ui::window_controls::window_controls;
 
@@ -46,15 +52,63 @@ const CLOSE_KEY: &str = "cmd-w";
 #[cfg(not(target_os = "macos"))]
 const CLOSE_KEY: &str = "ctrl-w";
 
-/// Tab order: nav, GitLab URL, then the token input or the token card's buttons.
+/// Tab order: nav, GitLab URL, then the token input or the token card's buttons
+/// (up to two), then each font group's family and size. Only the selected
+/// page's controls render, so each page tabs through its own.
 const TAB_NAV: isize = 0;
 const TAB_URL: isize = 1;
 const TAB_TOKEN: isize = 2;
+/// After the token card's two buttons (Retry, Reset Token).
+const TAB_UI_FONT_FAMILY: isize = TAB_TOKEN + 2;
+const TAB_UI_FONT_SIZE: isize = TAB_UI_FONT_FAMILY + 1;
+const TAB_CODE_FONT_FAMILY: isize = TAB_UI_FONT_SIZE + 1;
+const TAB_CODE_FONT_SIZE: isize = TAB_CODE_FONT_FAMILY + 1;
 
 const URL_TITLE: &str = "GitLab URL";
 const URL_DESCRIPTION: &str = "Your self-hosted GitLab address. Leave empty for gitlab.com.";
 const URL_PLACEHOLDER: &str = "https://gitlab.com";
 const RESET_TO_DEFAULT: &str = "Reset to Default";
+
+/// One group of Appearance › Fonts.
+#[derive(Clone, Copy)]
+struct FontGroup {
+    role: FontRole,
+    title: &'static str,
+    /// Element id prefix of the group's rows.
+    id: &'static str,
+    family_tab_index: isize,
+    size_tab_index: isize,
+    preview: &'static [&'static str],
+}
+
+/// A font group's controls.
+struct FontControls {
+    family: Entity<FontPicker>,
+    size: Entity<NumberField>,
+}
+
+const FONT_GROUPS: [FontGroup; 2] = [
+    FontGroup {
+        role: FontRole::Ui,
+        title: "UI Font",
+        id: "settings-ui-font",
+        family_tab_index: TAB_UI_FONT_FAMILY,
+        size_tab_index: TAB_UI_FONT_SIZE,
+        preview: &[
+            "The quick brown fox jumps over the lazy dog",
+            "敏捷的棕色狐狸跳过了懒狗",
+            "0123456789",
+        ],
+    },
+    FontGroup {
+        role: FontRole::Code,
+        title: "Code Font",
+        id: "settings-code-font",
+        family_tab_index: TAB_CODE_FONT_FAMILY,
+        size_tab_index: TAB_CODE_FONT_SIZE,
+        preview: &["fn main() { let 名称 = \"你好，世界\"; }", "0O o 1lI |"],
+    },
+];
 
 /// Settings-window bindings, scoped to [`CONTEXT`] / [`NAV_CONTEXT`].
 pub fn key_bindings() -> Vec<KeyBinding> {
@@ -68,28 +122,41 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("right", NavExpand, Some(NAV_CONTEXT)),
         KeyBinding::new("left", NavCollapse, Some(NAV_CONTEXT)),
     ]
+    .into_iter()
+    .chain(number_field::key_bindings())
+    .chain(font_picker::key_bindings())
+    .collect()
 }
 
 /// Level-2 nav entries; each renders one block of its page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Section {
     GitLab,
+    Fonts,
 }
 
 impl Section {
     fn title(self) -> &'static str {
         match self {
             Section::GitLab => "GitLab",
+            Section::Fonts => "Fonts",
         }
     }
 }
 
 /// The nav tree. A new page or section is a new entry here plus its render arm.
-const PAGES: &[NavPage<Section>] = &[NavPage {
-    title: "Accounts",
-    sections: &[Section::GitLab],
-    expanded: true,
-}];
+const PAGES: &[NavPage<Section>] = &[
+    NavPage {
+        title: "Accounts",
+        sections: &[Section::GitLab],
+        expanded: true,
+    },
+    NavPage {
+        title: "Appearance",
+        sections: &[Section::Fonts],
+        expanded: true,
+    },
+];
 
 /// The nav entry of `section`.
 fn nav_entry(section: Section) -> NavEntry {
@@ -116,6 +183,8 @@ pub struct SettingsView {
     has_saved_token: bool,
     keychain_error: Option<KeychainError>,
     gitlab_connection: Rc<RefCell<GitLabConnection>>,
+    /// One per [`FONT_GROUPS`] entry, same order.
+    font_controls: [FontControls; 2],
     nav_focus: FocusHandle,
     nav: NavState,
     /// Last nav interaction came from the keyboard: show the focus border.
@@ -148,7 +217,7 @@ impl SettingsView {
         let has_saved_token = settings_store::load_pat().is_some_and(|p| !p.trim().is_empty());
 
         let base_url_focus = base_url.read(cx).focus_handle(cx);
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.subscribe(&base_url, |view, _, event: &TextFieldEvent, cx| match event {
                 TextFieldEvent::Confirm => view.commit_base_url(cx),
             }),
@@ -157,7 +226,38 @@ impl SettingsView {
             cx.subscribe(&pat, |view, _, event: &TextFieldEvent, cx| match event {
                 TextFieldEvent::Confirm => view.commit_token(cx),
             }),
+            // Resets (and any other outside change) re-sync the size fields.
+            cx.observe_global::<Appearance>(|view, cx| view.sync_font_sizes(cx)),
         ];
+        let font_controls = FONT_GROUPS.map(|group| {
+            let family = cx.new(|cx| {
+                let id = format!("{}-family", group.id);
+                FontPicker::new(id, group.role, group.family_tab_index, cx)
+            });
+            subscriptions.push(cx.subscribe(
+                &family,
+                move |_, _, event: &FontPickerEvent, cx| match event {
+                    FontPickerEvent::Confirm(family) => {
+                        appearance::set_family(cx, group.role, Some(family))
+                    }
+                },
+            ));
+            let size = cx.new(|cx| {
+                let role = group.role;
+                let size = role.size(cx.global::<Appearance>());
+                let id = ElementId::Name(format!("{}-size-field", group.id).into());
+                NumberField::new(id, size, role.size_range(), group.size_tab_index, window, cx)
+            });
+            subscriptions.push(cx.subscribe(
+                &size,
+                move |_, _, event: &NumberFieldEvent, cx| match *event {
+                    NumberFieldEvent::Change(size) => {
+                        appearance::update(cx, |file| group.role.set_size(file, Some(size)))
+                    }
+                },
+            ));
+            FontControls { family, size }
+        });
 
         // The scroll handle lives in a global registry and outlives the window.
         let (content_scroll, _) = scrollbar::vertical(CONTENT_SCROLL_ID, cx);
@@ -171,6 +271,7 @@ impl SettingsView {
             has_saved_token,
             keychain_error: None,
             gitlab_connection,
+            font_controls,
             nav_focus: cx.focus_handle().tab_index(TAB_NAV).tab_stop(true),
             nav: NavState::new(PAGES),
             nav_keyboard: false,
@@ -212,7 +313,9 @@ impl SettingsView {
 
         let mut file = settings_store::load_file();
         file.gitlab_base_url = (normalized != DEFAULT_BASE_URL).then(|| normalized.clone());
-        settings_store::save_file(&file);
+        // A refused save (unreadable file) keeps the value for this session
+        // only; the user's broken file stays as they left it.
+        settings_store::save_file(&file).ok();
         self.saved_base_url = normalized;
         if self.has_saved_token {
             self.refresh_connection(cx);
@@ -224,6 +327,24 @@ impl SettingsView {
         self.base_url
             .update(cx, |field, cx| field.set_content(DEFAULT_BASE_URL, cx));
         self.commit_base_url(cx);
+    }
+
+    fn sync_font_sizes(&mut self, cx: &mut Context<Self>) {
+        for (group, controls) in FONT_GROUPS.iter().zip(&self.font_controls) {
+            let size = group.role.size(cx.global::<Appearance>());
+            controls.size.update(cx, |field, cx| field.set_value(size, cx));
+        }
+    }
+
+    /// Closing does not blur the size fields; apply a typed size directly
+    /// rather than through their Change events while the window goes away.
+    fn commit_font_sizes(&mut self, cx: &mut Context<Self>) {
+        for (group, controls) in FONT_GROUPS.iter().zip(&self.font_controls) {
+            let pending = controls.size.update(cx, |field, cx| field.take_pending(cx));
+            if let Some(size) = pending {
+                appearance::update(cx, |file| group.role.set_size(file, Some(size)));
+            }
+        }
     }
 
     /// Enter in the token field: store it (whatever verify later says), then verify.
@@ -407,6 +528,7 @@ impl SettingsView {
                     .child(SectionHeader::new(section.title()))
                     .child(match section {
                         Section::GitLab => self.render_gitlab_section(cx),
+                        Section::Fonts => self.render_fonts_section(cx),
                     })
             })
             .collect();
@@ -441,7 +563,7 @@ impl SettingsView {
                             .flex_none()
                             .pt(px(8.))
                             .pb(px(12.))
-                            .text_size(px(16.))
+                            .ui_text_size(16., cx)
                             .text_color(theme::text())
                             .child(page.title),
                     )
@@ -553,6 +675,119 @@ impl SettingsView {
     }
 }
 
+// Appearance › Fonts.
+impl SettingsView {
+    /// [`FONT_GROUPS`], each a heading, its rows and a preview.
+    fn render_fonts_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            // Section end: the last preview's 16px plus this make the usual 40px.
+            .pb(px(24.))
+            .children(
+                FONT_GROUPS
+                    .iter()
+                    .zip(&self.font_controls)
+                    .map(|(&group, controls)| self.render_font_group(group, controls, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// Heading, rows (each with its divider), then the preview in the group's
+    /// resolved family and size.
+    fn render_font_group(
+        &self,
+        group: FontGroup,
+        controls: &FontControls,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let appearance = cx.global::<Appearance>();
+        let family = group.role.family(appearance).name.clone();
+        // For the UI Font this is `ui_text(13.)`: the size is the body size.
+        let size = px(group.role.size(appearance) as f32);
+
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .pt(px(24.))
+                    .ui_text_size(14., cx)
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme::text())
+                    .child(group.title),
+            )
+            .child(render_family_row(group, controls, cx))
+            .child(render_size_row(group, controls, cx))
+            .child(
+                div().pt(px(16.)).pb(px(16.)).child(
+                    font_preview(group.preview)
+                        .font_family(family)
+                        .text_size(size),
+                ),
+            )
+    }
+}
+
+/// `Family` row; Reset to Default (shown while a family is stored, also one
+/// that is not installed) removes the field from `settings.json`.
+fn render_family_row(
+    group: FontGroup,
+    controls: &FontControls,
+    cx: &mut Context<SettingsView>,
+) -> SettingRow {
+    let role = group.role;
+    let id = format!("{}-family", group.id);
+    let stored = role.family(cx.global::<Appearance>()).stored.is_some();
+    SettingRow::new(ElementId::Name(id.clone().into()), "Family")
+        .when(stored, |row| {
+            row.title_action(
+                Button::icon_only(ElementId::Name(format!("{id}-reset").into()), "undo.svg")
+                    .tooltip(RESET_TO_DEFAULT)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        appearance::set_family(cx, role, None)
+                    })),
+            )
+        })
+        .control(controls.family.clone())
+}
+
+/// `Size` row; Reset to Default removes the field from `settings.json`.
+fn render_size_row(
+    group: FontGroup,
+    controls: &FontControls,
+    cx: &mut Context<SettingsView>,
+) -> SettingRow {
+    let role = group.role;
+    let id = format!("{}-size", group.id);
+    let non_default = role.size(cx.global::<Appearance>()) != role.default_size();
+    SettingRow::new(ElementId::Name(id.clone().into()), "Size")
+        .when(non_default, |row| {
+            row.title_action(
+                Button::icon_only(ElementId::Name(format!("{id}-reset").into()), "undo.svg")
+                    .tooltip(RESET_TO_DEFAULT)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        appearance::update(cx, |file| role.set_size(file, None))
+                    })),
+            )
+        })
+        .control(controls.size.clone())
+}
+
+/// Preview lines in a quiet box; the caller sets the family and size.
+fn font_preview(lines: &'static [&'static str]) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .p(px(12.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme::border_variant())
+        .text_color(theme::text())
+        .children(lines.iter().map(|&line| div().child(line)))
+}
+
 /// Bare drag band across the window: no title text (the page title already
 /// heads the island), traffic lights on macOS, caption buttons on Windows.
 fn render_titlebar(window: &Window) -> impl IntoElement {
@@ -608,7 +843,9 @@ impl Render for SettingsView {
             // The window's one translucent layer; the nav and the gutters stay
             // clear so it is not painted twice.
             .bg(theme::frost())
-            .font_family(theme::UI_FONT)
+            .font_family(appearance::ui_font(cx))
+            // Unsized UI text inherits gpui's 1rem default (16px), scaled like the rest.
+            .ui_text_size(16., cx)
             .text_color(theme::text())
             .child(render_titlebar(window))
             .child(
@@ -628,6 +865,7 @@ impl Render for SettingsView {
             .on_action(cx.listener(|view, _: &CloseSettings, window, cx| {
                 // Closing does not blur the field; keep an unsaved URL edit.
                 view.commit_base_url(cx);
+                view.commit_font_sizes(cx);
                 window.remove_window();
             }))
             .on_action(cx.listener(|view, _: &FocusNextControl, window, cx| {

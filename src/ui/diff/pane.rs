@@ -6,7 +6,8 @@
 use gpui::{
     AnyElement, AnyView, App, Bounds, Context, Element, ElementId, Entity, EventEmitter,
     GlobalElementId, InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Position,
-    Render, Style, StyleRefinement, Styled, Task, Timer, Window, div, font, px,
+    Render, SharedString, Style, StyleRefinement, Styled, Subscription, Task, Timer, Window, div,
+    font, px,
 };
 use std::cell::Cell;
 use std::rc::Rc;
@@ -17,6 +18,7 @@ use crate::domain::{
     match_jump_plan,
 };
 use crate::git::FileDiff;
+use crate::ui::appearance::{Appearance, UiTextSize};
 use crate::ui::{scrollbar, theme};
 use super::element::{
     self, BarState, Decorations, FrameInput, Geom, ShapeCache, build_frame, insert_hitboxes,
@@ -69,8 +71,10 @@ pub struct DualPane {
     /// Widest shaped line seen per side since the last Layout rebuild / font
     /// change. Only grows, so the bound never shrinks while scrolling.
     widest_seen: [f32; 2],
-    /// Mono advance of `'0'` at `(font px, advance)`.
+    /// Mono advance of `'0'` at `(font px, advance)` in `code_font`.
     mono_advance: Option<(f32, f32)>,
+    /// Advance of `'0'` in `code_font` at the line-number size.
+    ln_advance: Option<f32>,
     /// Element height, set in prepaint. 0 until the first frame.
     view_h: f32,
     /// Device pixels per logical pixel, from the last prepaint.
@@ -86,14 +90,21 @@ pub struct DualPane {
     /// `s_range` clamping. Jumps near the file ends move no pixels, so chrome
     /// and the next jump follow this until the user scrolls.
     hunk_s: Option<f32>,
-    /// Session-level mono size for both panes and ribbons (§3.5).
+    /// Mono size for both panes and ribbons (§3.5). Based on the Code Font
+    /// size setting; A−/A+ override it for this pane's session only.
     font_size: DiffFontSize,
+    /// Code Font family the caches were shaped with.
+    code_font: SharedString,
+    _appearance: Subscription,
 }
 
 impl EventEmitter<PaneEvent> for DualPane {}
 
 impl DualPane {
-    pub fn new() -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let appearance = cx.global::<Appearance>();
+        let font_size = DiffFontSize::new(appearance.code_font_size);
+        let code_font = appearance.code_font.name.clone();
         Self {
             file: None,
             fold: FoldState::collapsed(),
@@ -106,6 +117,7 @@ impl DualPane {
             max_x: [0.; 2],
             widest_seen: [0.; 2],
             mono_advance: None,
+            ln_advance: None,
             view_h: 0.,
             scale: 1.,
             hover_copy: None,
@@ -114,8 +126,35 @@ impl DualPane {
             bar_hide: None,
             hunk_index: None,
             hunk_s: Some(0.),
-            font_size: DiffFontSize::default(),
+            font_size,
+            code_font,
+            _appearance: cx.observe_global::<Appearance>(Self::apply_appearance),
         }
+    }
+
+    /// A Code Font size change resets the pane to it, dropping A−/A+; a family
+    /// change reshapes everything.
+    fn apply_appearance(&mut self, cx: &mut Context<Self>) {
+        let appearance = cx.global::<Appearance>();
+        let base = appearance.code_font_size;
+        let family = appearance.code_font.name.clone();
+        if base != self.font_size.base() {
+            self.change_font_size(|size| *size = DiffFontSize::new(base), cx);
+        }
+        if family != self.code_font {
+            self.code_font = family;
+            self.mono_advance = None;
+            self.ln_advance = None;
+            self.invalidate_shapes();
+            cx.notify();
+        }
+    }
+
+    /// Drop shaped text and the widest-line bound it fed; the next prepaint
+    /// reshapes what is visible.
+    fn invalidate_shapes(&mut self) {
+        self.shapes.clear();
+        self.widest_seen = [0.; 2];
     }
 
     /// Open a file at its start with everything folded.
@@ -199,8 +238,7 @@ impl DualPane {
     /// Rebuild the Layout from the file, `fold` and the comment index.
     fn rebuild_layout(&mut self) {
         self.layout = None;
-        self.shapes.clear();
-        self.widest_seen = [0.; 2];
+        self.invalidate_shapes();
         let Some(file) = self.file.as_ref() else {
             return;
         };
@@ -358,13 +396,20 @@ impl DualPane {
     }
 
     pub fn set_font_size(&mut self, op: FontOp, cx: &mut Context<Self>) {
+        self.change_font_size(
+            |size| match op {
+                FontOp::Inc => size.increase(),
+                FontOp::Dec => size.decrease(),
+                FontOp::Reset => size.reset(),
+            },
+            cx,
+        );
+    }
+
+    fn change_font_size(&mut self, change: impl FnOnce(&mut DiffFontSize), cx: &mut Context<Self>) {
         let prev = self.row_h();
         let prev_px = self.font_size.px() as f32;
-        match op {
-            FontOp::Inc => self.font_size.increase(),
-            FontOp::Dec => self.font_size.decrease(),
-            FontOp::Reset => self.font_size.reset(),
-        }
+        change(&mut self.font_size);
         let next = self.row_h();
         if prev > 0. {
             self.scroll_s *= next / prev;
@@ -376,8 +421,7 @@ impl DualPane {
                 *x *= next_px / prev_px;
             }
         }
-        self.widest_seen = [0.; 2];
-        self.shapes.clear();
+        self.invalidate_shapes();
         cx.notify();
     }
 
@@ -418,21 +462,24 @@ impl DualPane {
         }
     }
 
-    /// Advance of one mono char at `font_px`, cached per size.
+    /// Advance of one mono char at `font_px`, cached per size (and cleared on a
+    /// Code Font family change).
     fn mono_advance(&mut self, font_px: f32, window: &Window) -> f32 {
         if let Some((at, advance)) = self.mono_advance
             && at == font_px
         {
             return advance;
         }
-        let text = window.text_system();
-        let id = text.resolve_font(&font(theme::code_font()));
-        let advance = text
-            .advance(id, px(font_px), '0')
-            .map(|s| f32::from(s.width))
-            .unwrap_or(font_px * 0.6);
+        let advance = zero_advance(&self.code_font, font_px, window);
         self.mono_advance = Some((font_px, advance));
         advance
+    }
+
+    /// Line-number digit advance; see [`element::ln_col_width`].
+    fn ln_advance(&mut self, window: &Window) -> f32 {
+        *self
+            .ln_advance
+            .get_or_insert_with(|| zero_advance(&self.code_font, element::LN_FONT_PX, window))
     }
 
     /// Show both scrollbars and (re)arm the idle hide timer.
@@ -596,12 +643,14 @@ impl DualPane {
         let row_h = self.row_h();
         let font_px = self.font_size.px() as f32;
         let advance = self.mono_advance(font_px, window);
+        let ln_advance = self.ln_advance(window);
         let layout = self.layout.as_ref()?;
         let t_vp = trace::start();
         let vp = Viewport::new(layout, self.scroll_s, self.view_h, row_h).snapped(self.scale);
         let viewport_took = trace::since(t_vp);
         let s = vp.s();
-        let geom = Geom::new(bounds, ln_col_width(line_number_digits(layout)), self.scale);
+        let ln_w = ln_col_width(line_number_digits(layout), ln_advance);
+        let geom = Geom::new(bounds, ln_w, self.scale);
         let tracks = [Side::Old, Side::New]
             .map(|side| thumb_for(self.view_h, vp.max_top(side), vp.top(side)).is_some());
         let hitboxes = insert_hitboxes(&geom, tracks, window);
@@ -612,6 +661,7 @@ impl DualPane {
                 geom,
                 row_h,
                 font_px,
+                code_family: &self.code_font,
                 scale: self.scale,
                 decorations: Decorations {
                     drafting: self.drafting,
@@ -651,10 +701,19 @@ impl DualPane {
     }
 }
 
+/// Advance of `'0'` in `family` at `font_px`.
+fn zero_advance(family: &SharedString, font_px: f32, window: &Window) -> f32 {
+    let text = window.text_system();
+    let id = text.resolve_font(&font(family.clone()));
+    text.advance(id, px(font_px), '0')
+        .map(|s| f32::from(s.width))
+        .unwrap_or(font_px * 0.6)
+}
+
 impl Render for DualPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.layout.is_none() {
-            return placeholder("No Layout");
+            return placeholder("No Layout", cx);
         }
         element::dual_pane(cx.entity()).into_any_element()
     }
@@ -757,13 +816,13 @@ pub enum FontOp {
     Reset,
 }
 
-pub fn placeholder(msg: &str) -> gpui::AnyElement {
+pub fn placeholder(msg: &str, cx: &App) -> gpui::AnyElement {
     div()
         .flex_1()
         .flex()
         .items_center()
         .justify_center()
-        .text_sm()
+        .ui_text_size(14., cx)
         .text_color(theme::muted())
         .child(msg.to_string())
         .into_any_element()

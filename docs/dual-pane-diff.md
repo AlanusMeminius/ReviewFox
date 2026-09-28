@@ -84,7 +84,7 @@ Connector ends use each side’s current viewport Y, so a bridge slants while on
 
 - **Hunk jump**: previous / next Hunk. The Hunk’s first visual line — on the side that has lines — is placed on the viewport anchor (§3.1, about one third down) and the scroll gap is the gap at that line. The other side shows its corresponding line, or its seam when it has no line there, at that same height. If that line lies in a collapsed Equal span, expand that span on both sides first, then place the line using the row counts after expansion.
 - **In-file search**: find string in old and/or new text; matches listed with side + line. Jumping to a match uses the same landing as a Hunk jump: if the match lies in a collapsed Equal span, expand that span on both sides first; then place the line on the viewport anchor (§3.1) and use the scroll gap at that line after expansion.
-- **Font size**: increase / decrease / reset for the dual-pane mono text (session-level is enough)
+- **Font size**: increase / decrease / reset for the dual-pane mono text. The base size is the persisted Code Font size setting; A−/A+ are session-only per-pane overrides, `A` returns to the setting, and a change of the setting resets every pane to it
 - **Ignore whitespace**: `ViewOptions.ignore_whitespace` wired into `compute_alignment` and a Diff UI toggle; changing it **recomputes Alignment** (same Comparison identity — see CONTEXT ViewOptions)
 
 ### 3.6 Intra-line (word-level) highlight

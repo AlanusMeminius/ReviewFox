@@ -30,6 +30,7 @@ use super::metadata;
 use super::scrollbar;
 use super::settings;
 use super::splitter::{self, Axis, ResizeState};
+use super::appearance::{self, UiTextSize};
 use super::icon_button::IconButton;
 use super::theme;
 use super::tooltip;
@@ -1021,7 +1022,9 @@ impl Render for AppView {
             // The window's one translucent layer; `#body`, `#repos` and `#stage`
             // all stay clear so it is not painted twice.
             .bg(theme::frost())
-            .font_family(theme::UI_FONT)
+            .font_family(appearance::ui_font(cx))
+            // Unsized UI text inherits gpui's 1rem default (16px), scaled like the rest.
+            .ui_text_size(16., cx)
             .track_focus(&self.focus)
             // The only band that reaches both window edges, so it can own the whole drag
             // surface and seat the caption buttons in the corner.
@@ -1115,7 +1118,7 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
                                 .px_2()
                                 .pt_1()
                                 .pb_1()
-                                .text_xs()
+                                .ui_text_size(12., cx)
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(theme::faint())
                                 .child("Pin"),
@@ -1139,7 +1142,7 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
                             .px_2()
                             .pt_1()
                             .pb_1()
-                            .text_xs()
+                            .ui_text_size(12., cx)
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme::faint())
                             .child("Repositories"),
@@ -1226,7 +1229,7 @@ fn sidebar_repo_row(
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
-                .text_sm()
+                .ui_text_size(14., cx)
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(if active {
                     theme::on_sidebar_selected()
@@ -1300,7 +1303,7 @@ fn render_repo_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                             )
                             .child(
                                 div()
-                                    .text_sm()
+                                    .ui_text_size(14., cx)
                                     .text_color(theme::text())
                                     .child(label),
                             )
@@ -1314,6 +1317,7 @@ fn render_repo_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
 /// The window's one full-width band. Every gap in it drags, and on Windows the caption
 /// buttons close it out flush against the right edge — no floating overlay, no dead strip.
 fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -> impl IntoElement {
+    let mono = appearance::code_font(cx);
     let (branch, label) = match &view.state {
         MainState::Ready(loaded) => (loaded.branch.clone(), loaded.comparison.label()),
         MainState::Empty | MainState::Error(_) => ("—".into(), "—".into()),
@@ -1365,7 +1369,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_xs()
+                    .ui_text_size(12., cx)
                     .text_color(theme::text())
                     .child(branch),
             )
@@ -1414,7 +1418,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_xs()
+                    .ui_text_size(12., cx)
                     .text_color(if view.mr_entry.is_some() {
                         theme::text()
                     } else {
@@ -1502,7 +1506,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                 .child(
                     div()
                         .flex_none()
-                        .font_family(theme::MONO_FONT)
+                        .font_family(mono.clone())
                         .text_xs()
                         .text_color(theme::muted())
                         .child(label),
@@ -1589,13 +1593,14 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
 }
 
 fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+    let mono = appearance::code_font(cx);
     let body = match &view.state {
         MainState::Empty => div().flex_1().into_any_element(),
         MainState::Error(msg) => div()
             .flex_1()
             .px_3()
             .py_3()
-            .text_sm()
+            .ui_text_size(14., cx)
             .text_color(rgb(0xb42318))
             .child(msg.clone())
             .into_any_element(),
@@ -1649,7 +1654,7 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
                                         div()
                                             .w_full()
                                             .min_w(px(0.))
-                                            .text_sm()
+                                            .ui_text_size(14., cx)
                                             .font_weight(gpui::FontWeight::MEDIUM)
                                             .text_color(theme::text())
                                             .overflow_hidden()
@@ -1661,7 +1666,7 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
                                         div()
                                             .w_full()
                                             .min_w(px(0.))
-                                            .font_family(theme::MONO_FONT)
+                                            .font_family(mono.clone())
                                             .text_xs()
                                             .text_color(theme::muted())
                                             .overflow_hidden()
@@ -1832,7 +1837,7 @@ fn render_mr_entry_detail(
         .bg(theme::white())
         .rounded(px(theme::CHANGES_RADIUS))
         .overflow_hidden()
-        .text_xs()
+        .ui_text_size(12., cx)
         .text_color(theme::muted())
         .child(scrollbar::overlay_flex(
             div()
@@ -1850,21 +1855,21 @@ fn render_mr_entry_detail(
                     MrDetailState::Failed(note) => {
                         vec![render_error_note("mr-detail-open-settings", note, false, cx)]
                     }
-                    MrDetailState::Ready(detail) => mr_entry_ready_lines(detail),
+                    MrDetailState::Ready(detail) => mr_entry_ready_lines(detail, cx),
                 }),
             sb,
         ))
 }
 
-fn mr_entry_ready_lines(detail: &MergeRequestDetail) -> Vec<gpui::AnyElement> {
+fn mr_entry_ready_lines(detail: &MergeRequestDetail, cx: &App) -> Vec<gpui::AnyElement> {
     let mut lines: Vec<gpui::AnyElement> = vec![
         div()
-            .text_sm()
+            .ui_text_size(14., cx)
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(theme::text())
             .child(detail.title.clone())
             .into_any_element(),
-        metadata::row(mr_metadata_items(detail)).into_any_element(),
+        metadata::row(mr_metadata_items(detail), cx).into_any_element(),
     ];
 
     if let Some(desc) = detail.description.as_deref() {
@@ -1939,7 +1944,7 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
             .size_full()
             .px_2()
             .py_3()
-            .text_sm()
+            .ui_text_size(14., cx)
             .text_color(theme::muted())
             .child("Loading open merge requests…")
             .into_any_element(),
@@ -1947,7 +1952,7 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
             .size_full()
             .px_2()
             .py_3()
-            .text_sm()
+            .ui_text_size(14., cx)
             .child(render_error_note("mr-picker-open-settings", note, true, cx))
             .into_any_element(),
         MrPickerBody::Ready {
@@ -1984,7 +1989,7 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                         div()
                             .px_2()
                             .py_1()
-                            .text_xs()
+                            .ui_text_size(12., cx)
                             .text_color(theme::muted())
                             .child(filter),
                     )
@@ -1993,7 +1998,7 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                             div()
                                 .px_3()
                                 .py_2()
-                                .text_sm()
+                                .ui_text_size(14., cx)
                                 .text_color(theme::muted())
                                 .child("No matching merge requests."),
                         )
@@ -2015,8 +2020,8 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_mr(select_mr.clone(), cx);
                             }))
-                            .child(picker_line(theme::text(), true, title))
-                            .child(picker_line(theme::muted(), false, branches))
+                            .child(picker_line(theme::text(), true, title, cx))
+                            .child(picker_line(theme::muted(), false, branches, cx))
                     })),
                 sb,
             )
@@ -2074,7 +2079,7 @@ fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoE
                 div()
                     .px_2()
                     .py_1()
-                    .text_xs()
+                    .ui_text_size(12., cx)
                     .text_color(theme::muted())
                     .child(format!("Filter: {}", picker.query)),
             )
@@ -2092,7 +2097,7 @@ fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoE
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_branch(&name, cx);
                     }))
-                    .child(picker_line(theme::text(), true, branch.name.clone()))
+                    .child(picker_line(theme::text(), true, branch.name.clone(), cx))
                     .child(picker_line(
                         theme::muted(),
                         false,
@@ -2100,6 +2105,7 @@ fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoE
                             "{} · {} · {}",
                             branch.tip.author, branch.tip.time_label, branch.tip.summary
                         ),
+                        cx,
                     ))
             })),
         sb,
@@ -2191,6 +2197,7 @@ fn picker_line(
     color: gpui::Rgba,
     primary: bool,
     text: impl Into<gpui::SharedString>,
+    cx: &App,
 ) -> Div {
     div()
         .w_full()
@@ -2200,8 +2207,8 @@ fn picker_line(
             div()
                 .w_full()
                 .min_w(px(0.))
-                .when(primary, |d| d.text_sm())
-                .when(!primary, |d| d.text_xs())
+                .when(primary, |d| d.ui_text_size(14., cx))
+                .when(!primary, |d| d.ui_text_size(12., cx))
                 .text_color(color)
                 .overflow_hidden()
                 .text_ellipsis()
@@ -2211,6 +2218,7 @@ fn picker_line(
 }
 
 fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+    let mono = appearance::code_font(cx);
     let paths = match &view.state {
         MainState::Ready(loaded) => loaded.changed_paths.clone(),
         MainState::Empty | MainState::Error(_) => Vec::new(),
@@ -2261,7 +2269,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                 .pb_1()
                 .child(
                     div()
-                        .text_xs()
+                        .ui_text_size(12., cx)
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme::faint())
                         .child(format!("Changes ({})", paths.len())),
@@ -2328,7 +2336,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                     .h(px(16.))
                                     .flex()
                                     .items_center()
-                                    .text_xs()
+                                    .ui_text_size(12., cx)
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(theme::muted())
                                     .child(name),
@@ -2357,7 +2365,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .font_family(theme::MONO_FONT)
+                                    .font_family(mono.clone())
                                     .text_xs()
                                     .text_color(match status {
                                         PathStatus::Add => rgb(0x1a7f4b),
@@ -2373,7 +2381,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                     .min_w(px(0.))
                                     .flex()
                                     .items_center()
-                                    .text_xs()
+                                    .ui_text_size(12., cx)
                                     .text_color(theme::text())
                                     .overflow_hidden()
                                     .child(
@@ -2388,7 +2396,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                     .h(px(16.))
                                     .flex()
                                     .items_center()
-                                    .font_family(theme::MONO_FONT)
+                                    .font_family(mono.clone())
                                     .text_xs()
                                     .gap_1()
                                     .child(
@@ -2435,6 +2443,7 @@ fn head_commit_meta(loaded: &BranchBrowser) -> Option<HeadMeta> {
 }
 
 fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> impl IntoElement {
+    let mono = appearance::code_font(cx);
     let full_oid = meta.commit.oid.to_string();
     let short = meta.commit.oid.short();
     let body = meta.commit.body.clone();
@@ -2459,7 +2468,7 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
         .child(
             div()
                 .min_w(px(0.))
-                .text_xs()
+                .ui_text_size(12., cx)
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme::text())
                 .overflow_hidden()
@@ -2471,12 +2480,14 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
                 .flex()
                 .items_center()
                 .gap_1()
-                .text_xs()
+                .ui_text_size(12., cx)
                 .text_color(theme::muted())
                 .child(
                     div()
                         .id("head-meta-hash")
-                        .font_family(theme::MONO_FONT)
+                        .font_family(mono.clone())
+                        // Own size: the UI text around it scales, Code Font chrome does not.
+                        .text_xs()
                         .cursor_pointer()
                         .hover(|d| d.text_color(theme::accent()))
                         .on_click(cx.listener(move |_, _, _, cx| {
@@ -2491,7 +2502,9 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
                 .when_some(meta.range_label.clone(), |d, label| {
                     d.child(div().child("·")).child(
                         div()
-                            .font_family(theme::MONO_FONT)
+                            .font_family(mono.clone())
+                            // Own size: the UI text around it scales, Code Font chrome does not.
+                            .text_xs()
                             .text_color(theme::faint())
                             .child(label),
                     )
@@ -2505,7 +2518,7 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
                     .size_full()
                     .track_scroll(&scroll)
                     .overflow_y_scroll()
-                    .text_xs()
+                    .ui_text_size(12., cx)
                     .text_color(theme::muted())
                     .child(body),
                 sb,

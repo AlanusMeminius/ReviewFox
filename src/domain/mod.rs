@@ -362,11 +362,13 @@ fn collapsed_equal_containing(
     None
 }
 
-/// Session-level mono font size for dual-pane Diff (§3.5). One value drives
-/// both panes and the ribbons/gutter metrics.
+/// Mono font size for dual-pane Diff (§3.5). One value drives both panes and
+/// the ribbons/gutter metrics. `base` is the Code Font size setting; A−/A+ move
+/// `px` for the session only and `reset` (A) returns to `base`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DiffFontSize {
     px: u32,
+    base: u32,
 }
 
 impl DiffFontSize {
@@ -374,8 +376,18 @@ impl DiffFontSize {
     pub const MIN: u32 = 10;
     pub const MAX: u32 = 22;
 
+    /// Starts at `base`, clamped to `MIN..=MAX`.
+    pub fn new(base: u32) -> Self {
+        let base = base.clamp(Self::MIN, Self::MAX);
+        Self { px: base, base }
+    }
+
     pub fn px(self) -> u32 {
         self.px
+    }
+
+    pub fn base(self) -> u32 {
+        self.base
     }
 
     pub fn increase(&mut self) {
@@ -387,7 +399,7 @@ impl DiffFontSize {
     }
 
     pub fn reset(&mut self) {
-        self.px = Self::DEFAULT;
+        self.px = self.base;
     }
 
     /// Row height matching the prototype: `round(fontSize * 22 / 13)`.
@@ -398,9 +410,7 @@ impl DiffFontSize {
 
 impl Default for DiffFontSize {
     fn default() -> Self {
-        Self {
-            px: Self::DEFAULT,
-        }
+        Self::new(Self::DEFAULT)
     }
 }
 
@@ -967,5 +977,19 @@ mod tests {
 
         size.reset();
         assert_eq!(size.px(), DiffFontSize::DEFAULT);
+    }
+
+    #[test]
+    fn diff_font_size_resets_to_its_base_and_clamps_it() {
+        let mut size = DiffFontSize::new(16);
+        assert_eq!(size.px(), 16);
+        size.increase();
+        size.increase();
+        assert_eq!(size.px(), 18);
+        size.reset();
+        assert_eq!(size.px(), 16);
+
+        assert_eq!(DiffFontSize::new(40).px(), DiffFontSize::MAX);
+        assert_eq!(DiffFontSize::new(2).px(), DiffFontSize::MIN);
     }
 }
