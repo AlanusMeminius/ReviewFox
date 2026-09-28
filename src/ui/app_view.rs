@@ -26,7 +26,7 @@ use super::entry_chrome::{
     self, EntryChromeMode, EntryKind, KindSwitchAction, RestoreFailureAction,
 };
 use super::file_tree::{self, TreeRow};
-use super::file_tree_rows;
+use super::file_tree_rows::{self, RowSurface};
 use super::gitlab_connection::{self, GitLabConnection};
 #[cfg(target_os = "macos")]
 use super::mac_column_vibrancy::ColumnVibrancy;
@@ -38,7 +38,6 @@ use super::splitter::{self, Axis, ResizeState};
 use super::appearance::{self, UiTextSize};
 use super::icon_button::IconButton;
 use super::theme;
-use super::tooltip;
 use super::window_controls::window_controls;
 use super::window_geometry;
 use super::OpenSettings;
@@ -1206,6 +1205,7 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
         .map(|e| row(e.path.clone()))
         .collect();
     let pin_section = (!pinned_rows.is_empty()).then_some(pinned_rows);
+    let has_pins = pin_section.is_some();
     let repos: Vec<(PathBuf, String, bool, bool)> = workspace_store::repository_entries(&view.store)
         .into_iter()
         .map(|e| row(e.path.clone()))
@@ -1226,45 +1226,28 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
                 div()
                     .id("sidebar-repos-scroll")
                     .size_full()
-                    .px_2()
-                    .pt_1()
+                    .px(px(theme::SIDEBAR_ROW_INSET))
+                    .pt(px(theme::SIDEBAR_SCROLL_PAD_TOP))
                     .track_scroll(&scroll)
                     .overflow_y_scroll()
                     .when_some(pin_section, |d, pinned_rows| {
-                        d.child(
-                            div()
-                                .px_2()
-                                .pt_1()
-                                .pb_1()
-                                .ui_text_size(12., cx)
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme::faint())
-                                .child("Pin"),
+                        d.child(sidebar_section_header("Pin", false, cx)).children(
+                            pinned_rows.into_iter().enumerate().map(
+                                |(i, (path, name, active, gitlab))| {
+                                    sidebar_repo_row(
+                                        ("pin-repo", i),
+                                        path,
+                                        name,
+                                        active,
+                                        gitlab,
+                                        Some(RepoMenuKind::Pin),
+                                        cx,
+                                    )
+                                },
+                            ),
                         )
-                        .children(pinned_rows.into_iter().enumerate().map(
-                            |(i, (path, name, active, gitlab))| {
-                                sidebar_repo_row(
-                                    ("pin-repo", i),
-                                    path,
-                                    name,
-                                    active,
-                                    gitlab,
-                                    Some(RepoMenuKind::Pin),
-                                    cx,
-                                )
-                            },
-                        ))
                     })
-                    .child(
-                        div()
-                            .px_2()
-                            .pt_1()
-                            .pb_1()
-                            .ui_text_size(12., cx)
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme::faint())
-                            .child("Repositories"),
-                    )
+                    .child(sidebar_section_header("Repositories", has_pins, cx))
                     .children(repos.into_iter().enumerate().map(
                         |(i, (path, name, active, gitlab))| {
                             sidebar_repo_row(
@@ -1284,12 +1267,72 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
         .child(
             div()
                 .flex_none()
-                .flex()
-                .items_center()
-                .px_3()
-                .py_2()
-                .child(settings_button(cx)),
+                .px(px(theme::SIDEBAR_ROW_INSET))
+                .pb(px(theme::SIDEBAR_SETTINGS_PAD_BOTTOM))
+                .child(
+                    sidebar_nav_row("open-settings", "gear.svg", "Settings", false, cx).on_click(
+                        cx.listener(|_, _, window, cx| {
+                            // Deferred: `cx.dispatch_action` can't re-enter this window mid-update.
+                            window.dispatch_action(Box::new(OpenSettings), cx);
+                        }),
+                    ),
+                ),
         )
+}
+
+fn sidebar_nav_row(
+    id: impl Into<gpui::ElementId>,
+    icon: &'static str,
+    label: impl Into<gpui::SharedString>,
+    selected: bool,
+    cx: &App,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .w_full()
+        .h(px(theme::SIDEBAR_ROW_HEIGHT))
+        .px(px(theme::SIDEBAR_ROW_PAD_X))
+        .rounded(px(theme::SIDEBAR_ROW_RADIUS))
+        .min_w(px(0.))
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .gap(px(theme::SIDEBAR_ICON_LABEL_GAP))
+        .cursor_pointer()
+        .when(selected, |d| d.bg(theme::sidebar_row_selected()))
+        .when(!selected, |d| {
+            d.hover(|d| d.bg(theme::sidebar_row_hover()))
+                .active(|d| d.bg(theme::sidebar_row_selected()))
+        })
+        .child(
+            svg()
+                .size(theme::ICON_SIZE)
+                .flex_none()
+                .path(icon)
+                .text_color(theme::muted()),
+        )
+        .child(
+            div()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .ui_label_size(13., cx)
+                .text_color(theme::text())
+                .child(label.into()),
+        )
+}
+
+fn sidebar_section_header(label: &'static str, extra_top: bool, cx: &App) -> impl IntoElement {
+    div()
+        .h(px(theme::SIDEBAR_SECTION_HEIGHT))
+        .when(extra_top, |d| d.mt(px(theme::SIDEBAR_SECTION_GAP)))
+        .pl(px(theme::SIDEBAR_ROW_PAD_X))
+        .flex()
+        .items_end()
+        .ui_text_size(11., cx)
+        .text_color(theme::faint())
+        .child(label)
 }
 
 fn sidebar_repo_row(
@@ -1304,25 +1347,8 @@ fn sidebar_repo_row(
     let path_click = path.clone();
     let path_menu = path.clone();
     let icon = if gitlab { "gitlab.svg" } else { "folder.svg" };
-    let icon_color = if active {
-        theme::on_sidebar_selected()
-    } else {
-        theme::muted()
-    };
-    div()
-        .id(id)
-        .mb_1()
-        .px_2()
-        .py_1()
-        .rounded_lg()
-        .min_w(px(0.))
-        .overflow_hidden()
-        .flex()
-        .items_center()
-        .gap_2()
-        .cursor_pointer()
-        .when(active, |d| d.bg(theme::sidebar_selected()))
-        .when(!active, |d| d.hover(|d| d.bg(theme::hover())))
+    sidebar_nav_row(id, icon, name, active, cx)
+        .mb(px(theme::SIDEBAR_ROW_GAP))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.select_repo(path_click.clone(), cx);
         }))
@@ -1334,28 +1360,6 @@ fn sidebar_repo_row(
                 }),
             )
         })
-        .child(
-            svg()
-                .size(theme::ICON_SIZE)
-                .flex_none()
-                .path(icon)
-                .text_color(icon_color),
-        )
-        .child(
-            div()
-                .min_w(px(0.))
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .ui_label_size(14., cx)
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(if active {
-                    theme::on_sidebar_selected()
-                } else {
-                    theme::text()
-                })
-                .child(name),
-        )
         .into_any_element()
 }
 
@@ -1836,7 +1840,7 @@ fn entry_kind_hit(
 fn collapsed_leading_width() -> f32 {
     let controls = 12. + f32::from(theme::TOGGLE_SIZE) * 2. + theme::CHROME_GAP;
     #[cfg(target_os = "macos")]
-    let controls = controls + theme::TRAFFIC_LIGHTS_WIDTH;
+    let controls = controls + theme::TRAFFIC_LIGHTS_WIDTH + theme::CHROME_GAP;
     controls
 }
 
@@ -2649,7 +2653,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                     TreeRow::Dir { depth, name, path } => {
                         let collapsed = view.collapsed_dirs.contains(&path);
                         let toggle_path = path.clone();
-                        file_tree_rows::dir_row(("dir", i), depth, name, collapsed, cx)
+                        file_tree_rows::dir_row(("dir", i), depth, name, collapsed, RowSurface::Island, cx)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.collapsed_dirs.remove(&toggle_path) {
                                     this.collapsed_dirs.insert(toggle_path.clone());
@@ -2663,6 +2667,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                             depth,
                             &path,
                             false,
+                            RowSurface::Island,
                             mono.clone(),
                             cx,
                         )
@@ -2958,15 +2963,6 @@ fn open_repo_button(id: &'static str, cx: &mut Context<AppView>) -> impl IntoEle
     IconButton::new(id, "folder.svg", "Open Repo").on_click(cx.listener(|this, _, _, cx| {
         this.open_repo(cx);
     }))
-}
-
-fn settings_button(cx: &mut Context<AppView>) -> impl IntoElement {
-    IconButton::new("open-settings", "gear.svg", "Settings")
-        .shortcut(tooltip::cmd(","))
-        .on_click(cx.listener(|_, _, window, cx| {
-            // Deferred: `cx.dispatch_action` can't re-enter this window mid-update.
-            window.dispatch_action(Box::new(OpenSettings), cx);
-        }))
 }
 
 fn toggle_button(
