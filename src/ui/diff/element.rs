@@ -77,13 +77,26 @@ impl ShapeCache {
 pub(super) struct BarState {
     pub visible: bool,
     pub hovered: [bool; 2],
-    /// Side being dragged and the grab offset inside the thumb.
+    /// Vertical: side being dragged and grab offset inside the thumb.
     pub drag: Option<(Side, f32)>,
+    pub h_hovered: [bool; 2],
+    /// Horizontal: side being dragged and grab offset inside the thumb.
+    pub h_drag: Option<(Side, f32)>,
 }
 
 impl BarState {
     fn shown(&self, side: Side) -> bool {
         self.visible || self.hovered[side_ix(side)] || self.drag.is_some_and(|(s, _)| s == side)
+    }
+
+    fn h_shown(&self, side: Side) -> bool {
+        self.visible
+            || self.h_hovered[side_ix(side)]
+            || self.h_drag.is_some_and(|(s, _)| s == side)
+    }
+
+    pub(super) fn any_drag(&self) -> bool {
+        self.drag.is_some() || self.h_drag.is_some()
     }
 }
 
@@ -143,6 +156,19 @@ impl Geom {
             size(px(scrollbar::TRACK_WIDTH), px(h)),
         )
     }
+
+    /// Horizontal track along the bottom of the code column (overlay, §3.1.2).
+    pub fn h_track(&self, side: Side) -> Bounds<Pixels> {
+        let pane = self.pane(side);
+        let w = (f32::from(pane.size.width) - scrollbar::PAD * 2.).max(0.);
+        Bounds::new(
+            point(
+                px(f32::from(pane.left()) + scrollbar::PAD),
+                px(f32::from(pane.bottom()) - scrollbar::TRACK_WIDTH - scrollbar::PAD),
+            ),
+            size(px(w), px(scrollbar::TRACK_WIDTH)),
+        )
+    }
 }
 
 /// Thumb geometry for a side whose top is `top` of `max_top` in a `view_h` pane.
@@ -197,6 +223,7 @@ struct SideFrame {
     seams: Vec<(f32, bool)>,
     empty_seam: Option<f32>,
     thumb: Option<Thumb>,
+    h_thumb: Option<Thumb>,
     /// Widest shaped text among this frame's rows.
     widest: f32,
     /// Horizontal scroll of the code text, device-pixel snapped. Set after
@@ -225,9 +252,10 @@ struct WinBridge {
 pub struct Frame {
     geom: Geom,
     row_h: f32,
-    hitbox: Hitbox,
-    code: [Hitbox; 2],
-    tracks: [Option<Hitbox>; 2],
+    pub(super) hitbox: Hitbox,
+    pub(super) code: [Hitbox; 2],
+    pub(super) tracks: [Option<Hitbox>; 2],
+    pub(super) h_tracks: [Option<Hitbox>; 2],
     sides: [SideFrame; 2],
     bridges: Vec<WinBridge>,
     /// Omission separator joins: (old y, new y), window.
@@ -255,7 +283,6 @@ pub(super) struct FrameInput<'a> {
 pub(super) fn build_frame(
     input: FrameInput<'_>,
     shapes: &mut ShapeCache,
-    hitboxes: (Hitbox, [Hitbox; 2], [Option<Hitbox>; 2]),
     window: &mut Window,
 ) -> Frame {
     let FrameInput {
@@ -362,6 +389,7 @@ pub(super) fn build_frame(
                 .is_empty()
                 .then(|| snap(top + vp.empty_seam(side), scale)),
             thumb,
+            h_thumb: None,
             widest,
             x_offset: 0.,
         }
@@ -394,14 +422,17 @@ pub(super) fn build_frame(
         (Vec::new(), Vec::new())
     };
 
-    let (hitbox, code, tracks) = hitboxes;
+    let hitbox = window.insert_hitbox(geom.bounds, HitboxBehavior::Normal);
+    let code = [Side::Old, Side::New]
+        .map(|side| window.insert_hitbox(geom.pane(side), HitboxBehavior::Normal));
     stats.build = trace::since(t_build);
     Frame {
         geom,
         row_h,
         hitbox,
         code,
-        tracks,
+        tracks: [None, None],
+        h_tracks: [None, None],
         sides,
         bridges,
         waves,
@@ -600,6 +631,25 @@ impl Frame {
         self.sides[side_ix(side)].x_offset = x;
     }
 
+    pub(super) fn set_h_thumb(
+        &mut self,
+        side: Side,
+        geom: super::viewport::HThumbGeom,
+        bars: &BarState,
+    ) {
+        let track = self.geom.h_track(side);
+        let inset = (scrollbar::TRACK_WIDTH - scrollbar::THUMB_WIDTH) / 2.;
+        let rect = Bounds::new(
+            point(track.left() + px(geom.thumb_left), track.top() + px(inset)),
+            size(px(geom.thumb_width), px(scrollbar::THUMB_WIDTH)),
+        );
+        self.sides[side_ix(side)].h_thumb = Some(Thumb {
+            rect,
+            shown: bars.h_shown(side),
+            dragging: bars.h_drag.is_some_and(|(s, _)| s == side),
+        });
+    }
+
     fn paint(&self, window: &mut Window, cx: &mut App) {
         let geom = self.geom;
         window.paint_quad(fill(geom.bounds, theme::white()));
@@ -616,17 +666,21 @@ impl Frame {
         );
         paint_omit_waves(window, geom, &self.waves);
         for frame in &self.sides {
-            let Some(thumb) = frame.thumb.as_ref().filter(|t| t.shown) else {
-                continue;
-            };
-            let color = if thumb.dragging {
-                scrollbar::THUMB_ACTIVE
-            } else {
-                scrollbar::THUMB_IDLE
-            };
-            window.paint_quad(
-                fill(thumb.rect, rgb(color)).corner_radii(px(scrollbar::THUMB_WIDTH / 2.)),
-            );
+            for thumb in frame
+                .thumb
+                .iter()
+                .chain(frame.h_thumb.iter())
+                .filter(|t| t.shown)
+            {
+                let color = if thumb.dragging {
+                    scrollbar::THUMB_ACTIVE
+                } else {
+                    scrollbar::THUMB_IDLE
+                };
+                window.paint_quad(
+                    fill(thumb.rect, rgb(color)).corner_radii(px(scrollbar::THUMB_WIDTH / 2.)),
+                );
+            }
         }
     }
 
@@ -1014,7 +1068,12 @@ impl Element for DualPaneElement {
         for code in &frame.code {
             window.set_cursor_style(CursorStyle::PointingHand, code);
         }
-        for track in frame.tracks.iter().flatten() {
+        for track in frame
+            .tracks
+            .iter()
+            .chain(frame.h_tracks.iter())
+            .flatten()
+        {
             window.set_cursor_style(CursorStyle::Arrow, track);
         }
         register_listeners(&self.pane, frame, window);
@@ -1024,21 +1083,22 @@ impl Element for DualPaneElement {
     }
 }
 
-/// Insert the element's hitboxes (prepaint only): the whole element for the
-/// wheel, each code pane for clicks, each scrollbar track (when it scrolls).
-pub(super) fn insert_hitboxes(
+/// Vertical and horizontal scrollbar tracks when that side overflows.
+pub(super) fn insert_scrollbar_hitboxes(
     geom: &Geom,
-    tracks: [bool; 2],
+    v_tracks: [bool; 2],
+    h_tracks: [bool; 2],
     window: &mut Window,
-) -> (Hitbox, [Hitbox; 2], [Option<Hitbox>; 2]) {
-    let whole = window.insert_hitbox(geom.bounds, HitboxBehavior::Normal);
-    let code = [Side::Old, Side::New]
-        .map(|side| window.insert_hitbox(geom.pane(side), HitboxBehavior::Normal));
+) -> ([Option<Hitbox>; 2], [Option<Hitbox>; 2]) {
     let tracks = [Side::Old, Side::New].map(|side| {
-        tracks[side_ix(side)]
+        v_tracks[side_ix(side)]
             .then(|| window.insert_hitbox(geom.track(side), HitboxBehavior::Normal))
     });
-    (whole, code, tracks)
+    let h_tracks = [Side::Old, Side::New].map(|side| {
+        h_tracks[side_ix(side)]
+            .then(|| window.insert_hitbox(geom.h_track(side), HitboxBehavior::Normal))
+    });
+    (tracks, h_tracks)
 }
 
 fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Window) {
@@ -1046,6 +1106,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
     let hitbox = frame.hitbox.clone();
     let code = frame.code.clone();
     let tracks = frame.tracks.clone();
+    let h_tracks = frame.h_tracks.clone();
 
     let entity = pane.clone();
     let wheel_hitbox = hitbox.clone();
@@ -1081,6 +1142,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
     let entity = pane.clone();
     let down_code = code.clone();
     let down_tracks = tracks.clone();
+    let down_h_tracks = h_tracks.clone();
     window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
         if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
             return;
@@ -1095,6 +1157,18 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                 let track = geom.track(side);
                 let local = f32::from(event.position.y - track.top());
                 entity.update(cx, |pane, cx| pane.press_track(side, local, cx));
+                return;
+            }
+        }
+        for side in [Side::Old, Side::New] {
+            let ix = side_ix(side);
+            if down_h_tracks[ix]
+                .as_ref()
+                .is_some_and(|t| t.is_hovered(window))
+            {
+                let track = geom.h_track(side);
+                let local = f32::from(event.position.x - track.left());
+                entity.update(cx, |pane, cx| pane.press_h_track(side, local, cx));
                 return;
             }
         }
@@ -1129,11 +1203,25 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                 .as_ref()
                 .is_some_and(|t| t.is_hovered(window))
         });
+        let h_hovered = [Side::Old, Side::New].map(|side| {
+            h_tracks[side_ix(side)]
+                .as_ref()
+                .is_some_and(|t| t.is_hovered(window))
+        });
         let in_gutter = hitbox.is_hovered(window) && geom.gutter.contains(&pos);
         let y = f32::from(pos.y) - geom.top();
         let track_y = [Side::Old, Side::New].map(|side| f32::from(pos.y - geom.track(side).top()));
+        let h_track_x =
+            [Side::Old, Side::New].map(|side| f32::from(pos.x - geom.h_track(side).left()));
         entity.update(cx, |pane, cx| {
-            pane.mouse_moved(hovered, in_gutter.then_some(y), track_y, cx)
+            pane.mouse_moved(
+                hovered,
+                h_hovered,
+                in_gutter.then_some(y),
+                track_y,
+                h_track_x,
+                cx,
+            )
         });
     });
 }

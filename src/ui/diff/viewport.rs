@@ -563,6 +563,47 @@ pub fn clamp_x(x: f32, max: f32) -> f32 {
     x.clamp(0., max.max(0.))
 }
 
+/// Horizontal scrollbar thumb geometry (matches `scrollbar.rs` insets/sizing).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HThumbGeom {
+    pub thumb_width: f32,
+    pub thumb_left: f32,
+    track_width: f32,
+    max_x: f32,
+}
+
+const H_TRACK_PAD: f32 = 4.;
+const H_MIN_THUMB: f32 = 24.;
+
+/// Thumb along the bottom of a code pane when `max_x > 0`.
+pub fn h_thumb_for(view_w: f32, max_x: f32, x_offset: f32) -> Option<HThumbGeom> {
+    let track_width = (view_w - H_TRACK_PAD * 2.).max(0.);
+    if max_x <= 0. || track_width <= 0. {
+        return None;
+    }
+    let content = view_w + max_x;
+    let thumb_width = (track_width * (view_w / content)).max(H_MIN_THUMB);
+    let travel = (track_width - thumb_width).max(0.);
+    let ratio = (x_offset / max_x).clamp(0., 1.);
+    Some(HThumbGeom {
+        thumb_width,
+        thumb_left: travel * ratio,
+        track_width,
+        max_x,
+    })
+}
+
+/// `x_offset` that puts the thumb's leading edge at `thumb_left` in the track.
+pub fn x_at(geom: &HThumbGeom, thumb_left: f32) -> f32 {
+    let travel = (geom.track_width - geom.thumb_width).max(0.);
+    let ratio = if travel > 0. {
+        (thumb_left / travel).clamp(0., 1.)
+    } else {
+        0.
+    };
+    geom.max_x * ratio
+}
+
 /// Horizontal travel when both panes share one offset (§3.1.2).
 pub fn max_x_synced(max_per_side: [f32; 2]) -> f32 {
     max_per_side[0].max(max_per_side[1]).max(0.)
@@ -1126,5 +1167,39 @@ mod tests {
         assert_eq!(shared_x_on_sync_enable([10., 90.], None), 10.);
         assert_eq!(shared_x_on_sync_enable([10., 90.], Some(Side::Old)), 10.);
         assert_eq!(shared_x_on_sync_enable([10., 90.], Some(Side::New)), 90.);
+    }
+
+    #[test]
+    fn h_thumb_none_without_overflow() {
+        assert!(h_thumb_for(400., 0., 0.).is_none());
+        assert!(h_thumb_for(0., 100., 0.).is_none());
+    }
+
+    #[test]
+    fn h_thumb_at_left_and_right() {
+        let left = h_thumb_for(400., 500., 0.).unwrap();
+        assert_eq!(left.thumb_left, 0.);
+
+        let right = h_thumb_for(400., 500., 500.).unwrap();
+        let travel = right.track_width - right.thumb_width;
+        assert!((right.thumb_left - travel).abs() < 0.01);
+    }
+
+    #[test]
+    fn h_thumb_drag_round_trips_x_offset() {
+        let view_w = 400.;
+        let max = 800.;
+        for x in [0., 1., 200., 799., 800.] {
+            let geom = h_thumb_for(view_w, max, x).unwrap();
+            let back = x_at(&geom, geom.thumb_left);
+            assert!((back - x).abs() < 0.01, "x {x} came back as {back}");
+        }
+    }
+
+    #[test]
+    fn h_thumb_drag_clamps_to_travel() {
+        let geom = h_thumb_for(400., 800., 200.).unwrap();
+        assert_eq!(x_at(&geom, -40.), 0.);
+        assert_eq!(x_at(&geom, 10_000.), 800.);
     }
 }
