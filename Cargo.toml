@@ -29,6 +29,7 @@ similar = "2.7"
 unicode-segmentation = "1.12"
 url = "2"
 gpui_util = "=0.2.2"
+pulldown-cmark = { version = "=0.12.0", default-features = false }
 regex = "1.5"
 log = "0.4"
 tree-sitter = "0.27"
@@ -40,6 +41,7 @@ tree-sitter-cmake = "0.7"
 
 [dev-dependencies]
 tempfile = "3"
+gpui = { version = "=0.2.2", features = ["test-support"] }
 gpui_http_client = { version = "=0.2.2", features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

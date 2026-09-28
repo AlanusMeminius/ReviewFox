@@ -29,6 +29,7 @@ use super::gitlab_connection::{self, GitLabConnection};
 use super::mac_column_vibrancy::ColumnVibrancy;
 use super::metadata;
 use super::scrollbar;
+use super::selectable_markdown;
 use super::settings;
 use super::splitter::{self, Axis, ResizeState};
 use super::appearance::{self, UiTextSize};
@@ -67,6 +68,8 @@ pub struct AppView {
     head_meta_height: f32,
     head_meta_resize_state: Rc<ResizeState>,
     mr_detail_height: f32,
+    /// Once the user drags the MR↔commit splitter, stop auto-following half height.
+    mr_detail_height_user_set: bool,
     mr_detail_resize_state: Rc<ResizeState>,
     #[cfg(target_os = "macos")]
     window_vibrancy: Option<ColumnVibrancy>,
@@ -133,6 +136,7 @@ impl AppView {
             head_meta_height: splitter::DEFAULT_HEAD_META_HEIGHT,
             head_meta_resize_state: Rc::new(ResizeState::default()),
             mr_detail_height: splitter::DEFAULT_MR_DETAIL_HEIGHT,
+            mr_detail_height_user_set: false,
             mr_detail_resize_state: Rc::new(ResizeState::default()),
             #[cfg(target_os = "macos")]
             window_vibrancy: None,
@@ -216,15 +220,10 @@ impl AppView {
         let view = cx.entity().downgrade();
         Rc::new(move |size, window, cx: &mut App| {
             view.update(cx, |this, cx| {
-                // The band above the stage, i.e. what a viewport-relative drag has
-                // to clear before it reaches the island.
-                let chrome = f32::from(theme::TITLEBAR_HEIGHT);
-                let top = theme::CHANGES_TOP_INSET;
-                let inset = theme::CHANGES_INSET;
-                let available =
-                    f32::from(window.viewport_size().height) - chrome - top - inset;
+                let available = mr_detail_column_available(window);
                 let height =
-                    splitter::clamp_mr_detail_height(size - chrome - top, available);
+                    splitter::clamp_mr_detail_height(size - mr_detail_chrome_offset(), available);
+                this.mr_detail_height_user_set = true;
                 if this.mr_detail_height != height {
                     this.mr_detail_height = height;
                     cx.notify();
@@ -232,6 +231,18 @@ impl AppView {
             })
             .ok();
         })
+    }
+
+    /// Until the user drags the splitter, keep MR detail at half the island column.
+    fn sync_default_mr_detail_height(&mut self, window: &Window) {
+        if self.mr_detail_height_user_set || self.mr_entry.is_none() || !gitlab_chrome_visible(self)
+        {
+            return;
+        }
+        let next = splitter::default_mr_detail_height(mr_detail_column_available(window));
+        if (self.mr_detail_height - next).abs() > 0.5 {
+            self.mr_detail_height = next;
+        }
     }
 
     fn sync_collapsed_dirs(&mut self) {
@@ -972,6 +983,7 @@ impl Focusable for AppView {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_default_mr_detail_height(window);
         if let Some(h) = self.diff_window {
             if h.update(cx, |_, _, _| ()).is_err() {
                 self.diff_window = None;
@@ -1744,6 +1756,16 @@ fn finish_mr_activate(
     }
 }
 
+/// Titlebar + Changes top inset — viewport Y offset before the island column.
+fn mr_detail_chrome_offset() -> f32 {
+    f32::from(theme::TITLEBAR_HEIGHT) + theme::CHANGES_TOP_INSET
+}
+
+/// Vertical room for MR detail + frost gap + commit list inside the island column.
+fn mr_detail_column_available(window: &Window) -> f32 {
+    f32::from(window.viewport_size().height) - mr_detail_chrome_offset() - theme::CHANGES_INSET
+}
+
 /// Show MR picker only when a remote host matches Settings.
 fn gitlab_chrome_visible(view: &AppView) -> bool {
     let MainState::Ready(loaded) = &view.state else {
@@ -1862,7 +1884,7 @@ fn render_mr_entry_detail(
         ))
 }
 
-fn mr_entry_ready_lines(detail: &MergeRequestDetail, cx: &App) -> Vec<gpui::AnyElement> {
+fn mr_entry_ready_lines(detail: &MergeRequestDetail, cx: &mut App) -> Vec<gpui::AnyElement> {
     let mut lines: Vec<gpui::AnyElement> = vec![
         div()
             .ui_text_size(14., cx)
@@ -1875,9 +1897,7 @@ fn mr_entry_ready_lines(detail: &MergeRequestDetail, cx: &App) -> Vec<gpui::AnyE
 
     if let Some(desc) = detail.description.as_deref() {
         lines.push(
-            div()
-                .whitespace_normal()
-                .child(desc.to_string())
+            selectable_markdown::view(format!("mr-desc-{}", detail.iid), desc.to_owned(), cx)
                 .into_any_element(),
         );
     }

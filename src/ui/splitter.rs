@@ -3,6 +3,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui::{
     App, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Size, Window,
@@ -12,6 +13,25 @@ use gpui::{
 use super::theme;
 
 pub type ResizeHandler = Rc<dyn Fn(f32, &mut Window, &mut App)>;
+
+/// How many splitter handles currently own a press-drag. Selectable text surfaces
+/// consult this so a resize gesture does not paint a false selection.
+static RESIZE_DRAG_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// True while any splitter handle is being dragged.
+pub fn is_resizing() -> bool {
+    RESIZE_DRAG_COUNT.load(Ordering::Relaxed) > 0
+}
+
+fn begin_resize_drag() {
+    RESIZE_DRAG_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+fn end_resize_drag() {
+    let _ = RESIZE_DRAG_COUNT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        Some(n.saturating_sub(1))
+    });
+}
 
 #[derive(Default)]
 pub struct ResizeState {
@@ -46,6 +66,7 @@ pub const MIN_FILE_TREE_HEIGHT: f32 = 100.;
 
 pub const DEFAULT_MR_DETAIL_HEIGHT: f32 = 120.;
 pub const MIN_MR_DETAIL_HEIGHT: f32 = 72.;
+/// Floor left for the commit island below the MR detail splitter.
 pub const MIN_COMMIT_LIST_HEIGHT: f32 = 100.;
 
 pub fn default_sidebar_width() -> f32 {
@@ -54,6 +75,11 @@ pub fn default_sidebar_width() -> f32 {
 
 pub fn default_files_width() -> f32 {
     f32::from(theme::FILES_WIDTH)
+}
+
+/// Initial MR detail height: half the island column (clamped).
+pub fn default_mr_detail_height(available: f32) -> f32 {
+    clamp_mr_detail_height(available * 0.5, available)
 }
 
 /// Changes floats over commits — sidebar only needs to leave a readable commits strip.
@@ -85,11 +111,10 @@ pub fn clamp_height(requested: f32, available: f32) -> f32 {
     requested.clamp(MIN_HEAD_META_HEIGHT, maximum)
 }
 
-/// MR detail (north of commit list): min floor, 40% cap, leave room for commits.
+/// MR detail (north of commit list): min floor, leave [`MIN_COMMIT_LIST_HEIGHT`] for commits.
+/// No percentage cap — a first open defaults to half via [`default_mr_detail_height`].
 pub fn clamp_mr_detail_height(requested: f32, available: f32) -> f32 {
-    let max_by_pct = available * 0.4;
-    let max_by_list = (available - MIN_COMMIT_LIST_HEIGHT).max(MIN_MR_DETAIL_HEIGHT);
-    let maximum = max_by_pct.min(max_by_list);
+    let maximum = (available - MIN_COMMIT_LIST_HEIGHT).max(MIN_MR_DETAIL_HEIGHT);
     requested.clamp(MIN_MR_DETAIL_HEIGHT, maximum)
 }
 
@@ -123,7 +148,10 @@ pub fn handle(
                 let down_state = down_state.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, _, _, _| {
                     if event.button == MouseButton::Left && bounds.contains(&event.position) {
-                        down_state.active.set(true);
+                        // `replace` returns the previous value — count only transitions.
+                        if !down_state.active.replace(true) {
+                            begin_resize_drag();
+                        }
                     }
                 });
 
@@ -139,8 +167,8 @@ pub fn handle(
 
                 let up_state = up_state.clone();
                 window.on_mouse_event(move |event: &MouseUpEvent, _, _, _| {
-                    if event.button == MouseButton::Left {
-                        up_state.active.set(false);
+                    if event.button == MouseButton::Left && up_state.active.replace(false) {
+                        end_resize_drag();
                     }
                 });
             },
@@ -248,7 +276,15 @@ mod tests {
     fn mr_detail_height_clamp_keeps_commit_list() {
         assert_eq!(clamp_mr_detail_height(40., 800.), 72.);
         assert_eq!(clamp_mr_detail_height(120., 800.), 120.);
-        assert_eq!(clamp_mr_detail_height(400., 800.), 320.);
-        assert_eq!(clamp_mr_detail_height(150., 200.), 80.);
+        assert_eq!(clamp_mr_detail_height(400., 800.), 400.);
+        assert_eq!(clamp_mr_detail_height(750., 800.), 700.);
+        assert_eq!(clamp_mr_detail_height(150., 200.), 100.);
+    }
+
+    #[test]
+    fn mr_detail_default_is_half_the_column() {
+        assert_eq!(default_mr_detail_height(800.), 400.);
+        assert_eq!(default_mr_detail_height(200.), 100.);
+        assert_eq!(default_mr_detail_height(100.), 72.);
     }
 }

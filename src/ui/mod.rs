@@ -1,7 +1,7 @@
 #[cfg(target_os = "macos")]
 mod app_icon;
-mod app_view;
 mod appearance;
+mod app_view;
 mod diff;
 mod diff_window;
 mod file_tree;
@@ -10,8 +10,10 @@ mod gitlab_connection;
 mod icon_button;
 #[cfg(target_os = "macos")]
 mod mac_column_vibrancy;
+mod markdown;
 mod metadata;
 mod scrollbar;
+mod selectable_markdown;
 mod settings;
 mod splitter;
 mod text_field;
