@@ -85,6 +85,7 @@ DualPaneElement (one Element: old pane | gutter | new pane)
 - Render layer checked by running the app.
 - `REVIEWFOX_FRAME_TRACE=1` (off by default, `src/ui/diff/trace.rs`) prints to stderr one line per Layout build and one per drawn pane frame: Viewport, frame build, newly shaped rows + shaping time, prepaint, paint, visible rows.
 - Headless: `cargo test --release -- --ignored frame_cost_is_flat_in_file_length --nocapture` (`src/ui/diff/perf.rs`) times Layout build and a full-range scroll of Viewport + visible-row paint list (no shaping) on synthetic 2k and 20k-line files, and asserts the per-frame cost stays flat.
+- Headless: `cargo test --release -- --ignored rewrap_cost_report --nocapture` reports a full soft-wrap `Layout::build` on a synthetic 20k-line file (folded and expanded) against the wrap-off build. Rewrap misses the 8 ms frame budget (~20 ms folded, ~48 ms expanded at 640 px), so a resize drag keeps the previous wrap and rewraps once the width settles.
 
 ## 8. Migration
 
