@@ -91,6 +91,8 @@ pub struct DiffView {
     window_vibrancy: Option<ColumnVibrancy>,
     /// Diff-computation knobs; does not change Comparison identity.
     view_options: ViewOptions,
+    /// §3.1.2; persisted in `settings.json`.
+    sync_horizontal_scroll: bool,
     /// In-file search query; empty = no hits.
     search_query: String,
     search_scope: SearchScope,
@@ -154,11 +156,17 @@ impl DiffView {
             #[cfg(target_os = "macos")]
             window_vibrancy: None,
             view_options: ViewOptions::default(),
+            sync_horizontal_scroll: crate::settings_store::sync_horizontal_scroll(
+                &crate::settings_store::load_file(),
+            ),
             search_query: String::new(),
             search_scope: SearchScope::Both,
             searching: false,
             bounds_sub: None,
         };
+        this.with_pane(cx, |pane, cx| {
+            pane.set_sync_horizontal(this.sync_horizontal_scroll, cx);
+        });
         this.open_in_pane(cx);
         this
     }
@@ -228,6 +236,17 @@ impl DiffView {
             let alignment = alignment.clone();
             self.with_pane(cx, |pane, cx| pane.set_alignment(alignment, cx));
         }
+        cx.notify();
+    }
+
+    fn toggle_sync_horizontal_scroll(&mut self, cx: &mut Context<Self>) {
+        self.sync_horizontal_scroll = !self.sync_horizontal_scroll;
+        let mut file = crate::settings_store::load_file();
+        file.sync_horizontal_scroll = Some(self.sync_horizontal_scroll);
+        crate::settings_store::save_file(&file).ok();
+        self.with_pane(cx, |pane, cx| {
+            pane.set_sync_horizontal(self.sync_horizontal_scroll, cx);
+        });
         cx.notify();
     }
 
@@ -808,6 +827,15 @@ fn render_titlebar(
                             true,
                             view.view_options.ignore_whitespace,
                             cx.listener(|this, _, _, cx| this.toggle_ignore_whitespace(cx)),
+                        ))
+                        .child(nav_button(
+                            "sync-h-scroll",
+                            "chevrons_left.svg",
+                            "Sync Horizontal Scroll",
+                            None,
+                            true,
+                            view.sync_horizontal_scroll,
+                            cx.listener(|this, _, _, cx| this.toggle_sync_horizontal_scroll(cx)),
                         )),
                 )
                 .child(font_size_group(view.pane.read(cx).font_px(), cx))

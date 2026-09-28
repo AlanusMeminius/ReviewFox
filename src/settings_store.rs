@@ -27,6 +27,14 @@ pub struct SettingsFile {
     pub code_font_family: Option<String>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub code_font_size: Option<f32>,
+    /// Dual-pane horizontal scroll coupling (§3.1.2). Default on when unset.
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub sync_horizontal_scroll: Option<bool>,
+}
+
+/// Whether horizontal input moves both diff panes together.
+pub fn sync_horizontal_scroll(file: &SettingsFile) -> bool {
+    file.sync_horizontal_scroll.unwrap_or(true)
 }
 
 /// `Some` when the value parses as `T`, `None` otherwise (never an error).
@@ -238,6 +246,21 @@ mod tests {
                 ..Default::default()
             }
         );
+        fs::remove_dir_all(dir.path()).ok();
+    }
+
+    #[test]
+    fn sync_horizontal_scroll_defaults_on_and_roundtrips() {
+        assert!(sync_horizontal_scroll(&SettingsFile::default()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path_for_tests(dir.path());
+        let file = SettingsFile {
+            sync_horizontal_scroll: Some(false),
+            ..Default::default()
+        };
+        save_file_at(&path, &file).unwrap();
+        assert_eq!(load_file_at(&path).sync_horizontal_scroll, Some(false));
+        assert!(!sync_horizontal_scroll(&load_file_at(&path)));
         fs::remove_dir_all(dir.path()).ok();
     }
 

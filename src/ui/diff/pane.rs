@@ -67,10 +67,15 @@ pub struct DualPane {
     /// `viewport::s_range` from the first measured frame on.
     scroll_s: f32,
     /// Per-side horizontal scroll of the code text, in pixels, `[old, new]`.
-    /// Independent of each other and of `scroll_s`; moved only by horizontal
-    /// input over that pane. Reset on file open, kept (re-clamped) on fold,
-    /// Alignment, font size and resize.
+    /// When [`Self::sync_horizontal`] is on, both stay equal. Independent of
+    /// `scroll_s`; moved by horizontal input over a pane (both panes when
+    /// synced). Reset on file open, kept (re-clamped) on fold, Alignment, font
+    /// size and resize.
     x_offsets: [f32; 2],
+    /// §3.1.2: one shared offset when true.
+    sync_horizontal: bool,
+    /// Which side last received horizontal input; used when sync is turned on.
+    last_x_side: Option<Side>,
     /// Horizontal travel per side from the last prepaint (`0..=max_x`).
     max_x: [f32; 2],
     /// Widest shaped line seen per side since the last Layout rebuild / font
@@ -123,6 +128,8 @@ impl DualPane {
             drafting: None,
             scroll_s: 0.,
             x_offsets: [0.; 2],
+            sync_horizontal: true,
+            last_x_side: None,
             max_x: [0.; 2],
             widest_seen: [0.; 2],
             mono_advance: None,
@@ -240,6 +247,7 @@ impl DualPane {
         self.hunk_s = Some(0.);
         self.reset_scroll(cx);
         self.x_offsets = [0.; 2];
+        self.last_x_side = None;
         self.rebuild_layout();
         self.reveal_bars(cx);
         cx.notify();
@@ -515,14 +523,46 @@ impl DualPane {
         cx.notify();
     }
 
-    /// Horizontal wheel / trackpad over `side`'s code pane: move that side's
-    /// `x_offset` only. `scroll_s` and the other side stay put.
+    pub fn sync_horizontal(&self) -> bool {
+        self.sync_horizontal
+    }
+
+    pub fn set_sync_horizontal(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.sync_horizontal {
+            return;
+        }
+        self.sync_horizontal = on;
+        if on {
+            let x = viewport::clamp_x_synced(
+                viewport::shared_x_on_sync_enable(self.x_offsets, self.last_x_side),
+                self.max_x,
+            );
+            self.x_offsets = [x, x];
+        }
+        cx.notify();
+    }
+
+    /// Horizontal wheel / trackpad over `side`'s code pane. When synced, both
+    /// sides move; otherwise only that side. `scroll_s` is unchanged.
     pub(super) fn scroll_x_by(&mut self, side: Side, dx: f32, cx: &mut Context<Self>) {
-        let ix = side_ix(side);
-        let x = viewport::clamp_x(self.x_offsets[ix] + dx, self.max_x[ix]);
-        if x != self.x_offsets[ix] {
-            self.x_offsets[ix] = x;
-            cx.notify();
+        self.last_x_side = Some(side);
+        let x = if self.sync_horizontal {
+            viewport::clamp_x_synced(self.x_offsets[0] + dx, self.max_x)
+        } else {
+            let ix = side_ix(side);
+            viewport::clamp_x(self.x_offsets[ix] + dx, self.max_x[ix])
+        };
+        if self.sync_horizontal {
+            if x != self.x_offsets[0] || x != self.x_offsets[1] {
+                self.x_offsets = [x, x];
+                cx.notify();
+            }
+        } else {
+            let ix = side_ix(side);
+            if x != self.x_offsets[ix] {
+                self.x_offsets[ix] = x;
+                cx.notify();
+            }
         }
     }
 
@@ -748,7 +788,18 @@ impl DualPane {
                 (layout.side(side).max_chars() as f32 * advance).max(self.widest_seen[ix]);
             let pane_w = f32::from(geom.pane(side).size.width);
             self.max_x[ix] = viewport::max_x(text_extent(longest), pane_w);
-            self.x_offsets[ix] = viewport::clamp_x(self.x_offsets[ix], self.max_x[ix]);
+        }
+        if self.sync_horizontal {
+            let x = viewport::clamp_x_synced(self.x_offsets[0], self.max_x);
+            self.x_offsets = [x, x];
+        } else {
+            for side in [Side::Old, Side::New] {
+                let ix = side_ix(side);
+                self.x_offsets[ix] = viewport::clamp_x(self.x_offsets[ix], self.max_x[ix]);
+            }
+        }
+        for side in [Side::Old, Side::New] {
+            let ix = side_ix(side);
             frame.set_x_offset(side, viewport::snap(self.x_offsets[ix], self.scale));
         }
         frame.stats.viewport = viewport_took;

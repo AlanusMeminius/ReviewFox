@@ -563,6 +563,26 @@ pub fn clamp_x(x: f32, max: f32) -> f32 {
     x.clamp(0., max.max(0.))
 }
 
+/// Horizontal travel when both panes share one offset (§3.1.2).
+pub fn max_x_synced(max_per_side: [f32; 2]) -> f32 {
+    max_per_side[0].max(max_per_side[1]).max(0.)
+}
+
+/// Clamp a shared horizontal offset to [`max_x_synced`].
+pub fn clamp_x_synced(x: f32, max_per_side: [f32; 2]) -> f32 {
+    clamp_x(x, max_x_synced(max_per_side))
+}
+
+/// Offset both sides should use when sync is turned on: the side last scrolled,
+/// or old when neither side has been scrolled yet.
+pub fn shared_x_on_sync_enable(offsets: [f32; 2], last_scrolled: Option<Side>) -> f32 {
+    let ix = match last_scrolled {
+        Some(Side::Old) | None => 0,
+        Some(Side::New) => 1,
+    };
+    offsets[ix]
+}
+
 /// Round logical pixel `v` to the device pixel grid at `scale`.
 pub fn snap(v: f32, scale: f32) -> f32 {
     if scale <= 0. {
@@ -1090,5 +1110,21 @@ mod tests {
         // A pane that grew past its text snaps back to the start.
         assert_eq!(clamp_x(80., 0.), 0.);
         assert_eq!(clamp_x(80., -3.), 0.);
+    }
+
+    #[test]
+    fn synced_horizontal_bound_is_the_larger_side() {
+        assert_eq!(max_x_synced([80., 120.]), 120.);
+        assert_eq!(max_x_synced([200., 50.]), 200.);
+        assert_eq!(clamp_x_synced(150., [80., 120.]), 120.);
+        assert_eq!(clamp_x_synced(150., [200., 50.]), 150.);
+        assert_eq!(clamp_x_synced(-10., [30., 40.]), 0.);
+    }
+
+    #[test]
+    fn enabling_sync_picks_last_scrolled_side_or_old() {
+        assert_eq!(shared_x_on_sync_enable([10., 90.], None), 10.);
+        assert_eq!(shared_x_on_sync_enable([10., 90.], Some(Side::Old)), 10.);
+        assert_eq!(shared_x_on_sync_enable([10., 90.], Some(Side::New)), 90.);
     }
 }
