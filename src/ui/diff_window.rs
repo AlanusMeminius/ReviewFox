@@ -1427,125 +1427,98 @@ fn render_search_bar(
         .into_any_element()
 }
 
-fn render_side_segment(side: SearchSide, cx: &mut Context<DiffView>) -> impl IntoElement {
+/// Find Side/Files track: same height / inset / radius / border as [`capsule`].
+fn search_seg_track() -> Div {
     div()
-        .id("search-side")
         .flex_none()
-        .h(px(theme::FIND_FIELD_HEIGHT))
+        .h(theme::TOGGLE_SIZE)
         .flex()
         .items_center()
-        .gap(px(2.))
-        .px(px(2.))
-        .rounded(px(theme::FIND_FIELD_RADIUS))
-        .bg(theme::hover())
-        .child(side_seg_btn("search-side-old", "Old", side == SearchSide::Old, SearchSide::Old, cx))
-        .child(side_seg_btn("search-side-new", "New", side == SearchSide::New, SearchSide::New, cx))
-        .child(side_seg_btn(
+        .p(px(NAV_INSET))
+        .rounded(px(NAV_BUTTON_RADIUS + NAV_INSET + 1.))
+        .border_1()
+        .border_color(theme::line())
+        .bg(theme::white())
+}
+
+fn search_seg_btn(
+    id: &'static str,
+    label: &'static str,
+    selected: bool,
+    cx: &mut Context<DiffView>,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .h_full()
+        .px(px(6.))
+        .rounded(px(NAV_BUTTON_RADIUS))
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .when(selected, |d| d.bg(theme::range()))
+        .when(!selected, |d| d.hover(|d| d.bg(theme::hover())))
+        .on_click(on_click)
+        .child(
+            div()
+                .ui_label_size(11., cx)
+                .font_weight(if selected {
+                    gpui::FontWeight::MEDIUM
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
+                .text_color(if selected {
+                    theme::accent()
+                } else {
+                    theme::muted()
+                })
+                .child(label),
+        )
+}
+
+fn render_side_segment(side: SearchSide, cx: &mut Context<DiffView>) -> impl IntoElement {
+    search_seg_track()
+        .id("search-side")
+        .child(search_seg_btn(
+            "search-side-old",
+            "Old",
+            side == SearchSide::Old,
+            cx,
+            cx.listener(|this, _, _, cx| this.set_search_side(SearchSide::Old, cx)),
+        ))
+        .child(search_seg_btn(
+            "search-side-new",
+            "New",
+            side == SearchSide::New,
+            cx,
+            cx.listener(|this, _, _, cx| this.set_search_side(SearchSide::New, cx)),
+        ))
+        .child(search_seg_btn(
             "search-side-both",
             "Both",
             side == SearchSide::Both,
-            SearchSide::Both,
             cx,
+            cx.listener(|this, _, _, cx| this.set_search_side(SearchSide::Both, cx)),
         ))
-}
-
-fn side_seg_btn(
-    id: &'static str,
-    label: &'static str,
-    selected: bool,
-    value: SearchSide,
-    cx: &mut Context<DiffView>,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .h(px(theme::FIND_FIELD_HEIGHT - 4.))
-        .px(px(6.))
-        .rounded(px(theme::FIND_FIELD_RADIUS - 2.))
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .when(selected, |d| d.bg(theme::capsule()))
-        .when(!selected, |d| d.hover(|d| d.bg(theme::capsule_track_hover())))
-        .on_click(cx.listener(move |this, _, _, cx| this.set_search_side(value, cx)))
-        .child(
-            div()
-                .ui_label_size(11., cx)
-                .font_weight(if selected {
-                    gpui::FontWeight::MEDIUM
-                } else {
-                    gpui::FontWeight::NORMAL
-                })
-                .text_color(if selected {
-                    theme::text()
-                } else {
-                    theme::muted()
-                })
-                .child(label),
-        )
 }
 
 fn render_files_segment(files: SearchFiles, cx: &mut Context<DiffView>) -> impl IntoElement {
-    div()
+    search_seg_track()
         .id("search-files")
-        .flex_none()
-        .h(px(theme::FIND_FIELD_HEIGHT))
-        .flex()
-        .items_center()
-        .gap(px(2.))
-        .px(px(2.))
-        .rounded(px(theme::FIND_FIELD_RADIUS))
-        .bg(theme::hover())
-        .child(files_seg_btn(
+        .child(search_seg_btn(
             "search-files-file",
             "File",
             files == SearchFiles::File,
-            SearchFiles::File,
             cx,
+            cx.listener(|this, _, _, cx| this.set_search_files_factor(SearchFiles::File, cx)),
         ))
-        .child(files_seg_btn(
+        .child(search_seg_btn(
             "search-files-all",
             "All",
             files == SearchFiles::All,
-            SearchFiles::All,
             cx,
+            cx.listener(|this, _, _, cx| this.set_search_files_factor(SearchFiles::All, cx)),
         ))
-}
-
-fn files_seg_btn(
-    id: &'static str,
-    label: &'static str,
-    selected: bool,
-    value: SearchFiles,
-    cx: &mut Context<DiffView>,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .h(px(theme::FIND_FIELD_HEIGHT - 4.))
-        .px(px(6.))
-        .rounded(px(theme::FIND_FIELD_RADIUS - 2.))
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .when(selected, |d| d.bg(theme::capsule()))
-        .when(!selected, |d| d.hover(|d| d.bg(theme::capsule_track_hover())))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.set_search_files_factor(value, cx);
-        }))
-        .child(
-            div()
-                .ui_label_size(11., cx)
-                .font_weight(if selected {
-                    gpui::FontWeight::MEDIUM
-                } else {
-                    gpui::FontWeight::NORMAL
-                })
-                .text_color(if selected {
-                    theme::text()
-                } else {
-                    theme::muted()
-                })
-                .child(label),
-        )
 }
 
 /// The pane's place in the shell. The pane itself is mounted over it by
