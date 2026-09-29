@@ -35,16 +35,19 @@ const LN_DIGIT_PX: f32 = 8.;
 /// Line-number inset from the code side of its column.
 const LN_PAD: f32 = 4.;
 const BRIDGE_COL: f32 = 24.;
-/// Comment-icon slot beside each line-number column, on the bridge side of it
-/// (`preimage` = number then icon, `postimage` = icon then number), per the prototype.
-const ICON_COL: f32 = 18.;
-/// Bubble glyph drawn centred in an [`ICON_COL`] slot.
+/// Bubble glyph drawn in the line-number cell, hugging the bridge like the digits.
 const ICON_GLYPH: f32 = 12.;
+/// Active-state wash behind an open bubble. A square, not the whole cell, so a
+/// wide line-number column does not turn into a bar.
+const ICON_WASH: f32 = 16.;
 /// Code text inset from the pane's inner edge.
 pub(super) const TEXT_PAD: f32 = 12.;
 /// Comment marker bar width; hugs the center gutter (Preimage right / Postimage left).
 pub(super) const COMMENT_BAR: f32 = 2.;
-const SEAM_H: f32 = 2.;
+/// Seams and Hunk block outlines.
+const EDGE_W: f32 = 1.;
+/// How far a culled bridge's tab reaches into the middle gutter; also its corner radius.
+const TAB_W: f32 = 3.;
 const DRAFTING_BG: u32 = 0xdbe4ff;
 /// Non-current search hit (`--hit` in find-capsule prototype).
 const SEARCH_HIT_BG: u32 = 0xffe08a;
@@ -61,7 +64,7 @@ pub struct ActiveSearchMatch {
     pub bytes: std::ops::Range<usize>,
 }
 
-/// Which bubble an icon slot carries, and what a click on it means.
+/// Which bubble a line-number cell carries, and what a click on it means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IconMark {
     /// Outline bubble on the selection's start line: click creates a comment.
@@ -159,7 +162,7 @@ impl Geom {
         let x1 = snap(f32::from(bounds.right()), scale);
         let y0 = snap(f32::from(bounds.top()), scale);
         let y1 = snap(f32::from(bounds.bottom()), scale);
-        let gutter_w = ln_w * 2. + ICON_COL * 2. + BRIDGE_COL;
+        let gutter_w = ln_w * 2. + BRIDGE_COL;
         let pane_w = snap(((x1 - x0 - gutter_w) / 2.).max(0.), scale);
         let rect = |a: f32, b: f32| {
             Bounds::from_corners(point(px(a), px(y0)), point(px(b.max(a)), px(y1)))
@@ -187,9 +190,9 @@ impl Geom {
     }
 
     /// Width the gutter holds flat on each edge before the bridge curve starts:
-    /// the line-number column plus its icon slot.
+    /// the line-number column. A comment bubble replaces the number in that cell.
     pub fn flat_w(&self) -> f32 {
-        self.ln_w + ICON_COL
+        self.ln_w
     }
 
     /// Line-number column of `side`, as window `(left, right)`.
@@ -206,33 +209,17 @@ impl Geom {
         }
     }
 
-    /// Line numbers plus icon slot — the band that carries the row's kind tint
-    /// and starts a comment line-selection drag.
+    /// Line-number column — the band that carries the row's kind tint and starts
+    /// a comment line-selection drag. A bubble, when one is shown, occupies this
+    /// same cell.
     pub(super) fn gutter_band(&self, side: Side) -> (f32, f32) {
-        match side {
-            Side::Preimage => {
-                let l = f32::from(self.gutter.left());
-                (l, l + self.flat_w())
-            }
-            Side::Postimage => {
-                let r = f32::from(self.gutter.right());
-                (r - self.flat_w(), r)
-            }
-        }
+        self.ln_col(side)
     }
 
-    /// Icon slot of `side` over the row band `y0..y1`.
+    /// Line-number cell of `side` over the row band `y0..y1`. Hit target for the
+    /// bubble that replaces that row's number.
     fn icon_slot(&self, side: Side, y0: f32, y1: f32) -> Bounds<Pixels> {
-        let (a, b) = match side {
-            Side::Preimage => {
-                let x = f32::from(self.gutter.left()) + self.ln_w;
-                (x, x + ICON_COL)
-            }
-            Side::Postimage => {
-                let x = f32::from(self.gutter.right()) - self.flat_w();
-                (x, x + ICON_COL)
-            }
-        };
+        let (a, b) = self.ln_col(side);
         Bounds::from_corners(point(px(a), px(y0)), point(px(b), px(y1)))
     }
 
@@ -347,7 +334,7 @@ struct SideFrame {
     /// column draws those too).
     seams: Vec<(f32, bool)>,
     empty_seam: Option<f32>,
-    /// Visible icon slots on this side, as row bands.
+    /// Visible bubbles on this side, as row bands in the line-number column.
     icons: Vec<IconPlace>,
     thumb: Option<Thumb>,
     h_thumb: Option<Thumb>,
@@ -358,7 +345,7 @@ struct SideFrame {
     x_offset: f32,
 }
 
-/// An icon slot before its side is turned into gutter x, as a row band.
+/// A bubble before its side is turned into a line-number cell, as a row band.
 struct IconPlace {
     y0: f32,
     y1: f32,
@@ -367,10 +354,12 @@ struct IconPlace {
     open: bool,
 }
 
-/// A placed icon slot: what to paint, and the rect a click must hit.
+/// A placed bubble: what to paint, and the line-number cell a click must hit.
 pub(super) struct IconSlot {
     pub(super) slot: Bounds<Pixels>,
     pub(super) mark: IconMark,
+    /// Which way the bubble hugs the bridge, matching that side's line numbers.
+    side: Side,
     open: bool,
 }
 
@@ -389,6 +378,17 @@ struct WinBridge {
     y_l1: f32,
     y_r0: f32,
     y_r1: f32,
+    /// Culled: only this side is on screen; draw a tab there instead of a ribbon.
+    tab_side: Option<Side>,
+}
+
+impl WinBridge {
+    fn ends(&self, side: Side) -> (f32, f32) {
+        match side {
+            Side::Preimage => (self.y_l0, self.y_l1),
+            Side::Postimage => (self.y_r0, self.y_r1),
+        }
+    }
 }
 
 /// Everything paint needs, built in prepaint.
@@ -487,7 +487,8 @@ pub(super) fn build_frame(
                 shape
             });
             // Selection is line-granular, so it needs no shaped text; the
-            // icon rides the start line's first visual row.
+            // bubble replaces the start line's number on its first visual row.
+            let mut replaces_number = false;
             let selected_here = match row {
                 Row::Line(l) if !l.is_equal_padding() => {
                     let sel = selection.as_ref().filter(|s| s.contains(&l.ln));
@@ -499,6 +500,7 @@ pub(super) fn build_frame(
                             sel.is_some_and(|s| *s.start() == l.ln),
                         );
                         if let Some(mark) = mark {
+                            replaces_number = true;
                             icons.push(IconPlace {
                                 y0: y_of(i),
                                 y1: y_of(i + 1),
@@ -566,7 +568,7 @@ pub(super) fn build_frame(
                         !pad && drafting.as_ref().is_some_and(|d| d.contains(&l.ln)),
                         marks,
                         search,
-                        l.shows_line_number(),
+                        l.shows_line_number() && !replaces_number,
                         shape.text_leading,
                     )
                 }
@@ -648,6 +650,7 @@ pub(super) fn build_frame(
                     y_l1: y(p.y_l1),
                     y_r0: y(p.y_r0),
                     y_r1: y(p.y_r1),
+                    tab_side: p.tab_side,
                 })
                 .collect(),
             vp.omit_links()
@@ -671,6 +674,7 @@ pub(super) fn build_frame(
                 .map(move |place| IconSlot {
                     slot: geom.icon_slot(side, place.y0, place.y1),
                     mark: place.mark,
+                    side,
                     open: place.open,
                 })
         })
@@ -952,10 +956,20 @@ fn kind_bg(kind: Option<LineKind>) -> Rgba {
     }
 }
 
+fn kind_edge(kind: LineKind) -> Rgba {
+    match kind {
+        LineKind::Replace => theme::mod_edge(),
+        LineKind::Insert => theme::add_edge(),
+        LineKind::Delete => theme::del_edge(),
+        LineKind::Equal => theme::line(),
+    }
+}
+
+/// A seam on the old side is an insertion point, on the new side a deletion point.
 fn seam_color(side: Side) -> Rgba {
     match side {
-        Side::Preimage => theme::add_bg(),
-        Side::Postimage => theme::del_bg(),
+        Side::Preimage => theme::add_edge(),
+        Side::Postimage => theme::del_edge(),
     }
 }
 
@@ -1093,26 +1107,33 @@ impl Frame {
                 }
             }
             paint_gaps(window, pane, &frame.gaps);
-            if let Some(y) = frame.empty_seam {
-                let mut stroke = PathBuilder::stroke(px(2.));
-                stroke.move_to(point(px(x0 + 8.), px(y)));
-                stroke.line_to(point(px(x1 - 8.), px(y)));
-                if let Ok(path) = stroke.build() {
-                    window.paint_path(path, rgb(0x8aa0b8));
-                }
+            for y in frame.seams.iter().map(|&(y, _)| y).chain(frame.empty_seam) {
+                window.paint_quad(fill(hline(x0, x1, y, EDGE_W), seam_color(side)));
             }
-            for &(y, _) in &frame.seams {
-                window.paint_quad(fill(hline(x0, x1, y, SEAM_H), seam_color(side)));
-            }
+            self.paint_block_edges(side, x0, x1, window);
         });
+    }
+
+    /// Top and bottom outline of each Hunk's block on `side`, across `x0..x1`.
+    /// Zero-height ends are seams, drawn with those.
+    fn paint_block_edges(&self, side: Side, x0: f32, x1: f32, window: &mut Window) {
+        for bridge in &self.bridges {
+            let (y0, y1) = bridge.ends(side);
+            if y1 - y0 < EDGE_W {
+                continue;
+            }
+            let color = kind_edge(bridge.kind);
+            window.paint_quad(fill(hline(x0, x1, y0, EDGE_W), color));
+            window.paint_quad(fill(hline(x0, x1, y1 - EDGE_W, EDGE_W), color));
+        }
     }
 
     fn paint_gutter(&self, window: &mut Window, cx: &mut App) {
         let g = self.geom.gutter;
         window.paint_quad(fill(g, theme::white()));
         for side in [Side::Preimage, Side::Postimage] {
-            // The kind tint runs under the icon slot as well, so the bridge
-            // leaves a flat edge past both.
+            // Kind tint covers the line-number column; the bridge starts at its
+            // inner edge.
             let (c0, c1) = self.geom.gutter_band(side);
             let frame = &self.sides[side_ix(side)];
             for row in &frame.rows {
@@ -1120,9 +1141,10 @@ impl Frame {
             }
             for &(y, in_rows) in &frame.seams {
                 if in_rows {
-                    window.paint_quad(fill(hline(c0, c1, y, SEAM_H), seam_color(side)));
+                    window.paint_quad(fill(hline(c0, c1, y, EDGE_W), seam_color(side)));
                 }
             }
+            self.paint_block_edges(side, c0, c1, window);
         }
         paint_bridges(window, &self.bridges, self.geom.flat_w());
         let row_h = px(self.row_h);
@@ -1133,12 +1155,7 @@ impl Frame {
                     continue;
                 }
                 let Some(label) = &row.label else { continue };
-                // Old numbers hug the gutter's inner edge from the left column's
-                // right; postimage numbers start at the right column's left.
-                let x = match side {
-                    Side::Preimage => c1 - LN_PAD - f32::from(label.width),
-                    Side::Postimage => c0 + LN_PAD,
-                };
+                let x = bridge_aligned_x(c0, c1, side, f32::from(label.width));
                 label
                     .paint(point(px(x), px(row.y0)), row_h, window, cx)
                     .ok();
@@ -1150,18 +1167,40 @@ impl Frame {
     }
 }
 
-/// A comment bubble in its icon slot — the prototype's `ICON_EMPTY` outline or
-/// `ICON_FILLED` solid, scaled from their 16-unit viewBox into an [`ICON_GLYPH`]
-/// box centred in the slot. An existing comment reads accent like its
-/// [`COMMENT_BAR`]; `open` adds the range tint while the dock is on this line.
+/// Left edge of a `width`-wide mark in a line-number column (`left`..`right`),
+/// hugging the bridge with a [`LN_PAD`] inset. Digits and comment bubbles share
+/// this so swapping one for the other does not jump sideways.
+fn bridge_aligned_x(left: f32, right: f32, side: Side, width: f32) -> f32 {
+    match side {
+        Side::Preimage => right - LN_PAD - width,
+        Side::Postimage => left + LN_PAD,
+    }
+}
+
+/// A comment bubble in the line-number cell it replaces — the prototype's
+/// `ICON_EMPTY` outline or `ICON_FILLED` solid, scaled from their 16-unit
+/// viewBox into an [`ICON_GLYPH`] box. The box hugs the bridge the way the
+/// digits do, so swapping a number for a bubble does not jump sideways. An
+/// existing comment reads accent like its [`COMMENT_BAR`]; `open` adds an
+/// [`ICON_WASH`] square centred on the bubble while the dock is on this line.
 fn paint_comment_icon(window: &mut Window, icon: &IconSlot) {
     let slot = icon.slot;
     let unit = ICON_GLYPH / 16.;
-    let x0 = f32::from(slot.left()) + (f32::from(slot.size.width) - ICON_GLYPH) / 2.;
+    let x0 = bridge_aligned_x(
+        f32::from(slot.left()),
+        f32::from(slot.right()),
+        icon.side,
+        ICON_GLYPH,
+    );
     let y0 = f32::from(slot.top()) + (f32::from(slot.size.height) - ICON_GLYPH) / 2.;
     let at = |x: f32, y: f32| point(px(x0 + x * unit), px(y0 + y * unit));
     if icon.open {
-        window.paint_quad(fill(slot, theme::range()).corner_radii(px(4.)));
+        let wash = ICON_WASH.min(f32::from(slot.size.width)).min(f32::from(slot.size.height));
+        let wx = x0 - (wash - ICON_GLYPH) / 2.;
+        let wy = y0 - (wash - ICON_GLYPH) / 2.;
+        let wash_bounds =
+            Bounds::from_corners(point(px(wx), px(wy)), point(px(wx + wash), px(wy + wash)));
+        window.paint_quad(fill(wash_bounds, theme::range()).corner_radii(px(4.)));
     }
     match icon.mark {
         IconMark::Empty => {
@@ -1222,100 +1261,89 @@ fn paint_comment_icon(window: &mut Window, icon: &IconSlot) {
 
 fn paint_bridges(window: &mut Window, placed: &[WinBridge], flat_w: f32) {
     for bridge in placed {
-        let parallel =
-            (bridge.y_l0 - bridge.y_r0).abs() < 1. && (bridge.y_l1 - bridge.y_r1).abs() < 1.;
-        let mut path = PathBuilder::fill();
-        if parallel {
-            path.move_to(point(px(bridge.x_l), px(bridge.y_l0)));
-            path.line_to(point(px(bridge.x_r), px(bridge.y_r0)));
-            path.line_to(point(px(bridge.x_r), px(bridge.y_r1)));
-            path.line_to(point(px(bridge.x_l), px(bridge.y_l1)));
-        } else {
-            pinch_bezier(&mut path, bridge, flat_w);
-        }
-        path.close();
-        if let Ok(path) = path.build() {
+        let (fill_path, edges) = match bridge.tab_side {
+            None => ribbon(bridge, flat_w),
+            Some(side) => tab(bridge, side, flat_w),
+        };
+        if let Ok(path) = fill_path.build() {
             window.paint_path(path, kind_bg(Some(bridge.kind)));
+        }
+        if let Ok(path) = edges.build() {
+            window.paint_path(path, kind_edge(bridge.kind));
         }
     }
 }
 
-/// Full row on the long side, cubic Bézier through the center gutter, then a 2px
-/// hairline across the short side's line-number and icon columns (`flat_w`) so
-/// it meets the code hairline.
-fn pinch_bezier(path: &mut PathBuilder, bridge: &WinBridge, flat_w: f32) {
-    let x_l = bridge.x_l;
-    let x_r = bridge.x_r;
-    let mid_l = x_l + flat_w;
-    let mid_r = x_r - flat_w;
-    let mw = (mid_r - mid_l).max(8.);
-    match bridge.kind {
-        LineKind::Delete => {
-            let y0 = bridge.y_l0;
-            let y1 = bridge.y_l1;
-            let top = bridge.y_r0;
-            let bot = bridge.y_r0 + 2.;
-            path.move_to(point(px(x_l), px(y0)));
-            path.line_to(point(px(mid_l), px(y0)));
-            path.cubic_bezier_to(
-                point(px(mid_r), px(top)),
-                point(px(mid_l + mw * 0.45), px(y0)),
-                point(px(mid_r - mw * 0.45), px(top)),
-            );
-            path.line_to(point(px(x_r), px(top)));
-            path.line_to(point(px(x_r), px(bot)));
-            path.line_to(point(px(mid_r), px(bot)));
-            path.cubic_bezier_to(
-                point(px(mid_l), px(y1)),
-                point(px(mid_r - mw * 0.45), px(bot)),
-                point(px(mid_l + mw * 0.45), px(y1)),
-            );
-            path.line_to(point(px(x_l), px(y1)));
-        }
-        LineKind::Insert => {
-            let top = bridge.y_l0;
-            let bot = bridge.y_l0 + 2.;
-            let y0 = bridge.y_r0;
-            let y1 = bridge.y_r1;
-            path.move_to(point(px(x_l), px(top)));
-            path.line_to(point(px(mid_l), px(top)));
-            path.cubic_bezier_to(
-                point(px(mid_r), px(y0)),
-                point(px(mid_l + mw * 0.45), px(top)),
-                point(px(mid_r - mw * 0.45), px(y0)),
-            );
-            path.line_to(point(px(x_r), px(y0)));
-            path.line_to(point(px(x_r), px(y1)));
-            path.line_to(point(px(mid_r), px(y1)));
-            path.cubic_bezier_to(
-                point(px(mid_l), px(bot)),
-                point(px(mid_r - mw * 0.45), px(y1)),
-                point(px(mid_l + mw * 0.45), px(bot)),
-            );
-            path.line_to(point(px(x_l), px(bot)));
-        }
-        _ => {
-            // Hold the full block through each line-number column. The cubic
-            // only runs between the columns, from the top of the left block
-            // to the top of the right block (and bottom to bottom).
-            path.move_to(point(px(x_l), px(bridge.y_l0)));
-            path.line_to(point(px(mid_l), px(bridge.y_l0)));
-            path.cubic_bezier_to(
-                point(px(mid_r), px(bridge.y_r0)),
-                point(px(mid_l + mw * 0.45), px(bridge.y_l0)),
-                point(px(mid_r - mw * 0.45), px(bridge.y_r0)),
-            );
-            path.line_to(point(px(x_r), px(bridge.y_r0)));
-            path.line_to(point(px(x_r), px(bridge.y_r1)));
-            path.line_to(point(px(mid_r), px(bridge.y_r1)));
-            path.cubic_bezier_to(
-                point(px(mid_l), px(bridge.y_l1)),
-                point(px(mid_r - mw * 0.45), px(bridge.y_r1)),
-                point(px(mid_l + mw * 0.45), px(bridge.y_l1)),
-            );
-            path.line_to(point(px(x_l), px(bridge.y_l1)));
-        }
+/// Pixel-row centers of a block's top and bottom outline, so a 1px stroke
+/// covers the same pixels as the code pane's outline quads. A zero-height end
+/// has one line, on its seam.
+fn edge_ys((y0, y1): (f32, f32)) -> (f32, f32) {
+    let top = y0 + EDGE_W / 2.;
+    let bot = if y1 - y0 < EDGE_W {
+        top
+    } else {
+        y1 - EDGE_W / 2.
+    };
+    (top, bot)
+}
+
+/// Fill and top/bottom outline of a bridge: straight through each
+/// line-number column, a cubic with horizontal tangents across the middle.
+/// The ends overshoot half a pixel so the outline meets the code panes'.
+fn ribbon(bridge: &WinBridge, flat_w: f32) -> (PathBuilder, PathBuilder) {
+    let (x0, x1) = (bridge.x_l - EDGE_W / 2., bridge.x_r + EDGE_W / 2.);
+    let (mid_l, mid_r) = (bridge.x_l + flat_w, bridge.x_r - flat_w);
+    let mid = (mid_l + mid_r) / 2.;
+    let (l0, l1) = edge_ys(bridge.ends(Side::Preimage));
+    let (r0, r1) = edge_ys(bridge.ends(Side::Postimage));
+    let p = |x: f32, y: f32| point(px(x), px(y));
+
+    let mut fill = PathBuilder::fill();
+    fill.move_to(p(x0, l0));
+    fill.line_to(p(mid_l, l0));
+    fill.cubic_bezier_to(p(mid_r, r0), p(mid, l0), p(mid, r0));
+    fill.line_to(p(x1, r0));
+    fill.line_to(p(x1, r1));
+    fill.line_to(p(mid_r, r1));
+    fill.cubic_bezier_to(p(mid_l, l1), p(mid, r1), p(mid, l1));
+    fill.line_to(p(x0, l1));
+    fill.close();
+
+    let mut edges = PathBuilder::stroke(px(EDGE_W));
+    for (l, r) in [(l0, r0), (l1, r1)] {
+        edges.move_to(p(x0, l));
+        edges.line_to(p(mid_l, l));
+        edges.cubic_bezier_to(p(mid_r, r), p(mid, l), p(mid, r));
+        edges.line_to(p(x1, r));
     }
+    (fill, edges)
+}
+
+/// A culled bridge: a rounded tab from `side`'s line-number column into the
+/// middle gutter. Its open end sits against the column.
+fn tab(bridge: &WinBridge, side: Side, flat_w: f32) -> (PathBuilder, PathBuilder) {
+    let (top, bot) = edge_ys(bridge.ends(side));
+    let (base, dir) = match side {
+        Side::Preimage => (bridge.x_l + flat_w, 1.),
+        Side::Postimage => (bridge.x_r - flat_w, -1.),
+    };
+    let r = TAB_W.min((bot - top) / 2.);
+    let tip = base + dir * r;
+    let sweep = side == Side::Preimage;
+    let p = |x: f32, y: f32| point(px(x), px(y));
+    let radii = p(r, r);
+    let outline = |path: &mut PathBuilder| {
+        path.move_to(p(base, top));
+        path.arc_to(radii, px(0.), false, sweep, p(tip, top + r));
+        path.line_to(p(tip, bot - r));
+        path.arc_to(radii, px(0.), false, sweep, p(base, bot));
+    };
+    let mut fill = PathBuilder::fill();
+    outline(&mut fill);
+    fill.close();
+    let mut edges = PathBuilder::stroke(px(EDGE_W));
+    outline(&mut edges);
+    (fill, edges)
 }
 
 fn paint_omit_waves(window: &mut Window, geom: Geom, folds: &[(f32, f32)]) {
@@ -1344,49 +1372,10 @@ const WAVE_PERIOD: f32 = 16.;
 const WAVE_AMP: f32 = 3.5;
 const WAVE_STEP: f32 = 2.;
 
-fn wave_y(x: f32, base: f32, crest_at: Option<f32>) -> f32 {
-    let phase = match crest_at {
-        Some(lock) => {
-            (x - lock) / WAVE_PERIOD * std::f32::consts::TAU + std::f32::consts::FRAC_PI_2
-        }
-        None => x / WAVE_PERIOD * std::f32::consts::TAU,
-    };
-    base + phase.sin() * WAVE_AMP
-}
-
-fn trace_wave(
-    path: &mut PathBuilder,
-    x0: f32,
-    x1: f32,
-    base: f32,
-    crest_at: Option<f32>,
-    first_move: bool,
-) {
-    if x1 < x0 {
-        return;
-    }
-    let mut x = x0;
-    let mut moved = !first_move;
-    loop {
-        let xx = x.min(x1);
-        let p = point(px(xx), px(wave_y(xx, base, crest_at)));
-        if moved {
-            path.line_to(p);
-        } else {
-            path.move_to(p);
-            moved = true;
-        }
-        if xx >= x1 - 0.01 {
-            break;
-        }
-        x += WAVE_STEP;
-    }
-}
-
-/// One stroke. Each side is a horizontal sine through its code and line numbers.
-/// A height change is a cubic Bézier in the gap between the line-number columns.
-/// Each sine meets that curve at a crest, so both tangents are horizontal, the
-/// same way the change ribbons leave a flat edge.
+/// One stroke. Code and line-number columns stay on a horizontal centerline;
+/// only the gap between the columns eases height (smoothstep, zero slope at
+/// both ends). A sine rides that centerline with phase from x alone, so the
+/// wave never stops oscillating through the height change.
 fn joined_wave(x0: f32, x1: f32, y_l: f32, gap_l: f32, gap_r: f32, y_r: f32) -> PathBuilder {
     let mut path = PathBuilder::stroke(px(1.25));
     if x1 - x0 < 2. {
@@ -1394,21 +1383,32 @@ fn joined_wave(x0: f32, x1: f32, y_l: f32, gap_l: f32, gap_r: f32, y_r: f32) -> 
     }
     let gap_l = gap_l.clamp(x0, x1);
     let gap_r = (gap_l + 8.).max(gap_r).min(x1);
-    if (y_r - y_l).abs() < 0.5 {
-        trace_wave(&mut path, x0, x1, y_l, None, true);
-        return path;
-    }
-    trace_wave(&mut path, x0, gap_l, y_l, Some(gap_l), true);
-    let y0 = y_l + WAVE_AMP;
-    let y1 = y_r + WAVE_AMP;
-    let dx = (gap_r - gap_l) * 0.45;
-    path.cubic_bezier_to(
-        point(px(gap_r), px(y1)),
-        point(px(gap_l + dx), px(y0)),
-        point(px(gap_r - dx), px(y1)),
-    );
-    if gap_r < x1 {
-        trace_wave(&mut path, gap_r, x1, y_r, Some(gap_r), false);
+    let flat = (y_r - y_l).abs() < 0.5;
+    let mut x = x0;
+    let mut first = true;
+    loop {
+        let xx = x.min(x1);
+        let base = if flat || xx <= gap_l {
+            y_l
+        } else if xx >= gap_r {
+            y_r
+        } else {
+            let t = (xx - gap_l) / (gap_r - gap_l);
+            let s = t * t * t * (t * (t * 6. - 15.) + 10.);
+            y_l + (y_r - y_l) * s
+        };
+        let y = base + (xx / WAVE_PERIOD * std::f32::consts::TAU).sin() * WAVE_AMP;
+        let p = point(px(xx), px(y));
+        if first {
+            path.move_to(p);
+            first = false;
+        } else {
+            path.line_to(p);
+        }
+        if xx >= x1 - 0.01 {
+            break;
+        }
+        x += WAVE_STEP;
     }
     path
 }
@@ -1636,7 +1636,8 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                 return;
             }
         }
-        // Comment line selection: center gutter band (ln + icon) only.
+        // Comment line selection: the line-number column only. A bubble in that
+        // cell is hit first and opens the comment instead.
         if down_hitbox.is_hovered(window) {
             let x = f32::from(event.position.x);
             for side in [Side::Preimage, Side::Postimage] {

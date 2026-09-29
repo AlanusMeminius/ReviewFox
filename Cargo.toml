@@ -3,6 +3,9 @@ name = "reviewfox"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
+license = "MIT"
+description = "Local clipboard-oriented code review over a Git two-tree comparison"
+repository = "https://github.com/AlanusMeminius/ReviewFox"
 publish = false
 
 [dependencies]
@@ -13,7 +16,6 @@ gpui_http_client = "=0.2.2"
 anyhow = "1"
 bytes = "1"
 futures = "0.3"
-http = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util"] }
 zed-reqwest = { version = "=0.12.15-zed", default-features = false, features = [
     "charset",
@@ -32,7 +34,6 @@ gpui_util = "=0.2.2"
 pulldown-cmark = { version = "=0.12.0", default-features = false }
 regex = "1.5"
 log = "0.4"
-tree-sitter = "0.27"
 tree-sitter-highlight = "0.27"
 tree-sitter-rust = "0.24"
 tree-sitter-cpp = "0.23"

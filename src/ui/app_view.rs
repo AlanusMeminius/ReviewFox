@@ -72,6 +72,8 @@ pub struct AppView {
     files_width: f32,
     files_resize_state: Rc<ResizeState>,
     head_meta_height: f32,
+    /// Once the user drags the tree↔head-meta splitter, stop auto-following 40%.
+    head_meta_height_user_set: bool,
     head_meta_resize_state: Rc<ResizeState>,
     mr_detail_height: f32,
     /// Once the user drags the MR↔commit splitter, stop auto-following half height.
@@ -142,7 +144,8 @@ impl AppView {
             sidebar_resize_state: Rc::new(ResizeState::default()),
             files_width: splitter::default_files_width(),
             files_resize_state: Rc::new(ResizeState::default()),
-            head_meta_height: splitter::DEFAULT_HEAD_META_HEIGHT,
+            head_meta_height: splitter::MIN_HEAD_META_HEIGHT,
+            head_meta_height_user_set: false,
             head_meta_resize_state: Rc::new(ResizeState::default()),
             mr_detail_height: splitter::DEFAULT_MR_DETAIL_HEIGHT,
             mr_detail_height_user_set: false,
@@ -213,6 +216,7 @@ impl AppView {
         let view = cx.entity().downgrade();
         Rc::new(move |height, _, cx: &mut App| {
             view.update(cx, |this, cx| {
+                this.head_meta_height_user_set = true;
                 if this.head_meta_height != height {
                     this.head_meta_height = height;
                     cx.notify();
@@ -248,6 +252,17 @@ impl AppView {
         let next = splitter::default_mr_detail_height(mr_detail_column_available(window));
         if (self.mr_detail_height - next).abs() > 0.5 {
             self.mr_detail_height = next;
+        }
+    }
+
+    /// Until the user drags the splitter, keep head-meta at 40% of the Changes island.
+    fn sync_default_head_meta_height(&mut self, window: &Window) {
+        if self.head_meta_height_user_set {
+            return;
+        }
+        let next = splitter::default_head_meta_height(changes_island_height(window));
+        if (self.head_meta_height - next).abs() > 0.5 {
+            self.head_meta_height = next;
         }
     }
 
@@ -828,33 +843,72 @@ impl AppView {
             }
             return;
         }
-        let Some(picker) = &mut self.branch_picker else {
-            return;
-        };
-        match event.keystroke.key.as_str() {
-            "escape" => self.branch_picker = None,
-            "backspace" => {
-                picker.query.pop();
-                picker.refresh();
-                picker.selected = 0;
-            }
-            "up" => picker.selected = picker.selected.saturating_sub(1),
-            "down" => {
-                picker.selected = (picker.selected + 1).min(picker.matches.len().saturating_sub(1))
-            }
-            "enter" => {
-                if let Some(branch) = picker.matches.get(picker.selected) {
-                    let name = branch.name.clone();
-                    self.open_branch(&name, cx);
-                }
-            }
-            _ => {
-                if event.keystroke.key.len() == 1 && !event.keystroke.modifiers.platform {
-                    picker.query.push_str(&event.keystroke.key);
+        if let Some(picker) = &mut self.branch_picker {
+            match event.keystroke.key.as_str() {
+                "escape" => self.branch_picker = None,
+                "backspace" => {
+                    picker.query.pop();
                     picker.refresh();
                     picker.selected = 0;
                 }
+                "up" => picker.selected = picker.selected.saturating_sub(1),
+                "down" => {
+                    picker.selected =
+                        (picker.selected + 1).min(picker.matches.len().saturating_sub(1))
+                }
+                "enter" => {
+                    if let Some(branch) = picker.matches.get(picker.selected) {
+                        let name = branch.name.clone();
+                        self.open_branch(&name, cx);
+                    }
+                }
+                _ => {
+                    if event.keystroke.key.len() == 1 && !event.keystroke.modifiers.platform {
+                        picker.query.push_str(&event.keystroke.key);
+                        picker.refresh();
+                        picker.selected = 0;
+                    }
+                }
             }
+            cx.notify();
+            return;
+        }
+        let mods = &event.keystroke.modifiers;
+        if event.keystroke.key.as_str() == "a"
+            && mods.secondary()
+            && !mods.alt
+            && !mods.shift
+        {
+            self.handle_commits_select_all(cx);
+        }
+    }
+
+    /// Cmd/Ctrl+A: Branch → select all loaded + fold; MR Ready → restore `diff_refs`.
+    fn handle_commits_select_all(&mut self, cx: &mut Context<Self>) {
+        let result = match (&mut self.state, self.mr_entry.as_ref()) {
+            (MainState::Ready(bb), Some(entry)) => {
+                if bb.commits.is_empty() {
+                    return;
+                }
+                match &entry.detail {
+                    MrDetailState::Ready(detail) => bb.restore_mr_diff_refs(
+                        &detail.diff_refs.base_sha,
+                        &detail.diff_refs.head_sha,
+                    ),
+                    MrDetailState::Loading | MrDetailState::Failed(_) => return,
+                }
+            }
+            (MainState::Ready(bb), None) => {
+                if bb.commits.is_empty() {
+                    return;
+                }
+                bb.select_all_commits()
+            }
+            (MainState::Empty | MainState::Error(_), _) => return,
+        };
+        match result {
+            Ok(_) => {}
+            Err(e) => self.state = MainState::Error(e.0),
         }
         cx.notify();
     }
@@ -1071,6 +1125,7 @@ impl Focusable for AppView {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_default_mr_detail_height(window);
+        self.sync_default_head_meta_height(window);
         if let Some(h) = self.diff_window {
             if h.update(cx, |_, _, _| ()).is_err() {
                 self.diff_window = None;
@@ -2049,9 +2104,11 @@ fn finish_mr_activate(
                 target_branch: ready.detail.target_branch.clone(),
             };
             entry.project = Some(ready.project);
+            let base_sha = ready.detail.diff_refs.base_sha.clone();
+            let head_sha = ready.detail.diff_refs.head_sha.clone();
             entry.detail = MrDetailState::Ready(ready.detail);
             if let MainState::Ready(bb) = &mut view.state {
-                if let Err(e) = bb.apply_mr_commits(ready.commit_infos) {
+                if let Err(e) = bb.apply_mr_commits(ready.commit_infos, &base_sha, &head_sha) {
                     entry.detail = MrDetailState::Failed(ErrorNote::plain(e.0));
                 }
             }
@@ -2094,6 +2151,14 @@ fn mr_detail_chrome_offset() -> f32 {
 /// Vertical room for MR detail + frost gap + commit list inside the island column.
 fn mr_detail_column_available(window: &Window) -> f32 {
     f32::from(window.viewport_size().height) - mr_detail_chrome_offset() - theme::CHANGES_INSET
+}
+
+/// `#files-slot` spans CHANGES_TOP_INSET below the titlebar to CHANGES_INSET above the bottom.
+fn changes_island_height(window: &Window) -> f32 {
+    f32::from(window.viewport_size().height)
+        - f32::from(theme::TITLEBAR_HEIGHT)
+        - theme::CHANGES_TOP_INSET
+        - theme::CHANGES_INSET
 }
 
 /// Show MR picker only when a remote host matches Settings.
@@ -2574,7 +2639,17 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let can_open = view.can_open_diff();
     let rows = file_tree::flatten(&paths, &view.collapsed_dirs);
     let head_meta = match &view.state {
-        MainState::Ready(loaded) => head_commit_meta(loaded),
+        MainState::Ready(loaded) => {
+            let mr_diff = view.mr_entry.as_ref().and_then(|e| match &e.detail {
+                MrDetailState::Ready(d) => {
+                    let base = d.diff_refs.base_sha.parse::<Oid>().ok()?;
+                    let head = d.diff_refs.head_sha.parse::<Oid>().ok()?;
+                    Some((base, head))
+                }
+                MrDetailState::Loading | MrDetailState::Failed(_) => None,
+            });
+            head_commit_meta(loaded, mr_diff)
+        }
         MainState::Empty | MainState::Error(_) => None,
     };
     let inset = px(theme::CHANGES_INSET);
@@ -2634,6 +2709,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                 )
                 .child({
                     let (scroll, sb) = scrollbar::vertical("file-tree-sb", cx);
+                    let pane_width = view.files_width;
                     scrollbar::overlay_flex(
                         div()
                             .id("file-tree")
@@ -2651,6 +2727,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                         name,
                                         collapsed,
                                         RowSurface::Island,
+                                        pane_width,
                                         cx,
                                     )
                                     .on_click(cx.listener(
@@ -2669,6 +2746,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                     false,
                                     RowSurface::Island,
                                     mono.clone(),
+                                    pane_width,
                                     cx,
                                 ),
                             })),
@@ -2683,7 +2761,12 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                         view.head_meta_resize_state.clone(),
                         true,
                     ))
-                    .child(render_head_meta(&meta, view.head_meta_height, cx))
+                    .child(render_head_meta(
+                        &meta,
+                        view.files_width - 24.,
+                        view.head_meta_height,
+                        cx,
+                    ))
                 }),
         )
 }
@@ -2693,21 +2776,40 @@ struct HeadMeta {
     range_label: Option<String>,
 }
 
-fn head_commit_meta(loaded: &BranchBrowser) -> Option<HeadMeta> {
+fn head_commit_meta(
+    loaded: &BranchBrowser,
+    mr_diff: Option<(Oid, Oid)>,
+) -> Option<HeadMeta> {
     let commit = loaded
         .commits
         .iter()
         .find(|c| c.oid == loaded.comparison.head_oid)
         .cloned()?;
     let selected = loaded.in_range.iter().filter(|&&b| b).count();
-    let range_label = (selected > 1).then(|| loaded.comparison.label());
+    let on_mr_full = mr_diff.is_some_and(|(base, head)| {
+        loaded.comparison.base_oid == Some(base) && loaded.comparison.head_oid == head
+    });
+    let range_label = if on_mr_full {
+        None
+    } else if mr_diff.is_some() || selected > 1 {
+        Some(loaded.comparison.label())
+    } else {
+        None
+    };
     Some(HeadMeta {
         commit,
         range_label,
     })
 }
 
-fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> impl IntoElement {
+/// `width` is the inner px width: an indefinite width chain lets GPUI shape text
+/// at a layout-probe width, collapsing the title to a few glyphs.
+fn render_head_meta(
+    meta: &HeadMeta,
+    width: f32,
+    height: f32,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     let mono = appearance::code_font(cx);
     let full_oid = meta.commit.oid.to_string();
     let short = meta.commit.oid.short();
@@ -2730,16 +2832,17 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
         .rounded_b(px(theme::CHANGES_RADIUS))
         .child(
             div()
-                .min_w(px(0.))
+                .w(px(width))
+                .flex_none()
                 .ui_text_size(12., cx)
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme::text())
-                .overflow_hidden()
-                .text_ellipsis()
                 .child(meta.commit.summary.clone()),
         )
         .child(
             div()
+                .w(px(width))
+                .overflow_hidden()
                 .flex()
                 .items_center()
                 .gap_1()
@@ -2748,6 +2851,7 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
                 .child(
                     div()
                         .id("head-meta-hash")
+                        .flex_none()
                         .font_family(mono.clone())
                         // Own size: the UI text around it scales, Code Font chrome does not.
                         .text_xs()
@@ -2758,18 +2862,22 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
                         }))
                         .child(short),
                 )
-                .child(div().child("·"))
+                .child(div().flex_none().child("·"))
                 .child(
                     div()
+                        .min_w(px(0.))
+                        .flex_shrink()
                         .overflow_hidden()
+                        .whitespace_nowrap()
                         .text_ellipsis()
                         .child(meta.commit.author.clone()),
                 )
-                .child(div().child("·"))
-                .child(div().child(meta.commit.time_label.clone()))
+                .child(div().flex_none().child("·"))
+                .child(div().flex_none().child(meta.commit.time_label.clone()))
                 .when_some(meta.range_label.clone(), |d, label| {
-                    d.child(div().child("·")).child(
+                    d.child(div().flex_none().child("·")).child(
                         div()
+                            .flex_none()
                             .font_family(mono.clone())
                             // Own size: the UI text around it scales, Code Font chrome does not.
                             .text_xs()

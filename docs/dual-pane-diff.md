@@ -74,6 +74,8 @@ Settled 2026-09-29.
 | Equal | Neutral; used as anchors |
 | Gap (no line on that side) | Diagonal hatch (true hatch, not `╱` stand-in) |
 
+Each Hunk's block on each side carries a 1px outline in a saturated edge color of its kind (Replace blue, Insert green, Delete grey-blue, darker than the omission wave's grey). The outline is a line along the block's top and bottom through its code pane and line-number column, continued by the connector's top and bottom edges across the gutter, so the block, connector and the other side's block read as one outlined shape. It has no vertical ends. A side with no lines for the Hunk (Insert on old, Delete on new) has zero height there: its seam is that single 1px line in the edge color, and it alone marks the anchor.
+
 ### 3.3 Unchanged context: show + fold
 
 Settled 2026-09-26. Omit **Equal** lines only. Delete, Insert, and Replace stay expanded.
@@ -81,7 +83,7 @@ Settled 2026-09-26. Omit **Equal** lines only. Delete, Insert, and Replace stay 
 - Beside each Hunk, keep **3 Equal lines** at each end of the contiguous Equal run (also before the first Hunk and after the last). A run that does not outlast that window stays fully visible. A file with no Hunk has nothing to locate: show every line, no omission separator.
 - The lines beyond those 3 collapse. Each side draws **one omission separator** in its own line list, after that side’s last kept line. It is a view of one collapsed Equal span, not an Alignment op and not a shared row.
 - The two separators are the same span. Their line numbers differ, and their vertical positions differ, only when the two sides have different numbers of visual lines above that span.
-- The separator is drawn as one gray sine across both code columns and the gutter. No fill, no line-range label. Each side stays horizontal through its code and its line numbers. Where the two sides sit at different heights, a cubic Bézier joins them in the gap between the line-number columns. Each sine meets that curve at a crest, so the stroke is horizontal on both sides of the join, the same way the change ribbons leave a flat edge.
+- The separator is drawn as one gray sine across both code columns and the gutter. No fill, no line-range label. Each side stays horizontal through its code and its line numbers. Where the two sides sit at different heights, the centerline eases across the gap between the line-number columns (smoothstep, zero slope at both ends); the sine rides that centerline with phase from x alone, so the wave does not stop oscillating through the height change.
 - Collapsing does not change Alignment. Expanding restores those Equal lines. Expanding or collapsing keeps the line on the viewport anchor where it is; the other side’s scroll is recomputed from the new visual row counts. If the anchor is the omission separator itself, the last visible line above it stays put, and the restored lines open below that line.
 - Clicking either side’s separator expands that one span on both sides. **Expand all** opens every collapsed Equal span in the file. **Collapse unchanged** folds again every Equal run that outlasts the 3-line context. All three keep the anchor line in place.
 - No semantic/AST folding.
@@ -99,7 +101,9 @@ The gutter is the **primary** position UI. It must encode:
 | **Pairwise** (optional refinement on Replace) | Only when reliable: thin links or labels `old N → new M` inside the block |
 | **Hover / focus copy** (assist) | Short text restating the same facts, e.g. “Insert postimage 16–18 after preimage 15”, “Replace preimage 20–22 ↔ postimage 21” — never a second source of truth |
 
-Connector ends use each side’s current viewport Y, so a bridge slants while one side waits inside a Hunk’s extra rows.
+Unless culled (below), connector ends use each side’s current viewport Y, so a bridge slants while one side waits inside a Hunk’s extra rows. The connector is filled with the kind’s tint and edged top and bottom by the §3.2 outline; its curve has horizontal tangents at both line-number columns.
+
+Culling: when both ends of one side lie outside the pane (both above it or both below it), the connector is not drawn. The side still on screen gets a small tab instead: it leaves that side’s line-number column and reaches 3px into the middle gutter with 3px rounded corners, filled and outlined like the connector. If the side still on screen has zero height (a seam), nothing is drawn in the gutter; the seam line stays. If both sides are off the pane, even one above and one below, nothing is drawn. Hover copy for a culled Hunk answers only over its tab’s rows.
 
 ### 3.5 Navigation & view options
 

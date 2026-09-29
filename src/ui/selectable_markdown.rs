@@ -73,9 +73,11 @@ impl SelectableMarkdown {
                 self.anchor = 0;
                 self.selected = 0..self.plain.len();
                 cx.notify();
+                cx.stop_propagation();
             }
             "c" if event.keystroke.modifiers.secondary() => {
                 self.copy(cx);
+                cx.stop_propagation();
             }
             _ => {}
         }
