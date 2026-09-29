@@ -1,34 +1,52 @@
 <!DOCTYPE html>
 <!-- Settled: one omission sine. Each side stays horizontal through its code and line numbers. A height change is a cubic Bézier in the gutter, met at a crest. No fill, no label. -->
+<!-- Visual mirror of theme.rs + diff_window (frost desk + white island, IBM Plex). -->
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Diff prototype — dual pane</title>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --text: #1e1e1e;
-      --muted: #808080;
-      --ln: #9a9a9a;
-      --bg: #fff;
+      --text: #172033;
+      --muted: #596579;
+      --faint: #98a2b3;
+      --ln: #98a2b3;
+      --frost: #f4f5f7;
+      --bg: #ffffff;
+      --line: #dfe3ea;
+      --hover: #e9ebef;
       --del-bg: #d8dce1;
       --del-fill: #d5d9df;
-      --add-bg: #cfe9cf;
+      --add-bg: #e8f7ee;
       --add-fill: #c6e4c4;
-      --mod-bg: #d4e4fa;
+      --mod-bg: #e8f0fe;
       --mod-fill: #b9ceee;
-      --chg: #6f97d2;
+      --chg: #b9ceee;
       --wave: #b5b5b5;
-      --accent: #1d4e89;
+      --accent: #2457d6;
+      --chrome: 32px;
+      --diff-tree-w: 200px;
+      --island-inset: 12px;
+      --island-top: 6px;
+      --island-radius: 12px;
       --fs: 13px;
       --rh: 22px;
+      --island-shadow:
+        0 4px 12px rgba(23, 32, 51, 0.08),
+        0 12px 32px rgba(23, 32, 51, 0.12);
+      --desk-selected: rgba(0, 0, 0, 0.07);
+      --desk-hover: rgba(0, 0, 0, 0.04);
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
-      font-family: system-ui, sans-serif;
-      background: #c8cdd4;
+      font-family: "IBM Plex Sans", sans-serif;
+      font-size: 13px;
+      background: #c5ccd6;
       color: var(--text);
       display: flex;
       flex-direction: column;
@@ -38,35 +56,94 @@
     .win {
       width: min(1100px, 100%);
       height: 100%;
-      background: var(--bg);
-      border: 1px solid #9aa1ab;
-      border-radius: 4px;
-      box-shadow: 0 8px 24px rgba(0,0,0,.16);
+      background: var(--frost);
+      border: 1px solid #b4bcc8;
+      border-radius: 10px;
+      box-shadow: 0 16px 36px rgba(23, 32, 51, 0.16);
       display: flex;
       flex-direction: column;
       overflow: hidden;
     }
-    .bar {
-      flex-shrink: 0;
-      min-height: 28px;
-      padding: 4px 10px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      font-size: 12px;
-      color: var(--muted);
-      border-bottom: 1px solid #eee;
-      background: #fafafa;
+    .traffic { display: flex; gap: 6px; align-items: center; flex-shrink: 0; width: 52px; }
+    .traffic i { width: 10px; height: 10px; border-radius: 50%; display: block; }
+    .traffic .r { background: #ff5f57; }
+    .traffic .y { background: #febc2e; }
+    .traffic .g { background: #28c840; }
+    .icon-btn {
+      width: 26px; height: 26px; border: 0; border-radius: 6px;
+      background: transparent; color: var(--muted); cursor: pointer;
+      display: grid; place-items: center; flex-shrink: 0;
+      font-size: 12px; padding: 0;
     }
-    .bar strong { color: var(--text); font-weight: 500; }
+    .icon-btn:hover { background: var(--hover); color: var(--text); border-color: transparent; }
+
+    .titlebar {
+      height: var(--chrome); flex-shrink: 0;
+      display: flex; align-items: stretch;
+    }
+    .titlebar-leading {
+      width: var(--diff-tree-w); flex-shrink: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 0 0 12px;
+    }
+    .titlebar-main {
+      flex: 1; min-width: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px var(--island-inset) 0 var(--island-inset);
+      font-size: 12px; color: var(--muted);
+    }
+    .titlebar-main strong { color: var(--text); font-weight: 500; }
+    .nav-capsule {
+      display: flex; align-items: center; gap: 2px;
+      padding: 2px; border-radius: 7px; background: var(--bg);
+      box-shadow: var(--island-shadow);
+    }
+    .spacer { flex: 1; }
+
+    .body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+    .side {
+      width: var(--diff-tree-w); flex-shrink: 0;
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    .side-body { flex: 1; overflow: auto; padding: 8px; }
+    .leaf {
+      display: flex; align-items: center; gap: 6px;
+      height: 22px; padding: 0 6px; margin-bottom: 2px;
+      border-radius: 4px; font-size: 12px; cursor: pointer;
+      border: 0; background: transparent; width: 100%; text-align: left; color: var(--text);
+    }
+    .leaf:hover { background: var(--desk-hover); }
+    .leaf[aria-pressed="true"] { background: var(--desk-selected); }
+    .badge {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px; font-weight: 500; width: 14px; text-align: center;
+    }
+    .badge.M { color: #9a6700; }
+    .badge.A { color: #1a7f4b; }
+    .badge.D { color: #b42318; }
+    .badge.U { color: var(--faint); }
+
+    .diff-stage {
+      flex: 1; min-width: 0; min-height: 0;
+      padding: var(--island-top) var(--island-inset) var(--island-inset) 0;
+      display: flex; flex-direction: column;
+    }
+    .file-status {
+      flex-shrink: 0; padding: 0 4px 6px;
+      font-size: 12px; color: var(--muted);
+    }
+
     .stage {
       flex: 1;
-      min-height: 280px;
+      min-height: 200px;
       display: grid;
       grid-template-columns: minmax(0, 1fr) 36px minmax(0, 1fr);
       position: relative;
       background: var(--bg);
-      font-family: "JetBrains Mono", ui-monospace, monospace;
+      border-radius: var(--island-radius);
+      box-shadow: var(--island-shadow);
+      overflow: hidden;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
       font-size: var(--fs);
       line-height: var(--rh);
     }
@@ -114,57 +191,87 @@
       z-index: 2;
       pointer-events: none;
     }
+    .gutter { background: #fafbfc; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
+
     .panel {
       flex-shrink: 0;
       margin: 10px 12px 12px;
-      background: #fff;
-      border: 1px solid #d5d8de;
-      border-radius: 8px;
+      background: var(--frost);
+      border: 1px solid #b4bcc8;
+      border-radius: 10px;
       padding: 10px 12px 12px;
       width: min(1100px, calc(100% - 24px));
       align-self: center;
+      box-shadow: 0 8px 20px rgba(23, 32, 51, 0.10);
     }
     .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; align-items: center; }
     button, input {
       font: inherit;
       font-size: 12px;
-      border: 1px solid #c5cad3;
-      background: #fff;
+      border: 1px solid var(--line);
+      background: var(--bg);
       border-radius: 999px;
       padding: 4px 10px;
+      color: var(--text);
     }
     input { border-radius: 6px; min-width: 180px; }
     button { cursor: pointer; }
     button:hover { border-color: var(--accent); color: var(--accent); }
     button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .side .leaf {
+      border: 0; border-radius: 4px; background: transparent; padding: 0 6px;
+    }
+    .side .leaf:hover { border-color: transparent; color: var(--text); background: var(--desk-hover); }
+    .side .leaf[aria-pressed="true"] {
+      background: var(--desk-selected); color: var(--text); border-color: transparent;
+    }
+    .nav-capsule .icon-btn:hover { border-color: transparent; color: var(--text); }
     #hits { list-style: none; margin: 0; padding: 0; max-height: 96px; overflow: auto; display: flex; flex-wrap: wrap; gap: 4px; }
-    #hits button { border-radius: 6px; font-family: ui-monospace, monospace; }
+    #hits button { border-radius: 6px; font-family: "IBM Plex Mono", monospace; }
   </style>
 </head>
 <body>
   <div class="frame">
     <div class="win">
-      <div class="bar">
-        <strong id="fileName">StressBridge.hpp</strong>
-        <span id="comparison">a1b2c3d..9f8e7d6</span>
-        <span id="hunkCount"></span>
-        <span id="readout"></span>
-      </div>
-      <div class="stage" id="stage">
-        <div class="pane" id="paneL"><div class="sheet left" id="sheetL"></div><div class="seam" id="seamL" hidden></div></div>
-        <div class="gutter" id="gutter"></div>
-        <div class="pane" id="paneR"><div class="sheet right" id="sheetR"></div><div class="seam" id="seamR" hidden></div></div>
-        <svg class="overlay" id="overlay"></svg>
+      <header class="titlebar">
+        <div class="titlebar-leading">
+          <div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+          <button type="button" class="icon-btn" title="File tree" aria-hidden="true">☰</button>
+        </div>
+        <div class="titlebar-main">
+          <div class="nav-capsule">
+            <button type="button" class="icon-btn" id="prevHunkBar" title="Previous hunk">↑</button>
+            <button type="button" class="icon-btn" id="nextHunkBar" title="Next hunk">↓</button>
+          </div>
+          <strong id="fileName">StressBridge.hpp</strong>
+          <span id="comparison">a1b2c3d..9f8e7d6</span>
+          <span id="hunkCount"></span>
+          <span class="spacer"></span>
+          <span id="readout"></span>
+        </div>
+      </header>
+      <div class="body">
+        <aside class="side">
+          <div class="side-body" id="files">
+            <button type="button" class="leaf" data-file="modify" aria-pressed="true"><span class="badge M">M</span>StressBridge.hpp</button>
+            <button type="button" class="leaf" data-file="add" aria-pressed="false"><span class="badge A">A</span>Added.hpp</button>
+            <button type="button" class="leaf" data-file="del" aria-pressed="false"><span class="badge D">D</span>Deleted.hpp</button>
+            <button type="button" class="leaf" data-file="same" aria-pressed="false"><span class="badge U">·</span>Unchanged.hpp</button>
+          </div>
+        </aside>
+        <div class="diff-stage">
+          <div class="file-status" id="fileStatus">dual-pane · omission sine</div>
+          <div class="stage" id="stage">
+            <div class="pane" id="paneL"><div class="sheet left" id="sheetL"></div><div class="seam" id="seamL" hidden></div></div>
+            <div class="gutter" id="gutter"></div>
+            <div class="pane" id="paneR"><div class="sheet right" id="sheetR"></div><div class="seam" id="seamR" hidden></div></div>
+            <svg class="overlay" id="overlay"></svg>
+          </div>
+        </div>
       </div>
     </div>
   </div>
   <section class="panel">
-    <div class="btns" id="files">
-      <button type="button" data-file="modify" aria-pressed="true">Modify</button>
-      <button type="button" data-file="add">Added file</button>
-      <button type="button" data-file="del">Deleted file</button>
-      <button type="button" data-file="same">Unchanged</button>
-    </div>
     <div class="btns">
       <button type="button" id="prevHunk">Previous hunk</button>
       <button type="button" id="nextHunk">Next hunk</button>
@@ -924,6 +1031,12 @@
     document.getElementById('nextHunk').addEventListener('click', () => {
       const h = nearestHunk(1);
       if (h) applyS(h.s);
+    });
+    document.getElementById('prevHunkBar').addEventListener('click', () => {
+      document.getElementById('prevHunk').click();
+    });
+    document.getElementById('nextHunkBar').addEventListener('click', () => {
+      document.getElementById('nextHunk').click();
     });
     document.getElementById('expandAll').addEventListener('click', () => {
       withAnchor(() => {

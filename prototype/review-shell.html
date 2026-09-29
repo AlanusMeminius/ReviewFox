@@ -8,8 +8,8 @@
     PROTOTYPE — throwaway. Not production.
     Question: ReviewFox main + Diff chrome look.
     VERDICT (2026-09-25): A accepted — see docs/adr/0003-beads-rail-shell-from-prototype-a.md
-    B/C parked. Keep this file as the visual primary source.
-    Diff dual-pane lives in prototype/diff-view.html (separate window).
+    B/C parked. Visual mirror of theme.rs + app_view / diff_window shell
+    (frost desk + white islands; Diff dual-pane also in prototype/diff-view.html).
     open prototype/review-shell.html · Diff: prototype/diff-view.html
   -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -22,22 +22,42 @@
       --faint: #98a2b3;
       --line: #dfe3ea;
       --surface: #ffffff;
-      --sidebar: #f4f5f7;
+      --frost: #f4f5f7;
       --hover: #e9ebef;
-      --selected: #2457d6;
-      --selected-soft: #f1f5ff;
       --accent: #2457d6;
+      --range: #f1f5ff;
       --add: #1a7f4b;
       --add-bg: #e8f7ee;
       --del: #b42318;
-      --del-bg: #fdeceb;
+      --del-bg: #d8dce1;
       --mod-bg: #e8f0fe;
-      --mod-bg-deep: #d4e4fc;
+      --chg: #b9ceee;
+      --chrome: 32px;
+      --sidebar-w: 188px;
+      --files-w: 280px;
+      --diff-tree-w: 200px;
+      --island-inset: 12px;
+      --island-top: 6px;
+      --island-radius: 12px;
+      --island-clearance: 304px;
+      --row-h: 32px;
+      --row-gap: 4px;
+      --row-inset: 8px;
+      --row-pad-x: 6px;
+      --row-radius: 8px;
+      --capsule: #ffffff;
+      --capsule-hover: #e4e7ed;
+      --desk-selected: rgba(0, 0, 0, 0.07);
+      --desk-hover: rgba(0, 0, 0, 0.04);
+      --island-shadow:
+        0 4px 12px rgba(23, 32, 51, 0.08),
+        0 12px 32px rgba(23, 32, 51, 0.12);
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
       font-family: "IBM Plex Sans", sans-serif;
+      font-size: 13px;
       color: var(--text);
       background: #c5ccd6;
       overflow: hidden;
@@ -50,7 +70,7 @@
     .desk { display: flex; gap: 12px; max-width: 1280px; width: 100%; height: 100%; min-width: 0; }
 
     .win {
-      background: var(--surface);
+      background: var(--frost);
       border: 1px solid #b4bcc8;
       border-radius: 10px;
       box-shadow: 0 16px 36px rgba(23, 32, 51, 0.16);
@@ -88,96 +108,109 @@
       padding: 10px; border-radius: 8px; opacity: 0.9; white-space: pre-wrap;
     }
 
-    /* ========== A: Beads-like three column ========== */
-    .A-main { flex: 1; min-width: 0; }
-    .open-diff {
-      margin-left: auto;
-      height: 26px; padding: 0 10px;
-      border: 0; border-radius: 6px;
-      background: var(--accent); color: #fff;
-      font-size: 12px; font-weight: 500; cursor: pointer;
-      text-decoration: none; display: inline-flex; align-items: center;
-    }
-    .open-diff:hover { filter: brightness(1.05); }
-
-    .A-cols {
-      flex: 1; display: grid; min-height: 0;
-      grid-template-columns: 220px minmax(260px, 1fr) 280px;
-    }
-    .A-cols.repos-collapsed { grid-template-columns: 0 minmax(260px, 1fr) 280px; }
-
-    /* Left sidebar — frosted, NO right border; color boundary only */
-    .A-side {
-      background: var(--sidebar);
-      display: flex; flex-direction: column; min-width: 0; overflow: hidden;
-    }
-    .A-side-chrome {
-      height: 36px; flex-shrink: 0;
-      display: flex; align-items: center; gap: 8px;
-      padding: 0 8px 0 12px;
-      /* no bottom border — titlebar has no divider */
-    }
-    .A-side-toggle {
+    .icon-btn {
       width: 26px; height: 26px; border: 0; border-radius: 6px;
       background: transparent; color: var(--muted); cursor: pointer;
       display: grid; place-items: center; flex-shrink: 0;
     }
-    .A-side-toggle:hover { background: var(--hover); }
-    .A-side-toggle svg { width: 16px; height: 16px; }
+    .icon-btn:hover { background: var(--hover); }
+    .icon-btn svg { width: 16px; height: 16px; }
 
-    .A-side-body { flex: 1; overflow: auto; padding: 4px 8px 12px; }
-    .A-side-label {
+    /* ========== A: frost desk + white islands ========== */
+    .A-main { flex: 1.15; min-width: 0; }
+    .A-diff { flex: 0.95; min-width: 0; }
+
+    .titlebar {
+      height: var(--chrome); flex-shrink: 0;
+      display: flex; align-items: stretch; min-width: 0;
+    }
+    .titlebar-leading {
+      width: var(--sidebar-w); flex-shrink: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 0 0 12px;
+    }
+    .titlebar-leading.collapsed { width: auto; min-width: 90px; }
+    .titlebar-leading.diff { width: var(--diff-tree-w); }
+    .titlebar-leading.diff.collapsed { width: auto; min-width: 90px; }
+    .titlebar-main {
+      flex: 1; min-width: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px var(--island-inset) 0 var(--island-inset);
+    }
+    .branch-pill {
+      display: flex; align-items: center; gap: 4px;
+      padding: 4px 10px; border-radius: 999px; cursor: pointer;
+      font-size: 12px; background: var(--capsule); flex-shrink: 0; border: 0; color: var(--text);
+    }
+    .branch-pill:hover { background: var(--hover); }
+    .branch-pill select {
+      border: 0; background: transparent; padding: 0; font-size: 12px; color: var(--text);
+      max-width: 160px;
+    }
+    .cmp {
+      margin-left: auto;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px; color: var(--muted);
+    }
+    .nav-capsule {
+      display: flex; align-items: center; gap: 2px;
+      padding: 2px; border-radius: 7px; background: var(--capsule);
+      box-shadow: var(--island-shadow);
+    }
+    .nav-capsule .icon-btn { border-radius: 5px; }
+
+    .body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+
+    .side {
+      width: var(--sidebar-w); flex-shrink: 0;
+      display: flex; flex-direction: column; min-width: 0; overflow: hidden;
+    }
+    .side.collapsed { width: 0; overflow: hidden; }
+    .side-body {
+      flex: 1; overflow: auto;
+      padding: 16px var(--row-inset) 8px;
+      display: flex; flex-direction: column; gap: var(--row-gap);
+    }
+    .side-label {
       font-size: 11px; font-weight: 600; color: var(--faint);
-      padding: 8px 10px 6px; letter-spacing: 0.02em;
+      height: 24px; display: flex; align-items: center;
+      padding: 0 var(--row-pad-x);
     }
-    /* Capsule selection — NOT left-edge bar */
     .A-repo {
-      display: flex; flex-direction: column; gap: 2px;
-      padding: 8px 10px; margin-bottom: 2px;
-      border-radius: 8px; cursor: pointer;
+      display: flex; flex-direction: column; justify-content: center; gap: 1px;
+      min-height: var(--row-h);
+      padding: 4px var(--row-pad-x);
+      border-radius: var(--row-radius); cursor: pointer;
     }
-    .A-repo:hover { background: var(--hover); }
-    .A-repo.active {
-      background: var(--selected);
-    }
-    .A-repo.active .name { color: #fff; }
-    .A-repo.active .path { color: rgba(255,255,255,.78); }
-    .A-repo.active:hover { background: var(--selected); }
-    .A-repo .name { font-size: 13px; font-weight: 500; color: var(--text); }
+    .A-repo:hover { background: var(--desk-hover); }
+    .A-repo.active { background: var(--desk-selected); }
+    .A-repo .name { font-size: 13px; font-weight: 500; }
     .A-repo .path { font-size: 11px; color: var(--muted); }
 
-    /* Center commits — white, no left border */
-    .A-center {
-      background: #fff;
-      display: flex; flex-direction: column; min-width: 0;
-      /* full-height divider only on the RIGHT, to the top */
-      border-right: 1px solid var(--line);
+    .stage { flex: 1; min-width: 0; position: relative; overflow: hidden; }
+    .commits-column {
+      position: absolute; inset: 0;
+      right: var(--island-clearance);
+      display: flex; flex-direction: column;
+      padding: var(--island-top) 0 var(--island-inset) var(--island-inset);
+      min-width: 0;
     }
-    .A-center-chrome {
-      height: 36px; flex-shrink: 0;
-      display: flex; align-items: center; gap: 8px;
-      padding: 0 12px;
-      /* no bottom border */
+    .commit-island {
+      flex: 1; min-height: 0;
+      background: var(--surface);
+      border-radius: var(--island-radius);
+      box-shadow: var(--island-shadow);
+      overflow: hidden;
+      display: flex; flex-direction: column;
     }
-    .A-center-chrome select {
-      height: 26px; border: 1px solid var(--line); border-radius: 6px;
-      padding: 0 8px; background: #fff; color: var(--text); min-width: 140px;
-    }
-    .A-center-chrome input {
-      flex: 1; height: 26px; border: 1px solid var(--line); border-radius: 6px;
-      padding: 0 8px; background: #fff; min-width: 0;
-    }
-    .A-center-chrome .cmp {
-      font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--muted);
-      flex-shrink: 0;
-    }
-    .A-commits { flex: 1; overflow: auto; }
+    .A-commits { flex: 1; overflow: auto; padding: 4px 0; }
     .A-commit {
       display: grid; grid-template-columns: 16px 1fr; gap: 10px;
-      padding: 10px 14px; cursor: pointer; align-items: start;
+      margin: 0 8px 2px; padding: 8px 10px; cursor: pointer; align-items: start;
+      border-radius: 8px;
     }
     .A-commit:hover { background: #f6f8fb; }
-    .A-commit.in-range { background: var(--selected-soft); }
+    .A-commit.in-range { background: var(--range); }
     .A-commit .check {
       width: 14px; height: 14px; margin-top: 2px;
       border: 1.5px solid #98a2b3; border-radius: 3px; background: #fff;
@@ -189,24 +222,42 @@
     .A-commit .msg { font-size: 13px; font-weight: 500; }
     .A-commit .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
 
-    /* Right: FILE TREE — shares the full-height left border via center's border-right */
-    .A-files {
-      background: #fff;
-      display: flex; flex-direction: column; min-width: 0;
+    .changes {
+      position: absolute;
+      top: var(--island-top);
+      right: var(--island-inset);
+      bottom: var(--island-inset);
+      width: var(--files-w);
+      z-index: 5;
+      display: flex; flex-direction: column;
+      background: var(--surface);
+      border-radius: var(--island-radius);
+      box-shadow: var(--island-shadow);
+      overflow: hidden;
     }
-    .A-files-chrome {
-      height: 36px; flex-shrink: 0;
+    .changes-chrome {
+      flex-shrink: 0;
       display: flex; align-items: center; gap: 8px;
-      padding: 0 12px;
-      font-size: 12px; font-weight: 600; color: var(--muted);
-      /* no bottom border; vertical divider already from center */
+      padding: 10px 12px 4px;
+      font-size: 11px; font-weight: 600; color: var(--faint);
     }
-    .A-tree { flex: 1; overflow: auto; padding: 4px 6px 12px; font-size: 12px; }
+    .open-diff {
+      margin-left: auto;
+      height: 26px; padding: 0 10px;
+      border: 0; border-radius: 6px;
+      background: var(--accent); color: #fff;
+      font-size: 12px; font-weight: 500; cursor: pointer;
+      text-decoration: none; display: inline-flex; align-items: center;
+    }
+    .open-diff:hover { filter: brightness(1.05); }
+
+    .A-tree { flex: 1; overflow: auto; padding: 2px 6px 12px; font-size: 12px; }
     .A-tree details { margin: 0; }
     .A-tree summary {
       list-style: none; cursor: pointer;
       display: flex; align-items: center; gap: 4px;
-      padding: 4px 6px; border-radius: 6px; user-select: none;
+      height: 22px; padding: 0 6px; margin: 0 4px 2px;
+      border-radius: 4px; user-select: none;
     }
     .A-tree summary::-webkit-details-marker { display: none; }
     .A-tree summary:hover { background: #f6f8fb; }
@@ -217,10 +268,11 @@
     .A-tree .folder-kids { padding-left: 14px; }
     .A-tree .leaf {
       display: flex; align-items: center; gap: 6px;
-      padding: 4px 6px 4px 18px; border-radius: 6px; cursor: pointer;
+      height: 22px; padding: 0 6px 0 18px; margin: 0 4px 2px;
+      border-radius: 4px; cursor: pointer;
     }
     .A-tree .leaf:hover { background: #f6f8fb; }
-    .A-tree .leaf.active { background: var(--selected-soft); }
+    .A-tree .leaf.active { background: var(--range); }
     .A-tree .badge {
       font-family: "IBM Plex Mono", monospace; font-size: 10px; font-weight: 500; width: 12px;
     }
@@ -229,7 +281,47 @@
     .A-tree .badge.D { color: var(--del); }
     .A-tree .stats { margin-left: auto; font-size: 10px; color: var(--faint); }
 
-    /* B/C kept minimal stubs so switcher still works */
+    /* Diff window half */
+    .diff-tree {
+      width: var(--diff-tree-w); flex-shrink: 0;
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    .diff-tree.collapsed { width: 0; overflow: hidden; }
+    .diff-tree-body { flex: 1; overflow: auto; padding: 8px var(--row-inset); }
+    .diff-stage {
+      flex: 1; min-width: 0;
+      padding: var(--island-top) var(--island-inset) var(--island-inset) 0;
+      display: flex; flex-direction: column; min-height: 0;
+    }
+    .diff-island {
+      flex: 1; min-height: 0;
+      background: var(--surface);
+      border-radius: var(--island-radius);
+      box-shadow: var(--island-shadow);
+      overflow: hidden;
+      display: grid;
+      grid-template-columns: 1fr 36px 1fr;
+      font-family: "IBM Plex Mono", monospace; font-size: 12px; line-height: 22px;
+    }
+    .diff-pane { overflow: hidden; padding: 12px 0; }
+    .diff-pane .row { display: flex; min-height: 22px; }
+    .diff-pane .ln {
+      width: 36px; flex-shrink: 0; text-align: right; padding-right: 8px;
+      color: var(--faint); user-select: none;
+    }
+    .diff-pane .code { flex: 1; padding-right: 8px; white-space: pre; overflow: hidden; }
+    .diff-pane .row.add { background: var(--add-bg); }
+    .diff-pane .row.del { background: var(--del-bg); }
+    .diff-pane .row.mod { background: var(--mod-bg); }
+    .diff-gutter {
+      background: #fafbfc; border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+    }
+    .file-status {
+      flex-shrink: 0; padding: 0 12px 8px;
+      font-size: 12px; color: var(--muted);
+    }
+    .file-status strong { color: var(--text); font-weight: 500; }
+
     .stub {
       flex: 1; display: grid; place-items: center; padding: 40px;
       color: var(--muted); text-align: center; line-height: 1.5;
@@ -276,7 +368,6 @@
         { sha: "789abcd", msg: "Initial import", author: "alan", time: "3d", inRange: false },
       ],
       selectedFile: "src/diff/alignment.rs",
-      // nested tree, not a flat list
       tree: [
         {
           name: "src",
@@ -330,7 +421,7 @@
       document.getElementById("stateDump").textContent = JSON.stringify(
         {
           variant: v,
-          note: "A: Beads rail main shell; Diff is prototype/diff-view.html",
+          note: "A: frost desk + islands; Diff shell mirror; dual-pane in diff-view.html",
           comparison: MOCK.comparison,
           reposCollapsed: MOCK.reposCollapsed,
           diffTreeCollapsed: MOCK.diffTreeCollapsed,
@@ -369,18 +460,28 @@
     }
 
     function renderA(desk) {
+      const leadCollapse = MOCK.reposCollapsed ? "collapsed" : "";
+      const diffLeadCollapse = MOCK.diffTreeCollapsed ? "collapsed" : "";
       desk.innerHTML = `
         <div class="win A-main">
-          <div class="A-cols ${MOCK.reposCollapsed ? "repos-collapsed" : ""}">
-            <aside class="A-side">
-              <div class="A-side-chrome">
-                <div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
-                <button type="button" class="A-side-toggle" data-act="toggle-repos" title="Hide sidebar">
-                  ${sidebarToggleIcon()}
-                </button>
-              </div>
-              <div class="A-side-body">
-                <div class="A-side-label">Repositories</div>
+          <header class="titlebar">
+            <div class="titlebar-leading ${leadCollapse}">
+              <div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+              <button type="button" class="icon-btn" data-act="toggle-repos" title="Toggle sidebar">${sidebarToggleIcon()}</button>
+            </div>
+            <div class="titlebar-main">
+              <label class="branch-pill">
+                <select data-act="branch">${MOCK.branches
+                  .map((b) => `<option ${b === MOCK.branch ? "selected" : ""}>${esc(b)}</option>`)
+                  .join("")}</select>
+              </label>
+              <span class="cmp">${esc(MOCK.comparison.base)}..${esc(MOCK.comparison.head)}</span>
+            </div>
+          </header>
+          <div class="body">
+            <aside class="side ${MOCK.reposCollapsed ? "collapsed" : ""}">
+              <div class="side-body">
+                <div class="side-label">Repositories</div>
                 ${MOCK.repos
                   .map(
                     (r) => `
@@ -392,41 +493,71 @@
                   .join("")}
               </div>
             </aside>
-            <section class="A-center">
-              <div class="A-center-chrome">
-                ${
-                  MOCK.reposCollapsed
-                    ? `<button type="button" class="A-side-toggle" data-act="toggle-repos" title="Show sidebar">${sidebarToggleIcon()}</button>`
-                    : ""
-                }
-                <select data-act="branch">${MOCK.branches
-                  .map((b) => `<option ${b === MOCK.branch ? "selected" : ""}>${esc(b)}</option>`)
-                  .join("")}</select>
-                <input placeholder="Filter commits" />
-                <span class="cmp">${esc(MOCK.comparison.base)}..${esc(MOCK.comparison.head)}</span>
+            <section class="stage">
+              <div class="commits-column">
+                <div class="commit-island">
+                  <div class="A-commits">
+                    ${MOCK.commits
+                      .map(
+                        (c) => `
+                      <div class="A-commit ${c.inRange ? "in-range" : ""}" data-sha="${esc(c.sha)}">
+                        <div class="check"></div>
+                        <div>
+                          <div class="msg">${esc(c.msg)}</div>
+                          <div class="sub mono">${esc(c.sha)} · ${esc(c.author)} · ${esc(c.time)}</div>
+                        </div>
+                      </div>`
+                      )
+                      .join("")}
+                  </div>
+                </div>
               </div>
-              <div class="A-commits">
-                ${MOCK.commits
-                  .map(
-                    (c) => `
-                  <div class="A-commit ${c.inRange ? "in-range" : ""}" data-sha="${esc(c.sha)}">
-                    <div class="check"></div>
-                    <div>
-                      <div class="msg">${esc(c.msg)}</div>
-                      <div class="sub mono">${esc(c.sha)} · ${esc(c.author)} · ${esc(c.time)}</div>
-                    </div>
-                  </div>`
-                  )
-                  .join("")}
+              <aside class="changes">
+                <div class="changes-chrome">
+                  <span>Changes</span>
+                  <a class="open-diff" href="diff-view.html">Open Diff</a>
+                </div>
+                <div class="A-tree">${renderTree(MOCK.tree)}</div>
+              </aside>
+            </section>
+          </div>
+        </div>
+
+        <div class="win A-diff">
+          <header class="titlebar">
+            <div class="titlebar-leading diff ${diffLeadCollapse}">
+              <div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+              <button type="button" class="icon-btn" data-act="toggle-diff-tree" title="Toggle file tree">${sidebarToggleIcon()}</button>
+            </div>
+            <div class="titlebar-main">
+              <div class="nav-capsule">
+                <button type="button" class="icon-btn" title="Prev hunk">↑</button>
+                <button type="button" class="icon-btn" title="Next hunk">↓</button>
+              </div>
+              <span class="cmp truncate" style="margin-left:0">${esc(MOCK.selectedFile)}</span>
+            </div>
+          </header>
+          <div class="body">
+            <aside class="diff-tree ${MOCK.diffTreeCollapsed ? "collapsed" : ""}">
+              <div class="diff-tree-body A-tree">${renderTree(MOCK.tree)}</div>
+            </aside>
+            <section class="diff-stage">
+              <div class="file-status"><strong>${esc(MOCK.selectedFile.split("/").pop())}</strong> · hunk 1 of 2</div>
+              <div class="diff-island">
+                <div class="diff-pane">
+                  <div class="row del"><span class="ln">10</span><span class="code">fn align(old, new) {</span></div>
+                  <div class="row del"><span class="ln">11</span><span class="code">    pair_lines(old, new)</span></div>
+                  <div class="row"><span class="ln">12</span><span class="code">}</span></div>
+                </div>
+                <div class="diff-gutter"></div>
+                <div class="diff-pane">
+                  <div class="row add"><span class="ln">10</span><span class="code">fn align(old, new) {</span></div>
+                  <div class="row mod"><span class="ln">11</span><span class="code">    many_to_many(old, new)</span></div>
+                  <div class="row add"><span class="ln">12</span><span class="code">        .with_replace()</span></div>
+                  <div class="row"><span class="ln">13</span><span class="code">}</span></div>
+                </div>
               </div>
             </section>
-            <aside class="A-files">
-              <div class="A-files-chrome">
-                <span>Changes</span>
-                <a class="open-diff" href="diff-view.html">Open Diff</a>
-              </div>
-              <div class="A-tree">${renderTree(MOCK.tree)}</div>
-            </aside>
           </div>
         </div>`;
     }
@@ -441,6 +572,18 @@
       desk.querySelectorAll("[data-act='toggle-repos']").forEach((el) =>
         el.addEventListener("click", () => {
           MOCK.reposCollapsed = !MOCK.reposCollapsed;
+          render();
+        })
+      );
+      desk.querySelectorAll("[data-act='toggle-diff-tree']").forEach((el) =>
+        el.addEventListener("click", () => {
+          MOCK.diffTreeCollapsed = !MOCK.diffTreeCollapsed;
+          render();
+        })
+      );
+      desk.querySelectorAll("[data-act='branch']").forEach((el) =>
+        el.addEventListener("change", () => {
+          MOCK.branch = el.value;
           render();
         })
       );

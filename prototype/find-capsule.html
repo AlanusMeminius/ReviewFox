@@ -17,6 +17,7 @@
       — open/close does not change pane flow height; find-open adds
         sheet padding-top + scroll-padding-top so top lines stay reachable
       A/C parked for comparison only.
+    Visual mirror of theme.rs + diff_window (frost desk + white island).
     open prototype/find-capsule.html?variant=B
   -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -29,27 +30,41 @@
       --faint: #98a2b3;
       --line: #dfe3ea;
       --surface: #ffffff;
-      --sidebar: #f4f5f7;
+      --frost: #f4f5f7;
       --hover: #e9ebef;
       --accent: #2457d6;
-      --add-bg: #cfe9cf;
+      --add-bg: #e8f7ee;
       --del-bg: #d8dce1;
-      --mod-bg: #d4e4fa;
+      --mod-bg: #e8f0fe;
       --hit: #ffe08a;
       --hit-cur: #ffc53d;
-      --chrome: 36px;
-      --capsule-h: 36px;
-      --find-pad: 44px; /* scroll-padding when find open — clears capsule */
-      --shadow: 0 8px 24px rgba(23, 32, 51, 0.14), 0 2px 6px rgba(23, 32, 51, 0.08);
+      --chrome: 32px;
+      --diff-tree-w: 200px;
+      --island-inset: 12px;
+      --island-top: 6px;
+      --island-radius: 12px;
+      --capsule-h: 36px; /* FIND_FIELD_HEIGHT 28 + 2*pad 4 */
+      --find-inset: 6px;
+      --find-pad: 42px; /* FIND_CONTENT_PAD = inset 6 + bar 36 */
+      --find-bar-pad: 4px;
+      --shadow:
+        0 2px 6px hsla(220, 38%, 14%, 0.08),
+        0 8px 24px hsla(220, 38%, 14%, 0.14);
+      --island-shadow:
+        0 4px 12px rgba(23, 32, 51, 0.08),
+        0 12px 32px rgba(23, 32, 51, 0.12);
       --radius: 8px;
-      --field-radius: 6px;
+      --field-radius: 4px; /* FIND_BAR_RADIUS - FIND_BAR_PAD */
       --field-border: #c5cad3;
       --focus-ring: 0 0 0 2px rgba(36, 87, 214, 0.22);
+      --desk-selected: rgba(0, 0, 0, 0.07);
+      --desk-hover: rgba(0, 0, 0, 0.04);
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
       font-family: "IBM Plex Sans", sans-serif;
+      font-size: 13px;
       color: var(--text);
       background: #c5ccd6;
       overflow: hidden;
@@ -63,82 +78,116 @@
 
     .win {
       height: 100%;
-      background: var(--surface);
+      background: var(--frost);
       border: 1px solid #b4bcc8;
       border-radius: 10px;
       box-shadow: 0 16px 36px rgba(23, 32, 51, 0.16);
-      display: flex; overflow: hidden; min-width: 0;
+      display: flex; flex-direction: column; overflow: hidden; min-width: 0;
     }
-    .side {
-      width: 168px; flex-shrink: 0;
-      background: var(--sidebar);
-      border-right: 1px solid var(--line);
-      display: flex; flex-direction: column; min-width: 0;
+    .traffic { display: flex; gap: 6px; align-items: center; flex-shrink: 0; width: 52px; }
+    .traffic i { width: 10px; height: 10px; border-radius: 50%; display: block; }
+    .traffic .r { background: #ff5f57; }
+    .traffic .y { background: #febc2e; }
+    .traffic .g { background: #28c840; }
+    .icon-btn {
+      width: 26px; height: 26px; border: 0; border-radius: 6px;
+      background: transparent; color: var(--muted); cursor: pointer;
+      display: grid; place-items: center; flex-shrink: 0;
     }
-    .side-chrome {
+    .icon-btn:hover { background: var(--hover); }
+    .icon-btn svg { width: 16px; height: 16px; }
+
+    .titlebar {
       height: var(--chrome); flex-shrink: 0;
+      display: flex; align-items: stretch;
+    }
+    .titlebar-leading {
+      width: var(--diff-tree-w); flex-shrink: 0;
       display: flex; align-items: center; gap: 8px;
-      padding: 0 10px; font-size: 12px; color: var(--muted);
-      border-bottom: 1px solid var(--line);
+      padding: 6px 0 0 12px;
+    }
+    .titlebar-main {
+      flex: 1; min-width: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px var(--island-inset) 0 var(--island-inset);
+    }
+    .nav-capsule {
+      display: flex; align-items: center; gap: 2px;
+      padding: 2px; border-radius: 7px; background: var(--surface);
+      box-shadow: var(--island-shadow);
+    }
+    .file-meta { font-size: 12px; color: var(--muted); min-width: 0; }
+    .file-meta strong { color: var(--text); font-weight: 500; }
+    .tool-btn {
+      height: 26px; padding: 0 10px; border: 0; border-radius: 999px;
+      background: var(--surface); color: var(--text); cursor: pointer;
+      font-size: 12px; font-weight: 500;
+      box-shadow: var(--island-shadow);
+    }
+    .tool-btn:hover { background: var(--hover); }
+    .tool-btn[aria-pressed="true"] {
+      background: var(--accent); color: #fff; box-shadow: none;
+    }
+    .spacer { flex: 1; }
+
+    .body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+    .side {
+      width: var(--diff-tree-w); flex-shrink: 0;
+      display: flex; flex-direction: column; min-width: 0;
     }
     .side-body { flex: 1; overflow: auto; padding: 8px; }
     .leaf {
       display: flex; align-items: center; gap: 6px;
-      padding: 6px 8px; border-radius: 8px;
-      font-size: 12px; cursor: default;
+      height: 22px; padding: 0 6px; margin-bottom: 2px;
+      border-radius: 4px; font-size: 12px; cursor: default;
     }
-    .leaf.active { background: #e8eefc; color: var(--accent); }
+    .leaf:hover { background: var(--desk-hover); }
+    .leaf.active { background: var(--desk-selected); }
     .badge {
       font-family: "IBM Plex Mono", monospace;
       font-size: 10px; font-weight: 500; width: 14px; text-align: center;
     }
     .badge.M { color: #b45309; }
-    .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-    .file-chrome {
-      height: var(--chrome); flex-shrink: 0;
-      display: flex; align-items: center; gap: 10px;
-      padding: 0 12px; font-size: 12px; color: var(--muted);
-      border-bottom: 1px solid var(--line);
+
+    .diff-stage {
+      flex: 1; min-width: 0; min-height: 0;
+      padding: var(--island-top) var(--island-inset) var(--island-inset) 0;
+      display: flex; flex-direction: column;
     }
-    .file-chrome strong { color: var(--text); font-weight: 500; }
-    .file-chrome .spacer { flex: 1; }
-    .tool-btn {
-      height: 26px; padding: 0 10px; border: 0; border-radius: 999px;
-      background: #eef0f4; color: var(--text); cursor: pointer;
-      font-size: 12px; font-weight: 500;
-    }
-    .tool-btn:hover { background: #e4e7ed; }
-    .tool-btn[aria-pressed="true"] {
-      background: var(--accent); color: #fff;
+    .file-status {
+      flex-shrink: 0; padding: 0 4px 6px;
+      font-size: 12px; color: var(--muted);
     }
 
-    /* Stage: dual pane; find floats OVER this — never in flow */
+    /* Dual pane inside white island; find floats OVER this — never in flow */
     .stage {
       flex: 1; min-height: 0;
       display: grid;
       grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr);
       position: relative;
       background: var(--surface);
+      border-radius: var(--island-radius);
+      box-shadow: var(--island-shadow);
+      overflow: hidden;
       font-family: "IBM Plex Mono", ui-monospace, monospace;
-      font-size: 12.5px; line-height: 20px;
+      font-size: 13px; line-height: 22px;
     }
     .pane {
       min-width: 0; min-height: 0;
       overflow: auto;
       position: relative;
-      /* Key demo: when find is open, top lines can scroll into the clear band */
       scroll-padding-top: 0;
     }
     .stage.find-open .pane { scroll-padding-top: var(--find-pad); }
-    .sheet { padding-bottom: 48px; }
+    .sheet { padding-bottom: 48px; padding-top: 12px; }
     .stage.find-open .sheet { padding-top: var(--find-pad); }
     .row {
       display: grid;
       grid-template-columns: 40px minmax(0, 1fr);
-      height: 20px; white-space: pre;
+      height: 22px; white-space: pre;
     }
     .ln {
-      color: #9a9a9a; font-size: 11px; user-select: none;
+      color: var(--faint); font-size: 11px; user-select: none;
       text-align: right; padding-right: 8px;
     }
     .code { padding-right: 10px; overflow: hidden; }
@@ -181,10 +230,9 @@
       width: 420px;
       display: flex; align-items: center; gap: 4px;
       padding: 0 6px 0 12px;
-      background: var(--surface);
+      background: rgba(255, 255, 255, 0.96);
       border-radius: 999px;
       box-shadow: var(--shadow);
-      border: 1px solid rgba(180, 188, 200, 0.7);
     }
     .find-A .find-btn.primary {
       height: 26px; padding: 0 12px; border-radius: 999px;
@@ -198,15 +246,15 @@
     /* ========== B: full-bleed inset dock (accepted) ========== */
     .find-B {
       position: absolute; z-index: 5;
-      top: 8px; left: 10px; right: 10px;
+      top: var(--find-inset); left: var(--find-inset); right: var(--find-inset);
       height: var(--capsule-h);
       display: flex; align-items: center; gap: 8px;
-      padding: 0 6px 0 10px;
+      padding: var(--find-bar-pad);
       background: rgba(255, 255, 255, 0.96);
       backdrop-filter: blur(8px);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
-      border: 0; /* shadow-only edge */
+      border: 0;
     }
     .find-B .field {
       flex: 1; min-width: 0; height: 28px;
@@ -228,7 +276,7 @@
     .find-B .nav-cluster {
       display: flex; align-items: center; gap: 2px;
       height: 28px; padding: 2px;
-      background: #f4f5f7; border-radius: var(--field-radius);
+      background: var(--frost); border-radius: var(--field-radius);
     }
     .find-B .nav-btn {
       width: 24px; height: 24px; border-radius: 4px;
@@ -247,13 +295,12 @@
     /* ========== C: top-right compact cluster ========== */
     .find-C {
       position: absolute; z-index: 5;
-      top: 8px; right: 10px;
+      top: var(--find-inset); right: var(--find-inset);
       height: var(--capsule-h);
       display: flex; align-items: stretch;
-      background: var(--surface);
+      background: rgba(255, 255, 255, 0.96);
       border-radius: 10px;
       box-shadow: var(--shadow);
-      border: 1px solid rgba(180, 188, 200, 0.7);
       overflow: hidden;
     }
     .find-C .field {
@@ -603,31 +650,44 @@
       const stageClass = state.findOpen ? "stage find-open" : "stage";
       document.getElementById("desk").innerHTML = `
         <div class="win">
-          <aside class="side">
-            <div class="side-chrome">Changes</div>
-            <div class="side-body">
-              <div class="leaf active"><span class="badge M">M</span><span>StressBridge.hpp</span></div>
-              <div class="leaf"><span class="badge M">M</span><span>alignment.rs</span></div>
+          <header class="titlebar">
+            <div class="titlebar-leading">
+              <div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+              <button type="button" class="icon-btn" title="Toggle tree" aria-label="Toggle tree">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6.5 2.5v11"/></svg>
+              </button>
             </div>
-          </aside>
-          <div class="main">
-            <div class="file-chrome">
-              <strong>StressBridge.hpp</strong>
-              <span>a1b2c3d..9f8e7d6</span>
+            <div class="titlebar-main">
+              <div class="nav-capsule">
+                <button type="button" class="icon-btn" title="Prev hunk">↑</button>
+                <button type="button" class="icon-btn" title="Next hunk">↓</button>
+              </div>
+              <div class="file-meta truncate"><strong>StressBridge.hpp</strong> · a1b2c3d..9f8e7d6</div>
               <span class="spacer"></span>
               <button type="button" class="tool-btn" data-act="toggle-find" aria-pressed="${state.findOpen}">
                 ${state.findOpen ? "关闭搜索" : "打开搜索"}
               </button>
               <button type="button" class="tool-btn" data-act="scroll-top">滚到顶</button>
             </div>
-            <div class="${stageClass}" id="stage">
-              <div class="pane" id="paneL"><div class="sheet">${renderRows("old", OLD_LINES)}</div></div>
-              <div class="gutter"></div>
-              <div class="pane" id="paneR"><div class="sheet">${renderRows("new", NEW_LINES)}</div></div>
-              ${renderFind()}
-              <div class="hint-row">${state.findOpen
-                ? "胶囊悬浮 · 内容 padding-top 让第 1 行可滚到胶囊下方"
-                : "搜索关闭 · 打开/关闭不应让 diff 高度抖动"}</div>
+          </header>
+          <div class="body">
+            <aside class="side">
+              <div class="side-body">
+                <div class="leaf active"><span class="badge M">M</span><span>StressBridge.hpp</span></div>
+                <div class="leaf"><span class="badge M">M</span><span>alignment.rs</span></div>
+              </div>
+            </aside>
+            <div class="diff-stage">
+              <div class="file-status">hunk 1 of 2 · 0 comments</div>
+              <div class="${stageClass}" id="stage">
+                <div class="pane" id="paneL"><div class="sheet">${renderRows("old", OLD_LINES)}</div></div>
+                <div class="gutter"></div>
+                <div class="pane" id="paneR"><div class="sheet">${renderRows("new", NEW_LINES)}</div></div>
+                ${renderFind()}
+                <div class="hint-row">${state.findOpen
+                  ? "胶囊悬浮 · 内容 padding-top 让第 1 行可滚到胶囊下方"
+                  : "搜索关闭 · 打开/关闭不应让 diff 高度抖动"}</div>
+              </div>
             </div>
           </div>
         </div>`;

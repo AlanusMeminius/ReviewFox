@@ -13,7 +13,10 @@
       Chrome shape (revised same day): **A Capsule-track + value pill** (two-piece).
         A3 unified shell was shipped then rejected for affordance clarity (kind vs value).
       Picker open: hide value pill only; kind track stays visible.
-    A2/B/C parked. A3 parked (shape). open prototype/entry-kind-switch.html
+    A2/B/C parked. A3 parked (shape).
+    Visual mirror of theme.rs + app_view Entry chrome (frost desk, white capsules,
+    selected kind = accent).
+    open prototype/entry-kind-switch.html
   -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -25,24 +28,38 @@
       --faint: #98a2b3;
       --line: #dfe3ea;
       --surface: #ffffff;
-      --sidebar: #f4f5f7;
+      --frost: #f4f5f7;
       --hover: #e9ebef;
       --selected: #2457d6;
       --selected-soft: #f1f5ff;
       --accent: #2457d6;
       --add: #1a7f4b;
       --del: #b42318;
-      --chrome: 36px;
+      --chrome: 32px;
+      --sidebar-w: 188px;
+      --files-w: 280px;
+      --island-inset: 12px;
+      --island-top: 6px;
+      --island-radius: 12px;
+      --island-clearance: 304px;
       --capsule-h: 26px;
-      --capsule-bg: #eef0f4;
+      --capsule-bg: #ffffff;
       --capsule-bg-hover: #e4e7ed;
       --capsule-radius: 999px;
-      --menu-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
+      --desk-selected: rgba(0, 0, 0, 0.07);
+      --desk-hover: rgba(0, 0, 0, 0.04);
+      --menu-shadow:
+        0 0 10px hsla(220, 38%, 14%, 0.06),
+        0 8px 28px hsla(220, 38%, 14%, 0.10);
+      --island-shadow:
+        0 4px 12px rgba(23, 32, 51, 0.08),
+        0 12px 32px rgba(23, 32, 51, 0.12);
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
       font-family: "IBM Plex Sans", sans-serif;
+      font-size: 13px;
       color: var(--text);
       background: #c5ccd6;
       overflow: hidden;
@@ -56,11 +73,11 @@
 
     .win {
       height: 100%;
-      background: var(--surface);
+      background: var(--frost);
       border: 1px solid #b4bcc8;
       border-radius: 10px;
       box-shadow: 0 16px 36px rgba(23, 32, 51, 0.16);
-      display: flex; overflow: hidden; min-width: 0;
+      display: flex; flex-direction: column; overflow: hidden; min-width: 0;
     }
 
     .traffic { display: flex; gap: 6px; align-items: center; flex-shrink: 0; width: 52px; }
@@ -80,78 +97,103 @@
     .mono { font-family: "IBM Plex Mono", monospace; }
     .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-    /* —— Sidebar —— */
+    .titlebar {
+      height: var(--chrome); flex-shrink: 0;
+      display: flex; align-items: stretch; min-width: 0;
+    }
+    .titlebar-leading {
+      width: var(--sidebar-w); flex-shrink: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 0 0 12px;
+    }
+    .titlebar-leading.collapsed { width: auto; min-width: 90px; }
+    .titlebar-main {
+      flex: 1; min-width: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px var(--island-inset) 0 var(--island-inset);
+      position: relative;
+    }
+
+    .body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+
+    /* —— Sidebar on frost —— */
     .side {
-      width: 220px; flex-shrink: 0;
-      background: var(--sidebar);
+      width: var(--sidebar-w); flex-shrink: 0;
       display: flex; flex-direction: column; min-width: 0; overflow: hidden;
     }
-    .side.collapsed { width: 0; }
-    .side-chrome {
-      height: var(--chrome); flex-shrink: 0;
-      display: flex; align-items: center; gap: 8px;
-      padding: 0 8px 0 12px;
+    .side.collapsed { width: 0; overflow: hidden; }
+    .side-body {
+      flex: 1; overflow: auto;
+      padding: 16px 8px 8px;
+      display: flex; flex-direction: column; gap: 4px;
     }
-    .side-body { flex: 1; overflow: auto; padding: 4px 8px 12px; }
     .side-label {
       font-size: 11px; font-weight: 600; color: var(--faint);
-      padding: 8px 8px 6px;
+      height: 24px; display: flex; align-items: center;
+      padding: 0 6px;
     }
     .side-nav {
-      display: flex; flex-direction: column; gap: 2px;
-      margin: 0 0 10px; padding: 0 0 10px;
-      border-bottom: 1px solid var(--line);
+      display: flex; flex-direction: column; gap: 4px;
+      margin: 0 0 8px; padding: 0 0 8px;
     }
     .side-nav-btn {
       text-align: left; border: 0; background: transparent;
-      padding: 8px 10px; border-radius: 8px; cursor: pointer;
+      padding: 6px; border-radius: 8px; cursor: pointer;
       font-size: 13px; font-weight: 500; color: var(--text);
+      min-height: 32px;
     }
-    .side-nav-btn:hover { background: var(--hover); }
-    .side-nav-btn.active { background: var(--selected); color: #fff; }
+    .side-nav-btn:hover { background: var(--desk-hover); }
+    .side-nav-btn.active { background: var(--desk-selected); }
     .side-nav-btn .sub {
       display: block; font-size: 11px; font-weight: 400;
       color: var(--muted); margin-top: 2px;
     }
-    .side-nav-btn.active .sub { color: rgba(255,255,255,.78); }
 
     .repo {
-      display: flex; flex-direction: column; gap: 2px;
-      padding: 8px 10px; margin-bottom: 2px;
+      display: flex; flex-direction: column; justify-content: center; gap: 1px;
+      min-height: 32px; padding: 4px 6px;
       border-radius: 8px; cursor: pointer;
     }
-    .repo:hover { background: var(--hover); }
-    .repo.active { background: var(--selected); color: #fff; }
+    .repo:hover { background: var(--desk-hover); }
+    .repo.active { background: var(--desk-selected); }
     .repo .name { font-size: 13px; font-weight: 500; }
     .repo .path { font-size: 11px; color: var(--muted); }
-    .repo.active .path { color: rgba(255,255,255,.78); }
 
-    /* —— Main columns —— */
-    .main {
-      flex: 1; min-width: 0;
-      display: grid;
-      grid-template-columns: minmax(260px, 1fr) 280px;
+    /* —— Stage: islands —— */
+    .stage { flex: 1; min-width: 0; position: relative; overflow: hidden; }
+    .commits-column {
+      position: absolute; inset: 0;
+      right: var(--island-clearance);
+      display: flex; flex-direction: column;
+      padding: var(--island-top) 0 var(--island-inset) var(--island-inset);
+      min-width: 0;
     }
-    .center {
-      background: #fff;
-      display: flex; flex-direction: column; min-width: 0;
-      border-right: 1px solid var(--line);
+    .commit-island {
+      flex: 1; min-height: 0;
+      background: var(--surface);
+      border-radius: var(--island-radius);
+      box-shadow: var(--island-shadow);
+      overflow: hidden;
+      display: flex; flex-direction: column;
       position: relative;
     }
-    .center-chrome {
-      height: var(--chrome); flex-shrink: 0;
-      display: flex; align-items: center; gap: 8px;
-      padding: 0 12px 0 8px;
-    }
     .files {
-      background: #fff;
-      display: flex; flex-direction: column; min-width: 0;
+      position: absolute;
+      top: var(--island-top);
+      right: var(--island-inset);
+      bottom: var(--island-inset);
+      width: var(--files-w);
+      z-index: 5;
+      display: flex; flex-direction: column;
+      background: var(--surface);
+      border-radius: var(--island-radius);
+      box-shadow: var(--island-shadow);
+      overflow: hidden;
     }
     .files-chrome {
-      height: var(--chrome); flex-shrink: 0;
-      display: flex; align-items: center; gap: 8px;
-      padding: 0 12px;
-      font-size: 12px; font-weight: 600; color: var(--muted);
+      flex-shrink: 0;
+      padding: 10px 12px 4px;
+      font-size: 11px; font-weight: 600; color: var(--faint);
     }
     .cmp {
       font-family: "IBM Plex Mono", monospace;
@@ -170,31 +212,29 @@
     .pill:hover { background: var(--capsule-bg-hover); }
     .pill.open { background: var(--selected-soft); color: var(--accent); }
     .pill .chev { color: var(--faint); font-size: 10px; flex-shrink: 0; }
-    .pill.mr { background: #eef2ff; }
-    .pill.mr.open { background: #e0e7ff; color: #3730a3; }
+    .pill.mr { background: var(--capsule-bg); }
+    .pill.mr.open { background: var(--selected-soft); color: var(--accent); }
 
-    /* A: same capsule tokens as .pill — track is a pill, thumb is a pill */
+    /* A: kind hits as peer white/accent capsules (mirrors app_view) + value pill */
     .seg-track {
       display: inline-flex; align-items: center;
-      height: var(--capsule-h); padding: 2px; gap: 0;
-      background: var(--capsule-bg);
-      border-radius: var(--capsule-radius);
+      height: var(--capsule-h); padding: 0; gap: 6px;
+      background: transparent;
       flex-shrink: 0;
     }
     .seg-track button {
-      border: 0; background: transparent; cursor: pointer;
-      height: calc(var(--capsule-h) - 4px);
+      border: 0; background: var(--capsule-bg); cursor: pointer;
+      height: var(--capsule-h);
       padding: 0 12px; border-radius: var(--capsule-radius);
       font-size: 12px; font-weight: 500; color: var(--muted);
       display: inline-flex; align-items: center; gap: 5px;
     }
-    .seg-track button:hover { color: var(--text); }
+    .seg-track button:hover { background: var(--hover); color: var(--text); }
     .seg-track button.on {
-      background: #fff; color: var(--text);
-      box-shadow: 0 1px 2px rgba(23, 32, 51, 0.10);
+      background: var(--accent); color: #fff;
     }
 
-    /* A2: no track — two peer capsules; selected matches value-pill selected-soft */
+    /* A2: peer capsules; selected soft */
     .seg-peers {
       display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
     }
@@ -211,13 +251,14 @@
       background: var(--selected-soft); color: var(--accent);
     }
 
-    /* A3: one continuous capsule shell — kind | value share the same hull */
+    /* A3: unified shell (parked) */
     .seg-shell {
       display: inline-flex; align-items: stretch;
       height: var(--capsule-h); max-width: min(420px, 100%);
       background: var(--capsule-bg);
       border-radius: var(--capsule-radius);
       overflow: hidden; flex-shrink: 1; min-width: 0;
+      box-shadow: var(--island-shadow);
     }
     .seg-shell .kinds {
       display: inline-flex; padding: 2px; flex-shrink: 0;
@@ -231,12 +272,11 @@
     }
     .seg-shell .kinds button:hover { color: var(--text); }
     .seg-shell .kinds button.on {
-      background: #fff; color: var(--text);
-      box-shadow: 0 1px 2px rgba(23, 32, 51, 0.10);
+      background: var(--accent); color: #fff;
     }
     .seg-shell .divider {
       width: 1px; align-self: stretch; margin: 5px 0;
-      background: #dde1e8; flex-shrink: 0;
+      background: var(--line); flex-shrink: 0;
     }
     .seg-shell .value {
       border: 0; background: transparent; cursor: pointer;
@@ -250,8 +290,9 @@
 
     .morph {
       display: inline-flex; align-items: stretch; height: 26px;
-      background: #eef0f4; border-radius: 999px; overflow: hidden;
+      background: var(--capsule-bg); border-radius: 999px; overflow: hidden;
       flex-shrink: 1; min-width: 0; max-width: 280px;
+      box-shadow: var(--island-shadow);
     }
     .morph .main-hit {
       border: 0; background: transparent; cursor: pointer;
@@ -259,15 +300,15 @@
       font-size: 12px; font-weight: 500; min-width: 0; flex: 1;
       color: var(--text);
     }
-    .morph .main-hit:hover { background: #e4e7ed; }
+    .morph .main-hit:hover { background: var(--capsule-bg-hover); }
     .morph.open .main-hit { background: var(--selected-soft); color: var(--accent); }
     .morph .kind-hit {
-      border: 0; border-left: 1px solid #dde1e8;
+      border: 0; border-left: 1px solid var(--line);
       background: transparent; cursor: pointer;
       width: 28px; color: var(--muted);
       display: grid; place-items: center; flex-shrink: 0;
     }
-    .morph .kind-hit:hover { background: #e4e7ed; color: var(--text); }
+    .morph .kind-hit:hover { background: var(--capsule-bg-hover); color: var(--text); }
 
     .mr-detail {
       flex-shrink: 0;
@@ -288,7 +329,8 @@
     .commits { flex: 1; overflow: auto; padding-bottom: 12px; }
     .commit {
       display: grid; grid-template-columns: 16px 1fr; gap: 10px;
-      padding: 10px 14px; cursor: pointer; align-items: start;
+      margin: 0 8px 2px; padding: 8px 10px; cursor: pointer; align-items: start;
+      border-radius: 8px;
     }
     .commit:hover { background: #f6f8fb; }
     .commit.in-range { background: var(--selected-soft); }
@@ -306,7 +348,8 @@
     .tree { flex: 1; overflow: auto; padding: 4px 6px 12px; font-size: 12px; }
     .leaf {
       display: flex; align-items: center; gap: 6px;
-      padding: 4px 6px; border-radius: 6px; cursor: pointer;
+      height: 22px; padding: 0 6px; margin: 0 4px 2px;
+      border-radius: 4px; cursor: pointer;
     }
     .leaf:hover { background: #f6f8fb; }
     .leaf.active { background: var(--selected-soft); }
@@ -316,7 +359,7 @@
     .stats { margin-left: auto; font-size: 10px; color: var(--faint); }
 
     .overlay {
-      position: absolute; top: calc(var(--chrome) + 4px); left: 8px;
+      position: absolute; top: 8px; left: 8px;
       width: 300px; max-height: min(360px, 55vh); overflow: auto;
       background: #fff; border-radius: 10px;
       box-shadow: var(--menu-shadow);
@@ -520,10 +563,6 @@
           </div>`
         : "";
       return `<aside class="side ${collapsed}">
-        <div class="side-chrome">
-          <div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
-          <button type="button" class="icon-btn" data-act="toggle-side" title="Collapse">${sidebarToggleIcon()}</button>
-        </div>
         <div class="side-body">
           ${entryNav}
           <div class="side-label">Repositories</div>
@@ -722,25 +761,44 @@
       document.getElementById("varLabel").textContent = `${v.key} (${v.name})`;
       const cmp = comparison();
       const showSideNav = state.variant === "C";
+      const leadCollapse = state.reposCollapsed ? "collapsed" : "";
+      const hideValue = state.picker === "branch" || state.picker === "mr";
       document.getElementById("desk").innerHTML = `
         <div class="win">
-          ${renderRepos(showSideNav)}
-          <div class="main">
-            <section class="center">
-              <div class="center-chrome">
-                ${chromeForVariant()}
-                <span class="cmp">${esc(cmp.base)}..${esc(cmp.head)}</span>
+          <header class="titlebar">
+            <div class="titlebar-leading ${leadCollapse}">
+              <div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+              <button type="button" class="icon-btn" data-act="toggle-side" title="Collapse">${sidebarToggleIcon()}</button>
+            </div>
+            <div class="titlebar-main">
+              ${chromeForVariant()}
+              <span class="cmp">${esc(cmp.base)}..${esc(cmp.head)}</span>
+            </div>
+          </header>
+          <div class="body">
+            ${renderRepos(showSideNav)}
+            <section class="stage">
+              <div class="commits-column">
+                <div class="commit-island">
+                  ${renderMrDetail()}
+                  <div class="commits">${renderCommits()}</div>
+                  ${renderOverlay()}
+                </div>
               </div>
-              ${renderMrDetail()}
-              <div class="commits">${renderCommits()}</div>
-              ${renderOverlay()}
-            </section>
-            <section class="files">
-              <div class="files-chrome">Changes · ${MOCK.files.length}</div>
-              <div class="tree">${renderFiles()}</div>
+              <aside class="files">
+                <div class="files-chrome">Changes · ${MOCK.files.length}</div>
+                <div class="tree">${renderFiles()}</div>
+              </aside>
             </section>
           </div>
         </div>`;
+      // While picker open: hide only the value pill (kind track stays).
+      if (hideValue && (state.variant === "A" || state.variant === "A2" || state.variant === "C")) {
+        document.querySelectorAll(".titlebar-main > .pill").forEach((el) => {
+          el.style.opacity = "0";
+          el.style.pointerEvents = "none";
+        });
+      }
       dumpState();
     }
 

@@ -9,6 +9,7 @@
     Question: Commit full-bleed on the right; Changes floats as inset rounded capsule
     (shadow-only edge, no hard border), spanning to window top with NO Changes titlebar.
     VERDICT (2026-09-26): A accepted + shadow-only edge → folded into src/ui/app_view.rs.
+    Visual mirror of theme.rs + app_view shell (frost desk + white islands).
     open prototype/capsule-changes.html
   -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -21,20 +22,40 @@
       --faint: #98a2b3;
       --line: #dfe3ea;
       --surface: #ffffff;
-      --sidebar: #f4f5f7;
+      --frost: #f4f5f7;
       --hover: #e9ebef;
-      --selected: #2457d6;
-      --range: #f1f5ff;
       --accent: #2457d6;
+      --range: #f1f5ff;
       --add: #1a7f4b;
       --del: #b42318;
-      --chrome: 36px;
-      --menu-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
+      --chrome: 32px;
+      --sidebar-w: 188px;
+      --files-w: 280px;
+      --island-inset: 12px;
+      --island-top: 6px;
+      --island-radius: 12px;
+      --island-clearance: 304px; /* files-w + inset + gap */
+      --row-h: 32px;
+      --row-gap: 4px;
+      --row-inset: 8px;
+      --row-pad-x: 6px;
+      --row-radius: 8px;
+      --capsule: #ffffff;
+      --capsule-hover: #e4e7ed;
+      --desk-selected: rgba(0, 0, 0, 0.07);
+      --desk-hover: rgba(0, 0, 0, 0.04);
+      --picker-shadow:
+        0 0 10px hsla(220, 38%, 14%, 0.06),
+        0 8px 28px hsla(220, 38%, 14%, 0.10);
+      --island-shadow:
+        0 4px 12px rgba(23, 32, 51, 0.08),
+        0 12px 32px rgba(23, 32, 51, 0.12);
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
       font-family: "IBM Plex Sans", sans-serif;
+      font-size: 13px;
       color: var(--text);
       background: #c5ccd6;
       overflow: hidden;
@@ -48,11 +69,11 @@
 
     .win {
       height: 100%;
-      background: var(--surface);
+      background: var(--frost);
       border: 1px solid #b4bcc8;
       border-radius: 10px;
       box-shadow: 0 16px 36px rgba(23, 32, 51, 0.16);
-      display: flex; overflow: hidden; min-width: 0;
+      display: flex; flex-direction: column; overflow: hidden; min-width: 0;
     }
 
     .traffic { display: flex; gap: 6px; align-items: center; flex-shrink: 0; width: 52px; }
@@ -74,68 +95,104 @@
     .mono { font-family: "IBM Plex Mono", monospace; }
     .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-    /* —— Sidebar (current: Recent / Pin / Repositories) —— */
-    .side {
-      width: 220px; flex-shrink: 0;
-      background: var(--sidebar);
-      display: flex; flex-direction: column; min-width: 0; overflow: hidden;
-    }
-    .side.collapsed { width: 0; }
-    .side-chrome {
+    /* —— Full-width titlebar (no bottom rule) —— */
+    .titlebar {
       height: var(--chrome); flex-shrink: 0;
+      display: flex; align-items: stretch; min-width: 0;
+    }
+    .titlebar-leading {
+      width: var(--sidebar-w); flex-shrink: 0;
       display: flex; align-items: center; gap: 8px;
-      padding: 0 8px 0 12px;
+      padding: 6px 0 0 12px;
     }
-    .side-body { flex: 1; overflow: auto; padding: 4px 8px 12px; }
-    .side-label {
-      font-size: 11px; font-weight: 600; color: var(--faint);
-      padding: 8px 8px 6px;
-    }
-    .repo {
-      display: flex; flex-direction: column; gap: 2px;
-      padding: 8px 10px; margin-bottom: 2px;
-      border-radius: 8px; cursor: pointer;
-    }
-    .repo:hover { background: var(--hover); }
-    .repo.active { background: var(--selected); color: #fff; }
-    .repo.active .path { color: rgba(255,255,255,.78); }
-    .repo.active:hover { background: var(--selected); }
-    .repo .name { font-size: 13px; font-weight: 500; }
-    .repo .path { font-size: 11px; color: var(--muted); }
-
-    /* —— Stage: commits full-bleed; Changes floats on top —— */
-    .stage {
+    .titlebar-leading.collapsed { width: auto; min-width: 100px; }
+    .titlebar-main {
       flex: 1; min-width: 0;
-      position: relative;
-      display: flex; flex-direction: column;
-      background: #fff;
-    }
-    .commits-chrome {
-      height: var(--chrome); flex-shrink: 0;
       display: flex; align-items: center; gap: 8px;
-      padding: 0 300px 0 12px; /* branch row clears the float */
-      position: relative; z-index: 2;
+      padding: 6px var(--island-inset) 0 var(--island-inset);
     }
-    .branch-toggle {
+    .branch-pill {
       display: flex; align-items: center; gap: 4px;
-      padding: 2px 6px; border-radius: 6px; cursor: pointer;
-      font-size: 12px;
+      padding: 4px 10px; border-radius: 999px; cursor: pointer;
+      font-size: 12px; background: var(--capsule); flex-shrink: 0;
     }
-    .branch-toggle:hover { background: var(--hover); }
-    .branch-toggle svg { width: 16px; height: 16px; color: var(--muted); }
+    .branch-pill:hover { background: var(--hover); }
+    .branch-pill svg { width: 16px; height: 16px; color: var(--muted); }
     .cmp {
       margin-left: auto;
       font-family: "IBM Plex Mono", monospace;
       font-size: 11px; color: var(--muted);
     }
 
+    .body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+
+    /* —— Sidebar on frost desk —— */
+    .side {
+      width: var(--sidebar-w); flex-shrink: 0;
+      display: flex; flex-direction: column; min-width: 0; overflow: hidden;
+    }
+    .side.collapsed { width: 0; overflow: hidden; }
+    .side-body {
+      flex: 1; overflow: auto;
+      padding: 16px var(--row-inset) 8px;
+      display: flex; flex-direction: column; gap: var(--row-gap);
+    }
+    .side-label {
+      font-size: 11px; font-weight: 600; color: var(--faint);
+      height: 24px; display: flex; align-items: center;
+      padding: 0 var(--row-pad-x); margin-top: 12px;
+    }
+    .side-label:first-child { margin-top: 0; }
+    .repo {
+      display: flex; flex-direction: column; justify-content: center; gap: 1px;
+      min-height: var(--row-h);
+      padding: 4px var(--row-pad-x);
+      border-radius: var(--row-radius); cursor: pointer;
+    }
+    .repo:hover { background: var(--desk-hover); }
+    .repo.active { background: var(--desk-selected); }
+    .repo.active:hover { background: var(--desk-selected); }
+    .repo .name { font-size: 13px; font-weight: 500; }
+    .repo .path { font-size: 11px; color: var(--muted); }
+    .side-foot {
+      flex-shrink: 0;
+      padding: 0 var(--row-inset) 8px;
+    }
+    .side-nav {
+      height: var(--row-h); padding: 0 var(--row-pad-x);
+      border-radius: var(--row-radius);
+      display: flex; align-items: center; gap: 4px;
+      font-size: 13px; color: var(--muted); cursor: default;
+    }
+    .side-nav:hover { background: var(--desk-hover); }
+
+    /* —— Stage: frost desk; Commit island + floating Changes —— */
+    .stage {
+      flex: 1; min-width: 0;
+      position: relative;
+      overflow: hidden;
+    }
+    .commits-column {
+      position: absolute; inset: 0;
+      right: var(--island-clearance);
+      display: flex; flex-direction: column;
+      padding: var(--island-top) 0 var(--island-inset) var(--island-inset);
+      min-width: 0;
+    }
+    .commit-island {
+      flex: 1; min-height: 0;
+      background: var(--surface);
+      border-radius: var(--island-radius);
+      box-shadow: var(--island-shadow);
+      overflow: hidden;
+      display: flex; flex-direction: column;
+    }
     .commits {
       flex: 1; overflow: auto; min-height: 0;
-      /* readable strip left of the floating Changes */
-      padding: 4px 300px 8px 0;
+      padding: 4px 0;
     }
     .commit {
-      margin: 2px 8px;
+      margin: 0 8px 2px;
       padding: 8px 12px;
       border-radius: 8px;
       cursor: pointer;
@@ -149,25 +206,20 @@
       font-size: 11px; color: var(--muted); margin-top: 2px;
     }
 
-    /* A: rounded capsule — covers top chrome band; inset R/B; shadow-only edge (no hard border) */
     .changes {
       position: absolute;
-      top: 8px;
-      right: 8px;
-      bottom: 8px;
-      width: 280px;
+      top: var(--island-top);
+      right: var(--island-inset);
+      bottom: var(--island-inset);
+      width: var(--files-w);
       z-index: 5;
       display: flex; flex-direction: column;
-      background: #fff;
+      background: var(--surface);
       border: 0;
-      border-radius: 12px;
-      /* soft all-around cast — edge via shadow only (no hard border) */
-      box-shadow:
-        0 4px 12px rgba(23, 32, 51, 0.08),
-        0 12px 32px rgba(23, 32, 51, 0.12);
+      border-radius: var(--island-radius);
+      box-shadow: var(--island-shadow);
       overflow: hidden;
     }
-    /* Open Diff sits in the float corner — not a 36px titlebar row */
     .changes-open {
       position: absolute;
       top: 8px;
@@ -186,8 +238,8 @@
     .tree summary {
       list-style: none; cursor: pointer;
       display: flex; align-items: center; gap: 4px;
-      height: 22px; padding: 0 6px; margin: 0 4px;
-      border-radius: 8px; user-select: none;
+      height: 22px; padding: 0 6px; margin: 0 4px 2px;
+      border-radius: 4px; user-select: none;
     }
     .tree summary::-webkit-details-marker { display: none; }
     .tree summary:hover { background: #f6f8fb; }
@@ -201,8 +253,8 @@
     }
     .tree .leaf {
       display: flex; align-items: center; gap: 6px;
-      height: 22px; padding: 0 6px 0 18px; margin: 0 4px;
-      border-radius: 8px; cursor: pointer;
+      height: 22px; padding: 0 6px 0 18px; margin: 0 4px 2px;
+      border-radius: 4px; cursor: pointer;
     }
     .tree .leaf:hover { background: #f6f8fb; }
     .tree .leaf.active { background: var(--range); }
@@ -270,7 +322,7 @@
   <pre class="state-dump" id="stateDump"></pre>
   <div class="verdict">
     <div>A · Inset capsule · through top · no titlebar</div>
-    <div class="hint">throwaway · mirrors current main shell</div>
+    <div class="hint">throwaway · mirrors theme.rs + app_view shell</div>
   </div>
 
   <script>
@@ -436,68 +488,72 @@
     function render() {
       const n = fileCount(MOCK.tree);
       const desk = document.getElementById("desk");
+      const leadingCollapsed = MOCK.reposCollapsed ? "collapsed" : "";
       desk.innerHTML = `
         <div class="win">
-          <aside class="side ${MOCK.reposCollapsed ? "collapsed" : ""}">
-            <div class="side-chrome">
+          <header class="titlebar">
+            <div class="titlebar-leading ${leadingCollapsed}">
               <div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
-              <button type="button" class="icon-btn" data-act="toggle-repos" title="Hide sidebar">${sidebarToggleIcon()}</button>
+              <button type="button" class="icon-btn" data-act="toggle-repos" title="Toggle sidebar">${sidebarToggleIcon()}</button>
               <button type="button" class="icon-btn" title="Open Repo">${plusIcon()}</button>
             </div>
-            <div class="side-body">
-              <div class="side-label">Recent</div>
-              ${repoRow(MOCK.recent)}
-              <div class="side-label">Pin</div>
-              ${MOCK.pins.map(repoRow).join("")}
-              <div class="side-label">Repositories</div>
-              ${MOCK.repos.map(repoRow).join("")}
-            </div>
-          </aside>
-
-          <section class="stage">
-            <div class="commits-chrome">
-              ${
-                MOCK.reposCollapsed
-                  ? `<div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
-                     <button type="button" class="icon-btn" data-act="toggle-repos">${sidebarToggleIcon()}</button>
-                     <button type="button" class="icon-btn">${plusIcon()}</button>`
-                  : ""
-              }
-              <div class="branch-toggle" title="Branch picker">
+            <div class="titlebar-main">
+              <div class="branch-pill" title="Branch picker">
                 ${branchIcon()}
                 <span>${esc(MOCK.branch)}</span>
               </div>
               <span class="cmp">${esc(MOCK.comparison.label)}</span>
             </div>
+          </header>
 
-            <div class="commits">
-              ${MOCK.commits
-                .map(
-                  (c) => `
-                <div class="commit ${c.inRange ? "in-range" : ""}" data-sha="${esc(c.sha)}">
-                  <div class="msg truncate">${esc(c.msg)}</div>
-                  <div class="sub">${esc(c.sha)} · ${esc(c.author)} · ${esc(c.time)}</div>
-                </div>`
-                )
-                .join("")}
-            </div>
-
-            <!-- Floating Changes: through to top; no titlebar row -->
-            <aside class="changes">
-              <button type="button" class="icon-btn changes-open" data-act="open-diff" title="Open Diff">${diffIcon()}</button>
-              <div class="changes-label">Changes (${n})</div>
-              <div class="tree">${renderTree(MOCK.tree)}</div>
-              ${headMeta()}
+          <div class="body">
+            <aside class="side ${MOCK.reposCollapsed ? "collapsed" : ""}">
+              <div class="side-body">
+                <div class="side-label">Recent</div>
+                ${repoRow(MOCK.recent)}
+                <div class="side-label">Pin</div>
+                ${MOCK.pins.map(repoRow).join("")}
+                <div class="side-label">Repositories</div>
+                ${MOCK.repos.map(repoRow).join("")}
+              </div>
+              <div class="side-foot">
+                <div class="side-nav">Settings</div>
+              </div>
             </aside>
-          </section>
+
+            <section class="stage">
+              <div class="commits-column">
+                <div class="commit-island">
+                  <div class="commits">
+                    ${MOCK.commits
+                      .map(
+                        (c) => `
+                      <div class="commit ${c.inRange ? "in-range" : ""}" data-sha="${esc(c.sha)}">
+                        <div class="msg truncate">${esc(c.msg)}</div>
+                        <div class="sub">${esc(c.sha)} · ${esc(c.author)} · ${esc(c.time)}</div>
+                      </div>`
+                      )
+                      .join("")}
+                  </div>
+                </div>
+              </div>
+
+              <aside class="changes">
+                <button type="button" class="icon-btn changes-open" data-act="open-diff" title="Open Diff">${diffIcon()}</button>
+                <div class="changes-label">Changes (${n})</div>
+                <div class="tree">${renderTree(MOCK.tree)}</div>
+                ${headMeta()}
+              </aside>
+            </section>
+          </div>
         </div>`;
 
       bind(desk);
       document.getElementById("stateDump").textContent = JSON.stringify(
         {
           variant: "A (selected)",
-          tweaks: ["inset capsule + menu shadow", "through to top", "no Changes titlebar"],
-          mirrors: "current app_view: Recent/Pin/Repos, branch toggle, head-meta",
+          tweaks: ["frost desk + white islands", "inset 12 / top 6", "no Changes titlebar"],
+          mirrors: "theme.rs + app_view shell",
           reposCollapsed: MOCK.reposCollapsed,
           selectedFile: MOCK.selectedFile,
           range: MOCK.commits.filter((c) => c.inRange).map((c) => c.sha),
