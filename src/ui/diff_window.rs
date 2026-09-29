@@ -1354,7 +1354,7 @@ fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoE
         ))
 }
 
-/// Bordered group of toolbar buttons, `TOGGLE_SIZE` tall like any other button.
+/// Group of toolbar buttons, `TOGGLE_SIZE` tall like any other button.
 fn capsule() -> Div {
     div()
         .flex_none()
@@ -1362,14 +1362,13 @@ fn capsule() -> Div {
         .flex()
         .items_center()
         .p(px(NAV_INSET))
-        // Concentric with the buttons' hover: button radius + inset + border.
-        .rounded(px(NAV_BUTTON_RADIUS + NAV_INSET + 1.))
-        .border_1()
-        .border_color(theme::line())
+        .gap(px(NAV_INSET))
+        // Concentric with the buttons' hover: button radius + inset.
+        .rounded(px(NAV_BUTTON_RADIUS + NAV_INSET))
         .bg(theme::white())
 }
 
-/// Fills the capsule's height: `TOGGLE_SIZE` less border and inset on both sides.
+/// Fills the capsule's height: `TOGGLE_SIZE` less inset on both sides.
 /// Pressed buttons sit on the range tint with an accent glyph, like `IconButton`.
 fn nav_button(
     id: &'static str,
