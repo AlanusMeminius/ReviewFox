@@ -23,7 +23,7 @@ use super::layout::{HunkLand, Layout, Row, WrapPlan};
 use super::trace;
 use super::viewport::{self, Viewport};
 use crate::domain::{
-    Alignment, AlignmentOp, Anchor, DiffFontSize, FoldState, Side, first_match_byte,
+    Alignment, AlignmentOp, Anchor, DiffFontSize, FoldState, SearchSide, Side, first_match_byte,
     hunk_jump_target, match_jump_plan,
 };
 use crate::git::FileDiff;
@@ -80,6 +80,12 @@ pub struct DualPane {
     soft_wrap: bool,
     /// In-file search query for row highlights (mirrors DiffView).
     search_query: SharedString,
+    /// Which side(s) to highlight (mirrors DiffView Side factor).
+    search_side: SearchSide,
+    /// Current occurrence identity for paint (darker + pulse).
+    active_search: Option<ActiveSearchMatch>,
+    /// When the active match landed; drives ~250ms pulse.
+    search_pulse_at: Option<std::time::Instant>,
     /// Shaped non-ASCII advances per `(char, font px, family hash)`.
     char_widths: HashMap<(char, u32, u64), f32>,
     /// Last prepaint pane widths; stable width triggers rewrap (§6 deferral).
@@ -147,6 +153,9 @@ impl DualPane {
             sync_horizontal: true,
             soft_wrap: false,
             search_query: SharedString::default(),
+            search_side: SearchSide::New,
+            active_search: None,
+            search_pulse_at: None,
             char_widths: HashMap::new(),
             prev_frame_pane_w: [0.; 2],
             wrap_layout_dirty: false,
@@ -422,9 +431,9 @@ impl DualPane {
         let row_h = self.row_h();
         match self.pending_land.take() {
             Some(PendingLand::Match { side, ln, byte }) => {
-                if let Some(s) =
-                    viewport::s_for_match_byte(layout, side, ln, byte, row_h, self.scroll_s)
-                {
+                if let Some(s) = viewport::s_for_match_byte(
+                    layout, side, ln, byte, self.view_h, row_h, self.scroll_s,
+                ) {
                     self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
                     self.hunk_s = Some(self.scroll_s / row_h);
                 }
@@ -512,6 +521,44 @@ impl DualPane {
         }
         self.search_query = query;
         cx.notify();
+    }
+
+    pub fn set_search_side(&mut self, side: SearchSide, cx: &mut Context<Self>) {
+        if side == self.search_side {
+            return;
+        }
+        self.search_side = side;
+        cx.notify();
+    }
+
+    pub fn set_active_search_match(
+        &mut self,
+        active: Option<ActiveSearchMatch>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.active_search != active;
+        self.active_search = active;
+        if changed {
+            if self.active_search.is_some() {
+                self.search_pulse_at = Some(std::time::Instant::now());
+                let this = cx.entity().downgrade();
+                cx.spawn(async move |_, cx| {
+                    for _ in 0..5 {
+                        Timer::after(std::time::Duration::from_millis(50)).await;
+                        this.update(cx, |_, cx| cx.notify()).ok();
+                    }
+                    this.update(cx, |pane, cx| {
+                        pane.search_pulse_at = None;
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            } else {
+                self.search_pulse_at = None;
+            }
+            cx.notify();
+        }
     }
 
     /// Back to the file start. The first measured frame clamps `scroll_s` up
@@ -636,7 +683,13 @@ impl DualPane {
         cx.notify();
     }
 
-    pub fn jump_match(&mut self, side: Side, ln: u32, cx: &mut Context<Self>) {
+    pub fn jump_match(
+        &mut self,
+        side: Side,
+        ln: u32,
+        byte: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(file) = self.file.as_ref() else {
             return;
         };
@@ -651,7 +704,9 @@ impl DualPane {
         };
         let row_h = self.row_h();
         let line_text = layout.side(plan.target.side).line_text(plan.target.ln);
-        let byte = line_text.and_then(|text| first_match_byte(text, &self.search_query));
+        let byte = byte.or_else(|| {
+            line_text.and_then(|text| first_match_byte(text, &self.search_query))
+        });
         let defer = self.soft_wrap && (self.wrap_layout_dirty || layout.wrap.is_none());
         if defer {
             self.pending_land = Some(match byte {
@@ -672,6 +727,7 @@ impl DualPane {
                     plan.target.side,
                     plan.target.ln,
                     b,
+                    self.view_h,
                     row_h,
                     self.scroll_s,
                 )
@@ -1078,6 +1134,12 @@ impl DualPane {
                     drafting: self.drafting,
                     search_query: (!self.search_query.is_empty())
                         .then(|| Arc::from(self.search_query.as_str())),
+                    search_side: self.search_side,
+                    active_match: self.active_search.clone(),
+                    search_pulse: self.search_pulse_at.map(|t| {
+                        let elapsed = t.elapsed().as_secs_f32();
+                        (1. - (elapsed / 0.25)).clamp(0., 1.)
+                    }),
                 },
                 bars: &self.bars,
             },
@@ -1151,6 +1213,8 @@ enum PendingLand {
     Line(crate::domain::HunkJumpTarget),
     Anchor(viewport::AnchorCap),
 }
+
+pub use super::element::ActiveSearchMatch;
 
 struct WrapCharWidth<'a, 'w> {
     mono: f32,

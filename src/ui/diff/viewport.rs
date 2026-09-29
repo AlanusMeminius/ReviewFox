@@ -515,20 +515,25 @@ pub fn s_for_rewrap(
     ))
 }
 
-/// Match jump: land the visual row that contains `byte` on the anchor (§3.1.1).
+/// Match jump: land the visual row that contains `byte` at viewport center.
+/// Hunk jumps keep the §3.1 one-third anchor via [`s_for_target`].
 pub fn s_for_match_byte(
     layout: &Layout,
     side: Side,
     ln: u32,
     byte: usize,
+    view_h: f32,
     row_h: f32,
     current_s: f32,
 ) -> Option<f32> {
     let row = layout.row_of_match_byte(side, ln, byte)?;
+    let anchor = anchor_of(view_h);
+    // top ≈ content_y − anchor; want row·row_h − top = view_h/2
+    let content_px = row as f32 * row_h - view_h / 2. + anchor;
     Some(s_for_content(
         layout,
         side,
-        row as f32 * row_h,
+        content_px,
         row_h,
         current_s,
     ))
@@ -1352,22 +1357,32 @@ mod tests {
     }
 
     #[test]
-    fn match_on_continuation_row_lands_on_anchor() {
-        const H: f32 = 60.;
-        let text = "a".repeat(25);
-        let layout = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 100., None);
+    fn match_on_continuation_row_lands_at_center() {
+        const H: f32 = 200.;
+        // Enough equal lines that a mid-file wrapped continuation can scroll to center.
+        let long = "a".repeat(25);
+        let text: String = (0..30)
+            .map(|i| if i == 14 { long.clone() } else { format!("L{i}") })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let layout = wrap_layout(&text, &text, vec![eq(1, 1, 30)], 100., None);
         let b = layout
             .wrap
             .as_ref()
             .unwrap()
             .old_breaks
-            .get(&1)
-            .unwrap()
+            .get(&15)
+            .expect("line 15 wraps")
             .breaks[0];
-        let row = layout.row_of_match_byte(Side::Old, 1, b).unwrap();
-        let s = s_for_content(&layout, Side::Old, row as f32 * ROW_H, ROW_H, 0.);
+        let row = layout.row_of_match_byte(Side::Old, 15, b).unwrap();
+        let s = s_for_match_byte(&layout, Side::Old, 15, b, H, ROW_H, 0.).unwrap();
         let vp = Viewport::new(&layout, s, H, ROW_H);
-        assert!((row as f32 * ROW_H - vp.top(Side::Old) - H / 3.).abs() < 0.01);
+        let view_y = row as f32 * ROW_H - vp.top(Side::Old);
+        assert!(
+            (view_y - H / 2.).abs() < 1.,
+            "search land should center; got view_y={view_y}, want {}",
+            H / 2.
+        );
     }
 
     #[test]
