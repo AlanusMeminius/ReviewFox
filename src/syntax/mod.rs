@@ -161,6 +161,7 @@ pub fn capture_names() -> &'static [String] {
     &REGISTRY.names
 }
 
+#[cfg(test)]
 pub fn capture_name(id: CaptureId) -> &'static str {
     &REGISTRY.names[usize::from(id.0)]
 }
@@ -593,11 +594,7 @@ endmacro()
             ("crlf_line_over", "abcde\r\nef", g(100, 100, 4), true),
         ];
         for (label, text, guard, want) in cases {
-            assert_eq!(
-                exceeds_size_guard(text, *guard),
-                *want,
-                "{label}: {text:?}"
-            );
+            assert_eq!(exceeds_size_guard(text, *guard), *want, "{label}: {text:?}");
         }
     }
 
@@ -655,7 +652,8 @@ endmacro()
         // Synthetic scales: repeated real-ish Rust / C++ so release timings
         // stay comparable without depending on cargo registry paths.
         let rust_unit = "fn foo(x: i32) -> i32 {\n    // c\n    let s = \"hi\";\n    x + 1\n}\n";
-        let cpp_unit = "namespace n {\nint f(int x) {\n  // c\n  if (x) return 1;\n  puts(\"s\");\n}\n}\n";
+        let cpp_unit =
+            "namespace n {\nint f(int x) {\n  // c\n  if (x) return 1;\n  puts(\"s\");\n}\n}\n";
         for (label, lang, unit, n) in [
             ("rust×2k lines", Language::Rust, rust_unit, 400usize),
             ("rust×10k lines", Language::Rust, rust_unit, 2_000),
@@ -676,8 +674,11 @@ endmacro()
 
         // Large byte budgets at ~fixed line length.
         let chunk = "fn a(){ let b = 1; }\n";
-        for (label, n) in [("rust ~256KB", 12_000usize), ("rust ~512KB", 24_000), ("rust ~1MB", 48_000)]
-        {
+        for (label, n) in [
+            ("rust ~256KB", 12_000usize),
+            ("rust ~512KB", 24_000),
+            ("rust ~1MB", 48_000),
+        ] {
             run(label, Language::Rust, &chunk.repeat(n));
         }
     }

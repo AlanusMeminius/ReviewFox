@@ -22,15 +22,6 @@ pub(crate) const HIDE_DELAY: Duration = Duration::from_secs(1);
 pub(crate) const THUMB_IDLE: u32 = 0xd8dde6;
 pub(crate) const THUMB_ACTIVE: u32 = 0xb8c0cc;
 
-/// Which outer edge hosts the overlay thumb.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Edge {
-    /// Old / left code pane — thumb on the leading (left) edge.
-    Leading,
-    /// Default for lists and the new / right code pane.
-    Trailing,
-}
-
 struct Handle(ScrollHandle);
 
 impl Handle {
@@ -108,6 +99,7 @@ impl ThumbGeom {
 }
 
 /// Map a driver's scroll offset onto a peer that may have a different max_offset.
+#[cfg(test)]
 pub fn peer_offset(driver_y: Pixels, driver_max: Pixels, peer_max: Pixels) -> Pixels {
     if driver_max <= px(0.) {
         return px(0.);
@@ -117,6 +109,7 @@ pub fn peer_offset(driver_y: Pixels, driver_max: Pixels, peer_max: Pixels) -> Pi
 }
 
 /// Lockstep scroll for panes that share content height (Diff L / gutter / R).
+#[cfg(test)]
 pub fn sync_lockstep(handles: &[&ScrollHandle], last_y: &mut Option<Pixels>) {
     if handles.is_empty() {
         return;
@@ -140,60 +133,8 @@ pub fn sync_lockstep(handles: &[&ScrollHandle], last_y: &mut Option<Pixels>) {
     *last_y = Some(driver_y);
 }
 
-/// Diff L / gutter / R handles + overlay thumbs to refresh after programmatic sync.
-struct Lockstep {
-    handles: [ScrollHandle; 3],
-    thumbs: [Entity<VerticalScrollbar>; 2],
-    last_y: Option<Pixels>,
-}
-
-impl Global for Lockstep {}
-
-/// Register (or refresh) the Diff dual-pane lockstep group for this frame.
-pub fn bind_lockstep(
-    handles: [ScrollHandle; 3],
-    thumbs: [Entity<VerticalScrollbar>; 2],
-    cx: &mut App,
-) {
-    let last_y = cx
-        .try_global::<Lockstep>()
-        .map(|s| s.last_y)
-        .unwrap_or(None);
-    cx.set_global(Lockstep {
-        handles,
-        thumbs,
-        last_y,
-    });
-}
-
-/// Run when a Diff L/R overlay thumb sees its tracked offset change (wheel / drag).
-fn tick_lockstep(from: &Entity<VerticalScrollbar>, cx: &mut App) {
-    if !cx.has_global::<Lockstep>() {
-        return;
-    }
-    let thumbs = cx.global::<Lockstep>().thumbs.clone();
-    // Commit-list / tree thumbs also call reveal on scroll — ignore them here.
-    if !thumbs.iter().any(|t| t == from) {
-        return;
-    }
-    let handles = cx.global::<Lockstep>().handles.clone();
-    let mut last_y = cx.global::<Lockstep>().last_y;
-    let before = last_y;
-    sync_lockstep(&[&handles[0], &handles[1], &handles[2]], &mut last_y);
-    cx.global_mut::<Lockstep>().last_y = last_y;
-    if last_y == before {
-        return;
-    }
-    for thumb in &thumbs {
-        if thumb != from {
-            thumb.update(cx, |_, cx| cx.notify());
-        }
-    }
-}
-
 pub struct VerticalScrollbar {
     handle: Handle,
-    edge: Edge,
     drag_grab: Option<Pixels>,
     last_offset: Option<Pixels>,
     visible: bool,
@@ -202,10 +143,9 @@ pub struct VerticalScrollbar {
 }
 
 impl VerticalScrollbar {
-    fn for_div(edge: Edge) -> Self {
+    fn new() -> Self {
         Self {
             handle: Handle(ScrollHandle::new()),
-            edge,
             drag_grab: None,
             last_offset: None,
             visible: true,
@@ -268,8 +208,6 @@ impl Render for VerticalScrollbar {
         if self.last_offset != Some(offset) {
             self.last_offset = Some(offset);
             self.reveal(cx);
-            let entity = cx.entity();
-            tick_lockstep(&entity, cx);
         } else if self.visible
             && self.hide_task.is_none()
             && !self.hovered
@@ -284,23 +222,20 @@ impl Render for VerticalScrollbar {
         let dragging = self.drag_grab.is_some();
         let show_thumb = self.thumb_shown();
         let entity = cx.entity();
-        let edge = self.edge;
         let inset = px((TRACK_WIDTH - THUMB_WIDTH) / 2.);
 
-        let mut track = div()
+        let track = div()
             .absolute()
             .top(px(PAD))
+            .right(px(0.))
             .w(px(TRACK_WIDTH))
             .h(geom.track_height)
             .cursor(CursorStyle::Arrow);
-        track = match edge {
-            Edge::Trailing => track.right(px(0.)),
-            Edge::Leading => track.left(px(0.)),
-        };
 
-        let mut thumb = div()
+        let thumb = div()
             .absolute()
             .top(thumb_top)
+            .right(inset)
             .w(px(THUMB_WIDTH))
             .h(thumb_h)
             .rounded_full()
@@ -310,10 +245,6 @@ impl Render for VerticalScrollbar {
             } else {
                 rgb(THUMB_IDLE)
             });
-        thumb = match edge {
-            Edge::Trailing => thumb.right(inset),
-            Edge::Leading => thumb.left(inset),
-        };
 
         track
             .child(thumb)
@@ -417,15 +348,6 @@ fn registry(cx: &mut App) -> &mut Registry {
 
 /// Stable vertical scrollbar for a `overflow_y_scroll` + `track_scroll` div (trailing edge).
 pub fn vertical(id: impl Into<String>, cx: &mut App) -> (ScrollHandle, Entity<VerticalScrollbar>) {
-    vertical_on(id, Edge::Trailing, cx)
-}
-
-/// Stable vertical scrollbar on a chosen outer edge.
-pub fn vertical_on(
-    id: impl Into<String>,
-    edge: Edge,
-    cx: &mut App,
-) -> (ScrollHandle, Entity<VerticalScrollbar>) {
     let id = id.into();
     if let Some(existing) = cx
         .try_global::<Registry>()
@@ -434,7 +356,7 @@ pub fn vertical_on(
         let handle = existing.read(cx).div_handle();
         return (handle, existing);
     }
-    let entity = cx.new(|_| VerticalScrollbar::for_div(edge));
+    let entity = cx.new(|_| VerticalScrollbar::new());
     registry(cx).divs.insert(id, entity.clone());
     let handle = entity.read(cx).div_handle();
     (handle, entity)
@@ -451,15 +373,6 @@ pub fn overlay_flex(content: impl IntoElement, scrollbar: Entity<VerticalScrollb
         .flex_1()
         .min_h(px(0.))
         .min_w(px(0.))
-        .child(div().absolute().inset_0().child(content))
-        .child(div().absolute().inset_0().child(scrollbar))
-}
-
-/// Fixed-size overlay shell (branch picker).
-pub fn overlay_box(content: impl IntoElement, scrollbar: Entity<VerticalScrollbar>) -> Div {
-    div()
-        .relative()
-        .size_full()
         .child(div().absolute().inset_0().child(content))
         .child(div().absolute().inset_0().child(scrollbar))
 }

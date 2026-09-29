@@ -4711,6 +4711,7 @@ name = "reviewfox"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "block2",
  "bytes",
  "dirs 6.0.0",
  "futures",

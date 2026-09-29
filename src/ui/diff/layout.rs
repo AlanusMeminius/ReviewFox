@@ -951,8 +951,8 @@ fn land_from_op(op: &AlignmentOp) -> Option<HunkJumpTarget> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
     use super::super::visual_wrap::{WrapPlan, WrapSide};
+    use super::*;
 
     pub(crate) fn build(
         old: &str,
@@ -1672,13 +1672,7 @@ ab	c
         let tabs = TabExpansion::new(&line);
         let match_at = crate::domain::first_match_byte(&line, "aaaa").unwrap();
         let display = tabs.display_offset(match_at);
-        let breaks = layout
-            .wrap
-            .as_ref()
-            .unwrap()
-            .old_breaks
-            .get(&1)
-            .unwrap();
+        let breaks = layout.wrap.as_ref().unwrap().old_breaks.get(&1).unwrap();
         assert!(
             breaks.breaks.iter().any(|&b| display >= b),
             "match should fall on a continuation row"
@@ -1711,7 +1705,12 @@ ab	c
         let omit_key = |o: &OmitRow| (o.id, o.from, o.to);
         assert_eq!(
             folded.old.omits().iter().map(omit_key).collect::<Vec<_>>(),
-            reference.old.omits().iter().map(omit_key).collect::<Vec<_>>()
+            reference
+                .old
+                .omits()
+                .iter()
+                .map(omit_key)
+                .collect::<Vec<_>>()
         );
         assert_eq!(folded.old.seams().len(), reference.old.seams().len());
         let omit_rows: Vec<_> = dump(&folded.old)

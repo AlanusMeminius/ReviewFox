@@ -45,6 +45,7 @@ gpui = { version = "=0.2.2", features = ["test-support"] }
 gpui_http_client = { version = "=0.2.2", features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "=0.6.2"
 objc2 = "=0.6.4"
 objc2-app-kit = { version = "=0.3.2", features = [
     "NSApplication",

@@ -203,6 +203,7 @@ fn collect_inlines<'a>(inlines: &'a [Inline], output: &mut Vec<&'a Inline>) {
     }
 }
 
+#[cfg(test)]
 fn block_plain_text(block: &Block) -> String {
     match block {
         Block::Paragraph(content) | Block::Heading { content, .. } => inline_plain_text(content),
@@ -227,6 +228,7 @@ fn block_plain_text(block: &Block) -> String {
     }
 }
 
+#[cfg(test)]
 fn inline_plain_text(inlines: &[Inline]) -> String {
     let mut text = String::new();
     for inline in inlines {
@@ -534,6 +536,7 @@ fn is_allowed_link(destination: &str) -> bool {
 }
 
 /// Renders `source` with the given families / base size.
+#[cfg(test)]
 pub(crate) fn render(source: &str, fonts: &MarkdownFonts) -> Div {
     render_with_fonts(source, fonts, None)
 }
@@ -544,7 +547,7 @@ pub(crate) fn render_with_sink(source: &str, fonts: &MarkdownFonts, sink: &mut R
     render_with_fonts(source, fonts, Some(sink))
 }
 
-/// The body of [`render`]; kept separate so tests can supply fonts without an App.
+/// The body of the markdown renderer; kept separate so tests can supply fonts without an App.
 fn render_with_fonts(source: &str, fonts: &MarkdownFonts, sink: Option<&mut RenderSink>) -> Div {
     let document = parse_document(source);
     let mut link_index = 0;
@@ -607,6 +610,7 @@ fn language_label(language: &str, fonts: &MarkdownFonts) -> Div {
 }
 
 /// An inline code span, in the code family (font-family tests only).
+#[cfg(test)]
 fn inline_code_span(code: &str, fonts: &MarkdownFonts) -> Div {
     with_font_family(
         div().mx_1().px_1().rounded_sm().bg(theme::hover()),
@@ -959,11 +963,7 @@ fn paint_inlines(
                 append_styled(paint, &format!("{alt} ({destination})"), style);
             }
             Inline::TaskMarker(checked) => {
-                append_styled(
-                    paint,
-                    if *checked { "☑ " } else { "☐ " },
-                    style,
-                );
+                append_styled(paint, if *checked { "☑ " } else { "☐ " }, style);
             }
             Inline::SoftBreak => append_styled(paint, " ", style),
             Inline::HardBreak => append_styled(paint, "\n", style),
@@ -986,13 +986,14 @@ fn append_styled(paint: &mut InlinePaint, text: &str, style: InlineStyle) {
 #[cfg(test)]
 mod tests {
     use gpui::{
-        Context, FontWeight, IntoElement, Pixels, Render, ScrollHandle, TestAppContext, Window, div,
-        point, prelude::*, px, size,
+        Context, FontWeight, IntoElement, Pixels, Render, ScrollHandle, TestAppContext, Window,
+        div, point, prelude::*, px, size,
     };
 
     use super::{
         Block, Inline, MarkdownFonts, appearance, code_block_chrome, inline_code_span,
-        inline_plain_text, is_allowed_link, language_label, parse_document, render, render_with_fonts,
+        inline_plain_text, is_allowed_link, language_label, parse_document, render,
+        render_with_fonts,
     };
 
     #[test]

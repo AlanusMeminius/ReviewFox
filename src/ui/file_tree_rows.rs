@@ -2,8 +2,7 @@
 
 use gpui::{
     App, Div, ElementId, FontWeight, InteractiveElement, ParentElement, Rgba, SharedString,
-    StatefulInteractiveElement,
-    Stateful, Styled, div, prelude::FluentBuilder, px, rgb, svg,
+    Stateful, StatefulInteractiveElement, Styled, div, prelude::FluentBuilder, px, rgb, svg,
 };
 
 use crate::domain::{ChangedPath, PathStatus};

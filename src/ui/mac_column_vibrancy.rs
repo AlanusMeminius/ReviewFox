@@ -14,33 +14,12 @@ use objc2_app_kit::{
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-use super::splitter;
-
 /// Owns one `NSVisualEffectView` inserted below the GPUI view.
 pub struct ColumnVibrancy {
     view: Retained<NSVisualEffectView>,
 }
 
 impl ColumnVibrancy {
-    /// Lazy-attach and sync a full-height left strip (Diff tree column).
-    ///
-    /// `column_width` is the pane width (`0` when collapsed). When expanded,
-    /// includes [`splitter::HANDLE_WIDTH`] so the leading resize hit stays frosted.
-    pub fn ensure_synced(slot: &mut Option<Self>, window: &Window, column_width: f32) {
-        if slot.is_none() {
-            *slot = Self::attach(window);
-        }
-        let width = if column_width <= 0. {
-            0.
-        } else {
-            column_width + splitter::HANDLE_WIDTH
-        };
-        let height = f32::from(window.viewport_size().height);
-        if let Some(v) = slot.as_ref() {
-            v.sync(width, height);
-        }
-    }
-
     /// Lazy-attach and sync vibrancy under the entire window content (main desk).
     pub fn ensure_synced_window(slot: &mut Option<Self>, window: &Window) {
         if slot.is_none() {

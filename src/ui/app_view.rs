@@ -1,10 +1,9 @@
 use gpui::{
-    anchored, canvas, deferred, ease_out_quint, Animation, AnimationExt, App, Bounds,
-    ClickEvent, ClipboardItem, Context, Corner, Div, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render,
-    Size, StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds,
-    WindowControlArea, WindowDecorations, WindowHandle, WindowOptions, div, prelude::*, px, rgb,
-    svg,
+    Animation, AnimationExt, App, Bounds, ClickEvent, ClipboardItem, Context, Corner, Div,
+    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, ParentElement, Pixels, Point, Render, Size, StatefulInteractiveElement, Styled,
+    TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowDecorations, WindowHandle,
+    WindowOptions, anchored, canvas, deferred, div, ease_out_quint, prelude::*, px, rgb, svg,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -12,6 +11,26 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+use super::OpenSettings;
+use super::appearance::{self, UiTextSize};
+use super::diff_window::{DiffSnapshot, DiffView};
+use super::entry_chrome::{
+    self, EntryChromeMode, EntryKind, KindSwitchAction, RestoreFailureAction,
+};
+use super::file_tree::{self, TreeRow};
+use super::file_tree_rows::{self, RowSurface};
+use super::gitlab_connection::{self, GitLabConnection};
+use super::icon_button::IconButton;
+#[cfg(target_os = "macos")]
+use super::mac_column_vibrancy::ColumnVibrancy;
+use super::metadata;
+use super::scrollbar;
+use super::selectable_markdown;
+use super::settings;
+use super::splitter::{self, Axis, ResizeState};
+use super::theme;
+use super::window_controls::window_controls;
+use super::window_geometry;
 use crate::domain::{Comparison, Oid, PathStatus, Repository};
 use crate::git::{self, BranchBrowser, BranchInfo, CommitInfo};
 use crate::gitlab::{
@@ -21,26 +40,6 @@ use crate::gitlab::{
 use crate::settings_store;
 use crate::window_geometry_store::{self, DiffReopen};
 use crate::workspace_store::{self, MrEntryLabel, WorkspaceEntry, WorkspaceStore};
-use super::diff_window::{DiffSnapshot, DiffView};
-use super::entry_chrome::{
-    self, EntryChromeMode, EntryKind, KindSwitchAction, RestoreFailureAction,
-};
-use super::file_tree::{self, TreeRow};
-use super::file_tree_rows::{self, RowSurface};
-use super::gitlab_connection::{self, GitLabConnection};
-#[cfg(target_os = "macos")]
-use super::mac_column_vibrancy::ColumnVibrancy;
-use super::metadata;
-use super::scrollbar;
-use super::selectable_markdown;
-use super::settings;
-use super::splitter::{self, Axis, ResizeState};
-use super::appearance::{self, UiTextSize};
-use super::icon_button::IconButton;
-use super::theme;
-use super::window_controls::window_controls;
-use super::window_geometry;
-use super::OpenSettings;
 
 pub struct AppView {
     focus: FocusHandle,
@@ -117,11 +116,7 @@ impl AppView {
             Some(loaded) => MainState::Ready(loaded),
             None => MainState::Empty,
         };
-        gitlab_connection::spawn_refresh_connection(
-            gitlab_connection,
-            cx.entity().downgrade(),
-            cx,
-        );
+        gitlab_connection::spawn_refresh_connection(gitlab_connection, cx.entity().downgrade(), cx);
         // ADR-0011: launch defaults to Branch Browser. Persisted `mr` is demoted
         // in open_workspace; chrome restores from last_mr via the kind switch.
         let view = Self {
@@ -258,9 +253,11 @@ impl AppView {
 
     fn sync_collapsed_dirs(&mut self) {
         let next = match &self.state {
-            MainState::Ready(loaded) => {
-                loaded.changed_paths.iter().map(|p| p.path.clone()).collect()
-            }
+            MainState::Ready(loaded) => loaded
+                .changed_paths
+                .iter()
+                .map(|p| p.path.clone())
+                .collect(),
             MainState::Empty | MainState::Error(_) => Vec::new(),
         };
         if next != self.tree_path_fingerprint {
@@ -765,12 +762,7 @@ impl AppView {
 
     /// Right-click a commit row: select that row if outside the current
     /// Comparison, then show the commit context menu.
-    fn open_commit_menu(
-        &mut self,
-        index: usize,
-        position: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_commit_menu(&mut self, index: usize, position: Point<Pixels>, cx: &mut Context<Self>) {
         let outside = match &self.state {
             MainState::Ready(bb) => !bb.in_range.get(index).copied().unwrap_or(false),
             MainState::Empty | MainState::Error(_) => return,
@@ -836,12 +828,20 @@ impl AppView {
             }
             return;
         }
-        let Some(picker) = &mut self.branch_picker else { return };
+        let Some(picker) = &mut self.branch_picker else {
+            return;
+        };
         match event.keystroke.key.as_str() {
             "escape" => self.branch_picker = None,
-            "backspace" => { picker.query.pop(); picker.refresh(); picker.selected = 0; }
+            "backspace" => {
+                picker.query.pop();
+                picker.refresh();
+                picker.selected = 0;
+            }
             "up" => picker.selected = picker.selected.saturating_sub(1),
-            "down" => picker.selected = (picker.selected + 1).min(picker.matches.len().saturating_sub(1)),
+            "down" => {
+                picker.selected = (picker.selected + 1).min(picker.matches.len().saturating_sub(1))
+            }
             "enter" => {
                 if let Some(branch) = picker.matches.get(picker.selected) {
                     let name = branch.name.clone();
@@ -871,17 +871,13 @@ impl AppView {
         let MainState::Ready(loaded) = &self.state else {
             return;
         };
-        let preferred = self
-            .diff_window
-            .and_then(|h| {
-                h.update(cx, |view, _, _| {
-                    view.snapshot
-                        .as_ref()
-                        .map(|s| s.selected_path.clone())
-                })
-                .ok()
-                .flatten()
-            });
+        let preferred = self.diff_window.and_then(|h| {
+            h.update(cx, |view, _, _| {
+                view.snapshot.as_ref().map(|s| s.selected_path.clone())
+            })
+            .ok()
+            .flatten()
+        });
         let path = preferred
             .filter(|p| loaded.changed_paths.iter().any(|c| &c.path == p))
             .unwrap_or_else(|| loaded.changed_paths[0].path.clone());
@@ -898,12 +894,7 @@ impl AppView {
             .find(|p| p.path == path)
             .map(|p| p.status)
             .unwrap_or(PathStatus::Modify);
-        let file = git::file_diff(
-            &loaded.comparison,
-            &path,
-            status,
-            &Default::default(),
-        );
+        let file = git::file_diff(&loaded.comparison, &path, status, &Default::default());
         let snapshot = DiffSnapshot {
             comparison: loaded.comparison.clone(),
             changed_paths: loaded.changed_paths.clone(),
@@ -1039,10 +1030,7 @@ fn rebuild_diff_snapshot(reopen: &DiffReopen) -> Option<DiffSnapshot> {
     if changed_paths.is_empty() {
         return None;
     }
-    let path = if changed_paths
-        .iter()
-        .any(|p| p.path == reopen.selected_path)
-    {
+    let path = if changed_paths.iter().any(|p| p.path == reopen.selected_path) {
         reopen.selected_path.clone()
     } else {
         changed_paths[0].path.clone()
@@ -1128,7 +1116,9 @@ impl Render for AppView {
 
         div()
             .id("main")
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.handle_branch_key(event, cx)))
+            .on_key_down(
+                cx.listener(|this, event: &KeyDownEvent, _, cx| this.handle_branch_key(event, cx)),
+            )
             .size_full()
             .flex()
             .flex_col()
@@ -1174,7 +1164,9 @@ impl Render for AppView {
                             .child(render_files(self, cx)),
                     ),
             )
-            .when(self.repo_menu.is_some(), |d| d.child(render_repo_menu(self, cx)))
+            .when(self.repo_menu.is_some(), |d| {
+                d.child(render_repo_menu(self, cx))
+            })
             .when(self.commit_menu.is_some(), |d| {
                 d.child(render_commit_menu(self, cx))
             })
@@ -1182,13 +1174,18 @@ impl Render for AppView {
             .when(self.branch_picker.is_some(), |d| {
                 d.child(deferred(render_branch_picker(self, cx)))
             })
-            .when(self.mr_picker.is_some() && gitlab_chrome_visible(self), |d| {
-                d.child(deferred(render_mr_picker(self, cx)))
-            })
+            .when(
+                self.mr_picker.is_some() && gitlab_chrome_visible(self),
+                |d| d.child(deferred(render_mr_picker(self, cx))),
+            )
     }
 }
 
-fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>) -> impl IntoElement {
+fn render_sidebar(
+    view: &AppView,
+    width: gpui::Pixels,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     let active_path = match &view.state {
         MainState::Ready(loaded) => Some(loaded.comparison.repository.path().to_path_buf()),
         MainState::Empty | MainState::Error(_) => None,
@@ -1200,16 +1197,18 @@ fn render_sidebar(view: &AppView, width: gpui::Pixels, cx: &mut Context<AppView>
         let name = Repository::new(path.clone()).display_name();
         (path, name, active, gitlab)
     };
-    let pinned_rows: Vec<(PathBuf, String, bool, bool)> = workspace_store::pinned_entries(&view.store)
-        .into_iter()
-        .map(|e| row(e.path.clone()))
-        .collect();
+    let pinned_rows: Vec<(PathBuf, String, bool, bool)> =
+        workspace_store::pinned_entries(&view.store)
+            .into_iter()
+            .map(|e| row(e.path.clone()))
+            .collect();
     let pin_section = (!pinned_rows.is_empty()).then_some(pinned_rows);
     let has_pins = pin_section.is_some();
-    let repos: Vec<(PathBuf, String, bool, bool)> = workspace_store::repository_entries(&view.store)
-        .into_iter()
-        .map(|e| row(e.path.clone()))
-        .collect();
+    let repos: Vec<(PathBuf, String, bool, bool)> =
+        workspace_store::repository_entries(&view.store)
+            .into_iter()
+            .map(|e| row(e.path.clone()))
+            .collect();
 
     div()
         .id("repos")
@@ -1401,35 +1400,40 @@ fn render_repo_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                         this.repo_menu = None;
                         cx.notify();
                     }))
-                    .children(items.into_iter().enumerate().map(|(i, (icon, label, action))| {
-                        let path = path.clone();
-                        div()
-                            .id(("repo-menu-item", i))
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .hover(|d| d.bg(theme::hover()))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                action(this, path.clone(), cx);
-                            }))
-                            .child(
-                                svg()
-                                    .size(theme::ICON_SIZE)
-                                    .flex_none()
-                                    .path(icon)
-                                    .text_color(theme::muted()),
-                            )
-                            .child(
+                    .children(
+                        items
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, (icon, label, action))| {
+                                let path = path.clone();
                                 div()
-                                    .ui_label_size(14., cx)
-                                    .text_color(theme::text())
-                                    .child(label),
-                            )
-                    })),
+                                    .id(("repo-menu-item", i))
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .hover(|d| d.bg(theme::hover()))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        action(this, path.clone(), cx);
+                                    }))
+                                    .child(
+                                        svg()
+                                            .size(theme::ICON_SIZE)
+                                            .flex_none()
+                                            .path(icon)
+                                            .text_color(theme::muted()),
+                                    )
+                                    .child(
+                                        div()
+                                            .ui_label_size(14., cx)
+                                            .text_color(theme::text())
+                                            .child(label),
+                                    )
+                            }),
+                    ),
             ),
     )
     .with_priority(1)
@@ -1520,9 +1524,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
     };
     let show_gitlab = gitlab_chrome_visible(view);
     let entry_chrome = match entry_chrome::chrome_mode(show_gitlab) {
-        EntryChromeMode::BranchPillOnly => {
-            render_branch_pill(view, &branch, cx).into_any_element()
-        }
+        EntryChromeMode::BranchPillOnly => render_branch_pill(view, &branch, cx).into_any_element(),
         EntryChromeMode::KindTrackAndValuePill => {
             render_gitlab_entry_chrome(view, &branch, cx).into_any_element()
         }
@@ -1561,7 +1563,11 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                 .pl(px(12.))
                 .overflow_hidden()
                 .children(traffic_lights_space())
-                .child(toggle_button("main-sidebar-toggle", view.repos_collapsed, cx))
+                .child(toggle_button(
+                    "main-sidebar-toggle",
+                    view.repos_collapsed,
+                    cx,
+                ))
                 .child(open_repo_button("open-repo", cx))
                 .child(
                     div()
@@ -1619,11 +1625,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
 }
 
 /// Branch-only titlebar pill when GitLab chrome does not apply.
-fn render_branch_pill(
-    view: &AppView,
-    branch: &str,
-    cx: &mut Context<AppView>,
-) -> impl IntoElement {
+fn render_branch_pill(view: &AppView, branch: &str, cx: &mut Context<AppView>) -> impl IntoElement {
     let track = view.branch_toggle_bounds.clone();
     let open = view.branch_picker.is_some();
     div()
@@ -1643,12 +1645,9 @@ fn render_branch_pill(
         .when(!open, |d| d.hover(|d| d.bg(theme::hover())))
         .on_click(cx.listener(|this, _, _, cx| this.toggle_branch_picker(cx)))
         .child(
-            canvas(
-                move |bounds, _, _| track.set(bounds),
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .size_full(),
+            canvas(move |bounds, _, _| track.set(bounds), |_, _, _, _| {})
+                .absolute()
+                .size_full(),
         )
         .child(
             svg()
@@ -1737,7 +1736,9 @@ fn render_gitlab_entry_chrome(
                 .overflow_hidden()
                 .cursor_pointer()
                 .when(hide_value, |d| d.opacity(0.))
-                .when(!hide_value, |d| d.hover(|d| d.bg(theme::capsule_track_hover())))
+                .when(!hide_value, |d| {
+                    d.hover(|d| d.bg(theme::capsule_track_hover()))
+                })
                 .child(
                     // Pickers anchor to the value pill (kind track stays visible).
                     canvas(
@@ -1787,7 +1788,6 @@ fn render_gitlab_entry_chrome(
         )
 }
 
-
 fn entry_kind_hit(
     id: &'static str,
     label: &'static str,
@@ -1813,8 +1813,7 @@ fn entry_kind_hit(
         .cursor_pointer()
         .when(selected, |d| d.bg(theme::sidebar_selected()))
         .when(!selected, |d| {
-            d.bg(theme::capsule())
-                .hover(|d| d.bg(theme::hover()))
+            d.bg(theme::capsule()).hover(|d| d.bg(theme::hover()))
         })
         .on_click(cx.listener(move |this, _, _, cx| {
             this.select_entry_kind(target, cx);
@@ -1886,20 +1885,16 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
         .flex_col()
         .child(islands);
 
-    div()
-        .id("commits")
-        .absolute()
-        .inset_0()
-        .child(
-            div()
-                .id("commits-content")
-                .absolute()
-                .inset_0()
-                .right(float_gap)
-                .flex()
-                .items_start()
-                .child(shared_column),
-        )
+    div().id("commits").absolute().inset_0().child(
+        div()
+            .id("commits-content")
+            .absolute()
+            .inset_0()
+            .right(float_gap)
+            .flex()
+            .items_start()
+            .child(shared_column),
+    )
 }
 
 fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -2054,30 +2049,26 @@ fn finish_mr_activate(
             entry.project = Some(ready.project);
             entry.detail = MrDetailState::Ready(ready.detail);
             if let MainState::Ready(bb) = &mut view.state {
-                if let Err(e) =
-                    bb.apply_mr_commits(ready.commit_infos)
-                {
+                if let Err(e) = bb.apply_mr_commits(ready.commit_infos) {
                     entry.detail = MrDetailState::Failed(ErrorNote::plain(e.0));
                 }
             }
             view.remember_current();
             false
         }
-        Err(msg) => {
-            match entry_chrome::restore_failure_action(view.pending_kind_restore) {
-                RestoreFailureAction::KeepFailedDetail => {
-                    view.pending_kind_restore = false;
-                    entry.detail = MrDetailState::Failed(msg);
-                    false
-                }
-                RestoreFailureAction::EnterEmptyMrOpenPicker => {
-                    view.pending_kind_restore = false;
-                    view.mr_entry = None;
-                    view.empty_mr = true;
-                    true
-                }
+        Err(msg) => match entry_chrome::restore_failure_action(view.pending_kind_restore) {
+            RestoreFailureAction::KeepFailedDetail => {
+                view.pending_kind_restore = false;
+                entry.detail = MrDetailState::Failed(msg);
+                false
             }
-        }
+            RestoreFailureAction::EnterEmptyMrOpenPicker => {
+                view.pending_kind_restore = false;
+                view.mr_entry = None;
+                view.empty_mr = true;
+                true
+            }
+        },
     }
 }
 
@@ -2154,11 +2145,7 @@ fn render_error_note(
         .flex()
         .flex_col()
         .gap_1()
-        .child(
-            div()
-                .text_color(rgb(0xb42318))
-                .child(note.message.clone()),
-        )
+        .child(div().text_color(rgb(0xb42318)).child(note.message.clone()))
         .when_some(note.open_settings, |d, target| {
             d.child(
                 div()
@@ -2213,7 +2200,12 @@ fn render_mr_entry_detail(
                         vec![div().child("Loading MR detail…").into_any_element()]
                     }
                     MrDetailState::Failed(note) => {
-                        vec![render_error_note("mr-detail-open-settings", note, false, cx)]
+                        vec![render_error_note(
+                            "mr-detail-open-settings",
+                            note,
+                            false,
+                            cx,
+                        )]
                     }
                     MrDetailState::Ready(detail) => mr_entry_ready_lines(detail, cx),
                 }),
@@ -2296,7 +2288,7 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
     const HEIGHT: f32 = 420.;
     let seed = picker.bounds.size;
 
-    // Match branch picker: fixed size, one overlay_box, filter + rows in the same scroll.
+    // Match branch picker: fixed size, one overlay_flex, filter + rows in the same scroll.
     let body = match &picker.body {
         MrPickerBody::Loading => div()
             .size_full()
@@ -2364,8 +2356,7 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                     .children(matches.iter().enumerate().map(|(i, mr)| {
                         let select_mr = mr.clone();
                         let title = format!("!{} · {}", mr.iid, mr.title);
-                        let branches =
-                            format!("{} → {}", mr.source_branch, mr.target_branch);
+                        let branches = format!("{} → {}", mr.source_branch, mr.target_branch);
                         div()
                             .id(("mr", i))
                             .w(px(inner_w))
@@ -2517,13 +2508,7 @@ fn picker_clip_shell(
                 .overflow_hidden()
                 .bg(theme::white())
                 .rounded(px(theme::CHANGES_RADIUS))
-                .child(
-                    div()
-                        .w(px(width))
-                        .h(px(height))
-                        .p_1()
-                        .child(body),
-                ),
+                .child(div().w(px(width)).h(px(height)).p_1().child(body)),
         )
         .with_animation(
             anim_id,
@@ -2546,7 +2531,14 @@ fn picker_scroll_area(
         .relative()
         .w(px(width))
         .h(px(height))
-        .child(div().absolute().inset_0().w(px(width)).h(px(height)).child(content))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .w(px(width))
+                .h(px(height))
+                .child(content),
+        )
         .child(div().absolute().inset_0().child(scrollbar))
 }
 
@@ -2557,22 +2549,18 @@ fn picker_line(
     text: impl Into<gpui::SharedString>,
     cx: &App,
 ) -> Div {
-    div()
-        .w_full()
-        .min_w(px(0.))
-        .overflow_hidden()
-        .child(
-            div()
-                .w_full()
-                .min_w(px(0.))
-                .when(primary, |d| d.ui_text_size(14., cx))
-                .when(!primary, |d| d.ui_text_size(12., cx))
-                .text_color(color)
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .child(text.into()),
-        )
+    div().w_full().min_w(px(0.)).overflow_hidden().child(
+        div()
+            .w_full()
+            .min_w(px(0.))
+            .when(primary, |d| d.ui_text_size(14., cx))
+            .when(!primary, |d| d.ui_text_size(12., cx))
+            .text_color(color)
+            .overflow_hidden()
+            .text_ellipsis()
+            .whitespace_nowrap()
+            .child(text.into()),
+    )
 }
 
 fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -2650,19 +2638,27 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                     .track_scroll(&scroll)
                     .overflow_y_scroll()
                     .children(rows.into_iter().enumerate().map(|(i, row)| match row {
-                    TreeRow::Dir { depth, name, path } => {
-                        let collapsed = view.collapsed_dirs.contains(&path);
-                        let toggle_path = path.clone();
-                        file_tree_rows::dir_row(("dir", i), depth, name, collapsed, RowSurface::Island, cx)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.collapsed_dirs.remove(&toggle_path) {
-                                    this.collapsed_dirs.insert(toggle_path.clone());
-                                }
-                                cx.notify();
-                            }))
-                    }
-                    TreeRow::File { depth, path } => {
-                        file_tree_rows::file_row(
+                        TreeRow::Dir { depth, name, path } => {
+                            let collapsed = view.collapsed_dirs.contains(&path);
+                            let toggle_path = path.clone();
+                            file_tree_rows::dir_row(
+                                ("dir", i),
+                                depth,
+                                name,
+                                collapsed,
+                                RowSurface::Island,
+                                cx,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if !this.collapsed_dirs.remove(&toggle_path) {
+                                        this.collapsed_dirs.insert(toggle_path.clone());
+                                    }
+                                    cx.notify();
+                                },
+                            ))
+                        }
+                        TreeRow::File { depth, path } => file_tree_rows::file_row(
                             ("file", i),
                             depth,
                             &path,
@@ -2670,9 +2666,8 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                             RowSurface::Island,
                             mono.clone(),
                             cx,
-                        )
-                    }
-                })),
+                        ),
+                    })),
                 sb,
             )
         })
@@ -2700,7 +2695,10 @@ fn head_commit_meta(loaded: &BranchBrowser) -> Option<HeadMeta> {
         .cloned()?;
     let selected = loaded.in_range.iter().filter(|&&b| b).count();
     let range_label = (selected > 1).then(|| loaded.comparison.label());
-    Some(HeadMeta { commit, range_label })
+    Some(HeadMeta {
+        commit,
+        range_label,
+    })
 }
 
 fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -2757,7 +2755,12 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
                         .child(short),
                 )
                 .child(div().child("·"))
-                .child(div().overflow_hidden().text_ellipsis().child(meta.commit.author.clone()))
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(meta.commit.author.clone()),
+                )
                 .child(div().child("·"))
                 .child(div().child(meta.commit.time_label.clone()))
                 .when_some(meta.range_label.clone(), |d, label| {
@@ -2945,9 +2948,12 @@ impl BranchPicker {
 
     fn refresh(&mut self) {
         let query = self.query.to_lowercase();
-        self.matches = self.all.iter().filter(|branch| {
-            query.is_empty() || branch.name.to_lowercase().contains(&query)
-        }).cloned().collect();
+        self.matches = self
+            .all
+            .iter()
+            .filter(|branch| query.is_empty() || branch.name.to_lowercase().contains(&query))
+            .cloned()
+            .collect();
     }
 }
 
@@ -2965,12 +2971,12 @@ fn open_repo_button(id: &'static str, cx: &mut Context<AppView>) -> impl IntoEle
     }))
 }
 
-fn toggle_button(
-    id: &'static str,
-    collapsed: bool,
-    cx: &mut Context<AppView>,
-) -> impl IntoElement {
-    let label = if collapsed { "Show Repositories" } else { "Hide Repositories" };
+fn toggle_button(id: &'static str, collapsed: bool, cx: &mut Context<AppView>) -> impl IntoElement {
+    let label = if collapsed {
+        "Show Repositories"
+    } else {
+        "Hide Repositories"
+    };
     IconButton::new(id, "sidebar_title.svg", label)
         .pressed(collapsed)
         .on_click(cx.listener(|this, _, _, cx| {

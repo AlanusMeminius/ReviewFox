@@ -127,10 +127,7 @@ mod tests {
 
     #[test]
     fn gitlab_visible_uses_kind_track_and_value_pill() {
-        assert_eq!(
-            chrome_mode(true),
-            EntryChromeMode::KindTrackAndValuePill
-        );
+        assert_eq!(chrome_mode(true), EntryChromeMode::KindTrackAndValuePill);
         assert_eq!(chrome_mode(false), EntryChromeMode::BranchPillOnly);
     }
 
@@ -155,7 +152,11 @@ mod tests {
     #[test]
     fn switching_to_branch_selects_branch_browser() {
         assert_eq!(
-            kind_switch_action(EntryKind::Mr, EntryKind::Branch, Some(&label("acme/app", 42))),
+            kind_switch_action(
+                EntryKind::Mr,
+                EntryKind::Branch,
+                Some(&label("acme/app", 42))
+            ),
             KindSwitchAction::SelectBranch
         );
     }
@@ -195,13 +196,7 @@ mod tests {
             value_label(EntryKind::Branch, "feature/mr", None),
             "feature/mr"
         );
-        assert_eq!(
-            value_label(EntryKind::Mr, "feature/mr", Some(42)),
-            "!42"
-        );
-        assert_eq!(
-            value_label(EntryKind::Mr, "feature/mr", None),
-            "Select MR…"
-        );
+        assert_eq!(value_label(EntryKind::Mr, "feature/mr", Some(42)), "!42");
+        assert_eq!(value_label(EntryKind::Mr, "feature/mr", None), "Select MR…");
     }
 }

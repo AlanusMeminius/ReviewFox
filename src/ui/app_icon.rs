@@ -8,7 +8,9 @@
 //! ponytail: dev-binary only — a shipped `.app` should carry an `icns` in its
 //! bundle instead.
 
-use objc2::{AllocAnyThread, MainThreadMarker, rc::Retained};
+use block2::RcBlock;
+use objc2::runtime::Bool;
+use objc2::{AllocAnyThread, MainThreadMarker, Message, rc::Retained};
 use objc2_app_kit::{NSApplication, NSBezierPath, NSImage};
 use objc2_foundation::{NSData, NSPoint, NSRect, NSSize};
 
@@ -26,13 +28,18 @@ fn dock_icon(image: &NSImage) -> Retained<NSImage> {
         NSPoint::new(INSET, INSET),
         NSSize::new(CANVAS - 2.0 * INSET, CANVAS - 2.0 * INSET),
     );
-    let icon = NSImage::initWithSize(NSImage::alloc(), NSSize::new(CANVAS, CANVAS));
-    icon.lockFocus();
-    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(artwork, CORNER_RADIUS, CORNER_RADIUS)
+    let source = image.retain();
+    let block = RcBlock::new(move |_rect: NSRect| {
+        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+            artwork,
+            CORNER_RADIUS,
+            CORNER_RADIUS,
+        )
         .addClip();
-    unsafe { image.drawInRect(artwork) };
-    icon.unlockFocus();
-    icon
+        source.drawInRect(artwork);
+        Bool::YES
+    });
+    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(CANVAS, CANVAS), false, &block)
 }
 
 /// Set the application icon shown in the Dock and the app switcher.

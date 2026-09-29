@@ -83,8 +83,8 @@ impl NumberField {
     /// [`NumberFieldEvent::Change`], for an owner that must apply it itself
     /// (e.g. while closing). Unparseable text goes back to the current value.
     pub fn take_pending(&mut self, cx: &mut Context<Self>) -> Option<u32> {
-        let pending = parse(self.input.read(cx).content(), &self.range)
-            .filter(|&value| value != self.value);
+        let pending =
+            parse(self.input.read(cx).content(), &self.range).filter(|&value| value != self.value);
         if let Some(value) = pending {
             self.value = value;
             cx.notify();

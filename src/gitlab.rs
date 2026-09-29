@@ -101,7 +101,6 @@ pub struct ParsedGitRemote {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolveProjectError {
     Remote(RemoteUrlError),
-    Parse(ParseRemoteError),
     HostMismatch {
         settings_host: String,
         remote_host: String,
@@ -206,24 +205,6 @@ fn parse_as_url(raw: &str) -> Result<ParsedGitRemote, ParseRemoteError> {
     })
 }
 
-pub fn map_remote_url_to_project(
-    remote_url: &str,
-    settings_base_url: &str,
-) -> Result<ParsedGitRemote, ResolveProjectError> {
-    let parsed = parse_git_remote_url(remote_url).map_err(ResolveProjectError::Parse)?;
-    if !hosts_match(settings_base_url, &parsed.host) {
-        let settings_host = host_from_base_url(settings_base_url).unwrap_or_else(|| "?".into());
-        return Err(ResolveProjectError::HostMismatch {
-            settings_host,
-            remote_host: parsed.host,
-        });
-    }
-    Ok(parsed)
-}
-
-/// Among remotes, pick one whose host matches Settings Base URL.
-/// Prefer `origin` when it matches; otherwise the first matching remote.
-/// If none match, return HostMismatch describing the remotes that were seen.
 pub fn pick_remote_for_settings(
     remotes: &[(String, String)],
     settings_base_url: &str,
@@ -357,14 +338,7 @@ pub fn format_resolve_project_error(e: &ResolveProjectError) -> String {
         ResolveProjectError::Remote(crate::git::RemoteUrlError::NoRemotes) => {
             "This repository has no git remotes.".into()
         }
-        ResolveProjectError::Remote(crate::git::RemoteUrlError::UrlMissing { remote_name }) => {
-            format!("Remote `{remote_name}` has no URL.")
-        }
         ResolveProjectError::Remote(crate::git::RemoteUrlError::Open(msg)) => msg.clone(),
-        ResolveProjectError::Parse(ParseRemoteError::Empty) => "Remote URL is empty.".into(),
-        ResolveProjectError::Parse(ParseRemoteError::Unrecognized(url)) => {
-            format!("Could not parse remote URL: {url}")
-        }
         ResolveProjectError::HostMismatch {
             settings_host,
             remote_host,
@@ -529,11 +503,6 @@ pub fn merge_request_approvals_api_url(
         "{}/approvals",
         merge_request_api_url(base_url, path_with_namespace, iid)
     )
-}
-
-/// First 7 hex chars for display (not identity).
-pub fn short_git_sha(sha: &str) -> String {
-    sha.chars().take(7).collect()
 }
 
 pub fn format_fetch_merge_request_error(e: &FetchMergeRequestError) -> String {
@@ -1055,13 +1024,13 @@ mod tests {
 
     #[test]
     fn host_mismatch_error() {
-        let err = map_remote_url_to_project("git@github.com:org/repo.git", "https://gitlab.com")
-            .unwrap_err();
+        let remotes = vec![("origin".into(), "git@github.com:org/repo.git".into())];
+        let err = pick_remote_for_settings(&remotes, "https://gitlab.com").unwrap_err();
         assert_eq!(
             err,
             ResolveProjectError::HostMismatch {
                 settings_host: "gitlab.com".into(),
-                remote_host: "github.com".into(),
+                remote_host: "origin→github.com".into(),
             }
         );
     }
@@ -1403,14 +1372,6 @@ mod tests {
         assert_eq!(
             result,
             FetchMergeRequestResult::Err(FetchMergeRequestError::NotFound)
-        );
-    }
-
-    #[test]
-    fn short_git_sha_truncates() {
-        assert_eq!(
-            super::short_git_sha("deadbeef0123456789abcdef0123456789abcdef"),
-            "deadbee"
         );
     }
 

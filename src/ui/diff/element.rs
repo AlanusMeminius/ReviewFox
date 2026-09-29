@@ -19,10 +19,10 @@ use gpui::{
 use super::layout::{Layout, LineKind, Row};
 use super::pane::DualPane;
 use super::tabs::TabExpansion;
-use super::wrap::{clip_runs_to_display_segment, display_row_segments};
-use super::visual_wrap::WrapSide;
 use super::trace::{self, FrameStats};
 use super::viewport::{Viewport, route_wheel, snap};
+use super::visual_wrap::WrapSide;
+use super::wrap::{clip_runs_to_display_segment, display_row_segments};
 use crate::domain::Side;
 use crate::syntax::Span;
 use crate::ui::scrollbar::{self, ThumbGeom};
@@ -96,9 +96,7 @@ impl BarState {
     }
 
     pub(super) fn h_shown(&self, side: Side) -> bool {
-        self.visible
-            || self.h_hovered[side_ix(side)]
-            || self.h_drag.is_some_and(|(s, _)| s == side)
+        self.visible || self.h_hovered[side_ix(side)] || self.h_drag.is_some_and(|(s, _)| s == side)
     }
 
     pub(super) fn any_drag(&self) -> bool {
@@ -348,73 +346,63 @@ pub(super) fn build_frame(
             let Some(row) = rows.row(i) else { continue };
             let shape = shapes.rows.entry((side, i as u32)).or_insert_with(|| {
                 let t = trace::start();
-                let shape = shape_row(
-                    layout,
-                    side,
-                    row,
-                    side_spans,
-                    font_px,
-                    code_family,
-                    window,
-                );
+                let shape = shape_row(layout, side, row, side_spans, font_px, code_family, window);
                 stats.shaped += 1;
                 stats.shape += trace::since(t);
                 shape
             });
             let (kind, commented, drafting_here, marks, search, show_label, leading) = match row {
-                    Row::Line(l) => {
-                        let marks = match (layout.mark_runs(side, l), &shape.text, &shape.tabs) {
-                            (Some(runs), Some(text), Some(tabs)) => {
-                                if layout.wrap.is_some() {
-                                    let (seg, _) =
-                                        wrap_segment(layout, side, l, tabs, layout.side(side));
-                                    let clipped =
-                                        clip_runs_to_display_segment(&runs, tabs, seg);
-                                    run_spans(&clipped, text)
-                                } else {
-                                    mark_spans(&runs, tabs, text)
-                                }
+                Row::Line(l) => {
+                    let marks = match (layout.mark_runs(side, l), &shape.text, &shape.tabs) {
+                        (Some(runs), Some(text), Some(tabs)) => {
+                            if layout.wrap.is_some() {
+                                let (seg, _) =
+                                    wrap_segment(layout, side, l, tabs, layout.side(side));
+                                let clipped = clip_runs_to_display_segment(&runs, tabs, seg);
+                                run_spans(&clipped, text)
+                            } else {
+                                mark_spans(&runs, tabs, text)
                             }
-                            _ => Vec::new(),
-                        };
-                        let pad = l.is_equal_padding();
-                        let search = if pad {
-                            Vec::new()
-                        } else {
-                            shape
-                                .text
-                                .as_ref()
-                                .zip(shape.tabs.as_ref())
-                                .map(|(text, tabs)| {
-                                    let line_text = layout.side(side).text(l);
-                                    let ranges: Vec<_> = search_query
-                                        .map(|q| {
-                                            crate::domain::match_byte_ranges(line_text, q)
-                                                .into_iter()
-                                                .map(|r| (r.start, r.end))
-                                                .collect::<Vec<_>>()
-                                        })
-                                        .unwrap_or_default();
-                                    let (seg, _) =
-                                        wrap_segment(layout, side, l, tabs, layout.side(side));
-                                    let clipped =
-                                        clip_runs_to_display_segment(&ranges, tabs, seg);
-                                    run_spans(&clipped, text)
-                                })
-                                .unwrap_or_default()
-                        };
-                        (
-                            Some(l.kind),
-                            !pad && rows.has_comment(l.ln),
-                            !pad && drafting == Some(l.ln),
-                            marks,
-                            search,
-                            l.shows_line_number(),
-                            shape.text_leading,
-                        )
-                    }
-                    Row::Omit(_) => (None, false, false, Vec::new(), Vec::new(), false, 0.),
-                };
+                        }
+                        _ => Vec::new(),
+                    };
+                    let pad = l.is_equal_padding();
+                    let search = if pad {
+                        Vec::new()
+                    } else {
+                        shape
+                            .text
+                            .as_ref()
+                            .zip(shape.tabs.as_ref())
+                            .map(|(text, tabs)| {
+                                let line_text = layout.side(side).text(l);
+                                let ranges: Vec<_> = search_query
+                                    .map(|q| {
+                                        crate::domain::match_byte_ranges(line_text, q)
+                                            .into_iter()
+                                            .map(|r| (r.start, r.end))
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+                                let (seg, _) =
+                                    wrap_segment(layout, side, l, tabs, layout.side(side));
+                                let clipped = clip_runs_to_display_segment(&ranges, tabs, seg);
+                                run_spans(&clipped, text)
+                            })
+                            .unwrap_or_default()
+                    };
+                    (
+                        Some(l.kind),
+                        !pad && rows.has_comment(l.ln),
+                        !pad && drafting == Some(l.ln),
+                        marks,
+                        search,
+                        l.shows_line_number(),
+                        shape.text_leading,
+                    )
+                }
+                Row::Omit(_) => (None, false, false, Vec::new(), Vec::new(), false, 0.),
+            };
             let kind_bg = kind_bg(kind);
             if let Some(text) = &shape.text {
                 widest = widest.max(shape.text_leading + f32::from(text.width));
@@ -596,7 +584,9 @@ fn wrap_segment(
         return (full, 0.);
     };
     let segs = display_row_segments(tabs.text.len(), &breaks.breaks);
-    let ix = line.segment_index(side_layout).min(segs.len().saturating_sub(1));
+    let ix = line
+        .segment_index(side_layout)
+        .min(segs.len().saturating_sub(1));
     let leading = if ix > 0 {
         breaks.continuation_indent_px
     } else {
@@ -620,12 +610,8 @@ fn runs_for_segment(
     if spans.is_empty() {
         return vec![(display_len, default)];
     }
-    let color = |id: crate::syntax::CaptureId| {
-        palette
-            .get(usize::from(id.0))
-            .copied()
-            .unwrap_or(default)
-    };
+    let color =
+        |id: crate::syntax::CaptureId| palette.get(usize::from(id.0)).copied().unwrap_or(default);
     let mut display_runs = Vec::new();
     for (range, capture) in spans {
         let start = range.start.min(line_text.len());
@@ -1224,12 +1210,7 @@ impl Element for DualPaneElement {
         for code in &frame.code {
             window.set_cursor_style(CursorStyle::PointingHand, code);
         }
-        for track in frame
-            .tracks
-            .iter()
-            .chain(frame.h_tracks.iter())
-            .flatten()
-        {
+        for track in frame.tracks.iter().chain(frame.h_tracks.iter()).flatten() {
             window.set_cursor_style(CursorStyle::Arrow, track);
         }
         register_listeners(&self.pane, frame, window);

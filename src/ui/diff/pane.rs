@@ -241,8 +241,9 @@ impl DualPane {
             if let Some(lang) = syntax::detect(Path::new(path), first.unwrap_or("")) {
                 let old_text = file.old_text.clone();
                 let new_text = file.new_text.clone();
-                let any_under_guard = !syntax::exceeds_size_guard(&old_text, syntax::DEFAULT_SIZE_GUARD)
-                    || !syntax::exceeds_size_guard(&new_text, syntax::DEFAULT_SIZE_GUARD);
+                let any_under_guard =
+                    !syntax::exceeds_size_guard(&old_text, syntax::DEFAULT_SIZE_GUARD)
+                        || !syntax::exceeds_size_guard(&new_text, syntax::DEFAULT_SIZE_GUARD);
                 if any_under_guard {
                     cx.spawn(async move |this, cx| {
                         let (sides, took) = cx
@@ -386,13 +387,7 @@ impl DualPane {
             }
             None
         };
-        let mut layout = Layout::build(
-            old_text,
-            new_text,
-            &alignment,
-            Some(&self.fold),
-            wrap,
-        );
+        let mut layout = Layout::build(old_text, new_text, &alignment, Some(&self.fold), wrap);
         layout.set_comments(self.comments.iter());
         debug_assert!(!soft || !can_wrap || layout.wrap.is_some());
         if t.is_some() {
@@ -413,13 +408,9 @@ impl DualPane {
         let (Some(cap), Some(layout)) = (cap, self.layout.as_ref()) else {
             return;
         };
-        if let Some(s) = viewport::s_for_rewrap(
-            layout,
-            cap,
-            self.view_h,
-            self.row_h(),
-            self.scroll_s,
-        ) {
+        if let Some(s) =
+            viewport::s_for_rewrap(layout, cap, self.view_h, self.row_h(), self.scroll_s)
+        {
             self.scroll_s = s;
         }
     }
@@ -431,9 +422,9 @@ impl DualPane {
         let row_h = self.row_h();
         match self.pending_land.take() {
             Some(PendingLand::Match { side, ln, byte }) => {
-                if let Some(s) = viewport::s_for_match_byte(
-                    layout, side, ln, byte, row_h, self.scroll_s,
-                ) {
+                if let Some(s) =
+                    viewport::s_for_match_byte(layout, side, ln, byte, row_h, self.scroll_s)
+                {
                     self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
                     self.hunk_s = Some(self.scroll_s / row_h);
                 }
@@ -445,9 +436,9 @@ impl DualPane {
                 }
             }
             Some(PendingLand::Anchor(cap)) => {
-                if let Some(s) = viewport::s_for_rewrap(
-                    layout, cap, self.view_h, row_h, self.scroll_s,
-                ) {
+                if let Some(s) =
+                    viewport::s_for_rewrap(layout, cap, self.view_h, row_h, self.scroll_s)
+                {
                     self.scroll_s = s;
                 }
             }
@@ -661,9 +652,7 @@ impl DualPane {
         let row_h = self.row_h();
         let line_text = layout.side(plan.target.side).line_text(plan.target.ln);
         let byte = line_text.and_then(|text| first_match_byte(text, &self.search_query));
-        let defer = self.soft_wrap
-            && (self.wrap_layout_dirty
-                || layout.wrap.is_none());
+        let defer = self.soft_wrap && (self.wrap_layout_dirty || layout.wrap.is_none());
         if defer {
             self.pending_land = Some(match byte {
                 Some(b) => PendingLand::Match {
@@ -969,8 +958,7 @@ impl DualPane {
     /// row: a line begins a draft, an omission separator expands its span.
     pub(super) fn release(&mut self, side: Option<Side>, y: f32, cx: &mut Context<Self>) {
         if self.bars.drag.take().is_some() || self.bars.h_drag.take().is_some() {
-            if !self.bars.hovered.iter().any(|&h| h) && !self.bars.h_hovered.iter().any(|&h| h)
-            {
+            if !self.bars.hovered.iter().any(|&h| h) && !self.bars.h_hovered.iter().any(|&h| h) {
                 self.arm_bar_hide(cx);
             }
             cx.notify();
@@ -1065,10 +1053,7 @@ impl DualPane {
         let font_px = self.font_size.px() as f32;
         let advance = self.mono_advance(font_px, window);
         let ln_advance = self.ln_advance(window);
-        let ln_w = ln_col_width(
-            line_number_digits(self.layout.as_ref()?),
-            ln_advance,
-        );
+        let ln_w = ln_col_width(line_number_digits(self.layout.as_ref()?), ln_advance);
         let geom = Geom::new(bounds, ln_w, self.scale);
         for side in [Side::Old, Side::New] {
             self.pane_w[side_ix(side)] = f32::from(geom.pane(side).size.width);
@@ -1136,8 +1121,7 @@ impl DualPane {
         } else {
             [Side::Old, Side::New].map(|side| self.max_x[side_ix(side)] > 0.)
         };
-        let (tracks, h_track_boxes) =
-            insert_scrollbar_hitboxes(&geom, v_tracks, h_tracks, window);
+        let (tracks, h_track_boxes) = insert_scrollbar_hitboxes(&geom, v_tracks, h_tracks, window);
         frame.tracks = tracks;
         frame.h_tracks = h_track_boxes;
         for side in [Side::Old, Side::New] {
@@ -1163,11 +1147,7 @@ impl DualPane {
 }
 
 enum PendingLand {
-    Match {
-        side: Side,
-        ln: u32,
-        byte: usize,
-    },
+    Match { side: Side, ln: u32, byte: usize },
     Line(crate::domain::HunkJumpTarget),
     Anchor(viewport::AnchorCap),
 }
@@ -1389,9 +1369,7 @@ mod tests {
 
     #[test]
     fn soft_wrap_deferred_rebuild_satisfies_layout_invariant() {
-        let invariant = |soft: bool, can_wrap: bool, has_wrap: bool| {
-            !soft || !can_wrap || has_wrap
-        };
+        let invariant = |soft: bool, can_wrap: bool, has_wrap: bool| !soft || !can_wrap || has_wrap;
         assert!(invariant(true, false, false));
         assert!(invariant(true, true, true));
         assert!(invariant(false, true, false));

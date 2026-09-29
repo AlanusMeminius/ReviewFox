@@ -1,6 +1,6 @@
 use gpui::{
-    App, ClickEvent, ElementId, FocusHandle, Hsla, Pixels, SharedString, Window, div,
-    prelude::*, px, svg, transparent_black,
+    App, ClickEvent, ElementId, FocusHandle, Hsla, Pixels, SharedString, Window, div, prelude::*,
+    px, svg, transparent_black,
 };
 
 use crate::ui::appearance::{self, UiTextSize};
@@ -281,7 +281,9 @@ impl RenderOnce for Button {
                 button.focus(|button| button.border_color(theme::border_focused()))
             })
             .when_some(self.tab_index, |button, index| button.tab_index(index))
-            .when_some(self.focus_handle, |button, handle| button.track_focus(&handle))
+            .when_some(self.focus_handle, |button, handle| {
+                button.track_focus(&handle)
+            })
             .when_some(self.tooltip, |button, text| {
                 button.tooltip(Tooltip::text(text, None))
             })
@@ -292,7 +294,11 @@ impl RenderOnce for Button {
             })
             .children(start_icon)
             .when_some(self.label, |button, label| {
-                button.child(div().ui_label_size(if small_label { 12. } else { 14. }, cx).child(label))
+                button.child(
+                    div()
+                        .ui_label_size(if small_label { 12. } else { 14. }, cx)
+                        .child(label),
+                )
             })
             .when_some(self.hint, |button, hint| {
                 button.child(

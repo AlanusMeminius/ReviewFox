@@ -20,8 +20,7 @@ fn is_word_char(c: char) -> bool {
         || matches!(c, '\u{0400}'..='\u{04FF}')
         || matches!(
             c,
-            '-' | '_' | '.' | '\'' | '$' | '%' | '@' | '#'
-                | '^' | '~' | ',' | '=' | ':'
+            '-' | '_' | '.' | '\'' | '$' | '%' | '@' | '#' | '^' | '~' | ',' | '=' | ':'
         )
 }
 
@@ -39,19 +38,11 @@ fn forbids_break_between(prev: char, c: char) -> bool {
     if (prev == '<' || prev == '>' || prev == '!') && c == '=' {
         return true;
     }
-    !is_word_char(prev)
-        && !is_word_char(c)
-        && prev.is_ascii()
-        && c.is_ascii()
+    !is_word_char(prev) && !is_word_char(c) && prev.is_ascii() && c.is_ascii()
 }
 
 /// Width of `text[start..end]` using prefix sums at char boundaries in `char_bounds`.
-fn segment_width_prefix(
-    width_at: &[f32],
-    char_bounds: &[usize],
-    start: usize,
-    end: usize,
-) -> f32 {
+fn segment_width_prefix(width_at: &[f32], char_bounds: &[usize], start: usize, end: usize) -> f32 {
     let i = char_bounds.partition_point(|&b| b < start);
     let j = char_bounds.partition_point(|&b| b < end);
     width_at[j] - width_at[i]
@@ -161,11 +152,7 @@ fn adjust_char_break_ix(
     for c in text[run_start..run_end].chars() {
         run_w += char_width(c);
     }
-    if run_w > wrap_width {
-        ix
-    } else {
-        run_start
-    }
+    if run_w > wrap_width { ix } else { run_start }
 }
 
 fn legalize_break_ix(
@@ -295,13 +282,12 @@ fn wrap_display_line_inner(
         max_glyph_w = max_glyph_w.max(char_width(c));
     }
 
-    let continuation_indent_px = if leading_indent_px > wrap_width / 2.
-        || leading_indent_px + max_glyph_w > wrap_width
-    {
-        0.
-    } else {
-        leading_indent_px
-    };
+    let continuation_indent_px =
+        if leading_indent_px > wrap_width / 2. || leading_indent_px + max_glyph_w > wrap_width {
+            0.
+        } else {
+            leading_indent_px
+        };
 
     let indices: Vec<(usize, char)> = text.char_indices().filter(|(_, c)| *c != '\n').collect();
     let char_bounds: Vec<usize> = indices.iter().map(|(b, _)| *b).collect();
@@ -475,11 +461,7 @@ mod tests {
 
     fn cjk_wide() -> impl FnMut(char) -> f32 {
         move |c| {
-            if c.is_ascii() {
-                10.
-            } else {
-                16.
-            }
+            if c.is_ascii() { 10. } else { 16. }
         }
     }
 
@@ -522,12 +504,11 @@ mod tests {
             if i > 0 {
                 w += result.continuation_indent_px;
             }
-            let content_w = w
-                - if i > 0 {
-                    result.continuation_indent_px
-                } else {
-                    0.
-                };
+            let content_w = w - if i > 0 {
+                result.continuation_indent_px
+            } else {
+                0.
+            };
             let indivisible = run_is_indivisible(seg, 0, seg.len());
             assert!(
                 w <= wrap_width + 0.001
@@ -615,10 +596,7 @@ mod tests {
         let mut width = mono(10.);
         for (text, w) in cases {
             let r = wrap_line(text, *w, &mut width);
-            assert!(
-                !r.breaks.is_empty(),
-                "{text:?} should wrap at width {w}"
-            );
+            assert!(!r.breaks.is_empty(), "{text:?} should wrap at width {w}");
             assert_no_break_inside(text, &r.breaks);
             assert_width_invariant(text, *w, &r, mono(10.));
         }

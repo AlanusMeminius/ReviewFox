@@ -127,17 +127,18 @@ impl DiffView {
     ) -> Self {
         let review = Review::new(snapshot.comparison.clone());
         let pane = cx.new(DualPane::new);
-        let pane_events = cx.subscribe_in(&pane, window, |this, _, event, window, cx| match event {
-            PaneEvent::BeginDraft { side, ln } => this.begin_draft(*side, *ln, window, cx),
-            PaneEvent::HunkIndexChanged(index) => {
-                this.hunk_index = *index;
-                cx.notify();
-            }
-            PaneEvent::HoverCopy(copy) => {
-                this.hover_copy = copy.clone();
-                cx.notify();
-            }
-        });
+        let pane_events =
+            cx.subscribe_in(&pane, window, |this, _, event, window, cx| match event {
+                PaneEvent::BeginDraft { side, ln } => this.begin_draft(*side, *ln, window, cx),
+                PaneEvent::HunkIndexChanged(index) => {
+                    this.hunk_index = *index;
+                    cx.notify();
+                }
+                PaneEvent::HoverCopy(copy) => {
+                    this.hover_copy = copy.clone();
+                    cx.notify();
+                }
+            });
         let mut this = Self {
             focus: cx.focus_handle(),
             tree_collapsed: false,
@@ -958,45 +959,56 @@ fn render_tree_pane(
         .child({
             let (scroll, sb) = scrollbar::vertical("diff-tree-sb", cx);
             scrollbar::overlay_flex(
-            div()
-                .id("diff-tree-body")
-                .size_full()
-                .px_1()
-                .pt_1()
-                .track_scroll(&scroll)
-                .overflow_y_scroll()
-                .children(rows.into_iter().enumerate().map(|(i, row)| match row {
-                    TreeRow::Dir { depth, name, path } => {
-                        let collapsed = view.collapsed_dirs.contains(&path);
-                        let toggle_path = path.clone();
-                        file_tree_rows::dir_row(("ddir", i), depth, name, collapsed, RowSurface::Desk, cx)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.collapsed_dirs.remove(&toggle_path) {
-                                    this.collapsed_dirs.insert(toggle_path.clone());
-                                }
-                                cx.notify();
-                            }))
-                    }
-                    TreeRow::File { depth, path } => {
-                        let path_click = path.path.clone();
-                        let active = selected == path.path;
-                        file_tree_rows::file_row(
-                            ("dfile", i),
-                            depth,
-                            &path,
-                            active,
-                            RowSurface::Desk,
-                            mono.clone(),
-                            cx,
-                        )
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.select_path(path_click.clone(), cx);
-                            cx.notify();
-                        }))
-                    }
-                })),
-            sb,
+                div()
+                    .id("diff-tree-body")
+                    .size_full()
+                    .px_1()
+                    .pt_1()
+                    .track_scroll(&scroll)
+                    .overflow_y_scroll()
+                    .children(rows.into_iter().enumerate().map(|(i, row)| match row {
+                        TreeRow::Dir { depth, name, path } => {
+                            let collapsed = view.collapsed_dirs.contains(&path);
+                            let toggle_path = path.clone();
+                            file_tree_rows::dir_row(
+                                ("ddir", i),
+                                depth,
+                                name,
+                                collapsed,
+                                RowSurface::Desk,
+                                cx,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if !this.collapsed_dirs.remove(&toggle_path) {
+                                        this.collapsed_dirs.insert(toggle_path.clone());
+                                    }
+                                    cx.notify();
+                                },
+                            ))
+                        }
+                        TreeRow::File { depth, path } => {
+                            let path_click = path.path.clone();
+                            let active = selected == path.path;
+                            file_tree_rows::file_row(
+                                ("dfile", i),
+                                depth,
+                                &path,
+                                active,
+                                RowSurface::Desk,
+                                mono.clone(),
+                                cx,
+                            )
+                            .cursor_pointer()
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.select_path(path_click.clone(), cx);
+                                    cx.notify();
+                                },
+                            ))
+                        }
+                    })),
+                sb,
             )
         })
 }
@@ -1116,39 +1128,39 @@ fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
                     div()
                         .ui_text_size(12., cx)
                         .text_color(theme::muted())
-                        .child(format!("{} hit{}", matches.len(), if matches.len() == 1 { "" } else { "s" })),
+                        .child(format!(
+                            "{} hit{}",
+                            matches.len(),
+                            if matches.len() == 1 { "" } else { "s" }
+                        )),
                 ),
         )
         .when(!matches.is_empty(), |bar| {
-            bar.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .children(matches.into_iter().enumerate().map(|(i, m)| {
-                        let side = m.side;
-                        let ln = m.ln;
-                        let label = format!("{} {ln}", m.side.label());
-                        div()
-                            .id(("hit", i))
-                            .h(theme::TOGGLE_SIZE)
-                            .px_2()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .ui_text_size(12., cx)
-                            .text_color(theme::muted())
-                            .hover(|button| button.bg(theme::hover()))
-                            .active(|button| button.bg(rgb(0xdfe3e9)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.jump_match(side, ln, cx);
-                            }))
-                            .child(label)
-                    })),
-            )
+            bar.child(div().flex().flex_wrap().gap_1().children(
+                matches.into_iter().enumerate().map(|(i, m)| {
+                    let side = m.side;
+                    let ln = m.ln;
+                    let label = format!("{} {ln}", m.side.label());
+                    div()
+                        .id(("hit", i))
+                        .h(theme::TOGGLE_SIZE)
+                        .px_2()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .ui_text_size(12., cx)
+                        .text_color(theme::muted())
+                        .hover(|button| button.bg(theme::hover()))
+                        .active(|button| button.bg(rgb(0xdfe3e9)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.jump_match(side, ln, cx);
+                        }))
+                        .child(label)
+                }),
+            ))
         })
         .into_any_element()
 }
@@ -1217,30 +1229,30 @@ fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElem
                 .track_scroll(&scroll)
                 .overflow_y_scroll()
                 .children(comments.into_iter().map(|c| {
-            let label = match &c.anchor {
-                crate::domain::Anchor::Line { side, span, .. } => {
-                    format!("{} L{} · ", side.label(), span.start)
-                }
-                crate::domain::Anchor::File { .. } => "file · ".into(),
-            };
-            div()
-                .id(("cmt", c.id as usize))
-                .ui_text_size(12., cx)
-                .child(
+                    let label = match &c.anchor {
+                        crate::domain::Anchor::Line { side, span, .. } => {
+                            format!("{} L{} · ", side.label(), span.start)
+                        }
+                        crate::domain::Anchor::File { .. } => "file · ".into(),
+                    };
                     div()
-                        .flex()
-                        .gap_1()
+                        .id(("cmt", c.id as usize))
+                        .ui_text_size(12., cx)
                         .child(
                             div()
-                                .font_family(mono.clone())
-                                // Own size: the UI text around it scales, Code Font chrome does not.
-                                .text_xs()
-                                .text_color(theme::faint())
-                                .child(label),
+                                .flex()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_family(mono.clone())
+                                        // Own size: the UI text around it scales, Code Font chrome does not.
+                                        .text_xs()
+                                        .text_color(theme::faint())
+                                        .child(label),
+                                )
+                                .child(div().text_color(theme::text()).child(c.body)),
                         )
-                        .child(div().text_color(theme::text()).child(c.body)),
-                )
-        })),
+                })),
             sb,
         ))
         .into_any_element()
@@ -1446,11 +1458,7 @@ fn font_size_group(font_px: u32, cx: &mut Context<DiffView>) -> impl IntoElement
                 .hover(|button| button.bg(theme::hover()))
                 .active(|button| button.bg(theme::element_active()))
                 .on_click(cx.listener(|this, _, _, cx| this.font_size(FontOp::Reset, cx)))
-                .child(
-                    div()
-                        .ui_label_size(12., cx)
-                        .child(font_px.to_string()),
-                ),
+                .child(div().ui_label_size(12., cx).child(font_px.to_string())),
         )
         .child(nav_button(
             "font-inc",

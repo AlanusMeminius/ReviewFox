@@ -1,10 +1,10 @@
 #[cfg(target_os = "macos")]
 mod app_icon;
-mod appearance;
 mod app_view;
-mod entry_chrome;
+mod appearance;
 mod diff;
 mod diff_window;
+mod entry_chrome;
 mod file_tree;
 mod file_tree_rows;
 mod gitlab_connection;
@@ -111,16 +111,18 @@ pub fn run() {
         None
     };
 
-    Application::new().with_assets(Assets).run(move |cx: &mut App| {
-        appearance::init(cx);
-        // Compile highlight queries off the UI thread before the first open.
-        cx.background_spawn(async {
-            crate::syntax::warm();
-            let _ = theme::syntax_colors();
-        })
-        .detach();
-        #[cfg(target_os = "macos")]
-        app_icon::set_app_icon();
+    Application::new()
+        .with_assets(Assets)
+        .run(move |cx: &mut App| {
+            appearance::init(cx);
+            // Compile highlight queries off the UI thread before the first open.
+            cx.background_spawn(async {
+                crate::syntax::warm();
+                let _ = theme::syntax_colors();
+            })
+            .detach();
+            #[cfg(target_os = "macos")]
+            app_icon::set_app_icon();
 
             let http_client =
                 ReqwestClient::user_agent(concat!("ReviewFox/", env!("CARGO_PKG_VERSION")))

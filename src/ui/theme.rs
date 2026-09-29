@@ -283,6 +283,7 @@ const SYNTAX_PALETTE: &[(&str, u32)] = &[
 ];
 
 /// WCAG contrast floor for syntax fg on Diff row / word-mark backgrounds.
+#[cfg(test)]
 const SYNTAX_MIN_CONTRAST: f32 = 3.0;
 
 /// Exact name, then drop the last dotted segment repeatedly; else [`text`].
@@ -309,6 +310,7 @@ pub fn syntax_colors() -> &'static [Rgba] {
     &SYNTAX_COLORS
 }
 
+#[cfg(test)]
 pub fn syntax_color(id: crate::syntax::CaptureId) -> Rgba {
     syntax_colors()[usize::from(id.0)]
 }

@@ -101,7 +101,12 @@ impl FontRole {
 
     /// Store a chosen family; like [`Self::set_size`], `None` (Reset) and the
     /// family Default resolves to both remove the field.
-    pub fn set_family(self, file: &mut SettingsFile, family: Option<&str>, installed: &[SharedString]) {
+    pub fn set_family(
+        self,
+        file: &mut SettingsFile,
+        family: Option<&str>,
+        installed: &[SharedString],
+    ) {
         let stored = family
             .filter(|&family| family != self.default_family(installed))
             .map(str::to_string);
@@ -146,7 +151,8 @@ pub fn init(cx: &mut App) {
     cx.set_global(resolve(&settings_store::load_file(), &installed));
     cx.set_global(InstalledFonts(installed));
     // Views cached with `AnyView::cached` re-render only on a refresh.
-    cx.observe_global::<Appearance>(|cx| cx.refresh_windows()).detach();
+    cx.observe_global::<Appearance>(|cx| cx.refresh_windows())
+        .detach();
 }
 
 /// Apply `edit` to `settings.json`, save it, and replace the Global when the
@@ -251,8 +257,9 @@ pub fn resolve(file: &SettingsFile, installed: &[SharedString]) -> Appearance {
             FontRole::Ui.default_family(installed),
             installed,
         ),
-        ui_font_size: round_size(file.ui_font_size)
-            .map_or(UI_FONT_SIZE_DEFAULT, |px| px.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX)),
+        ui_font_size: round_size(file.ui_font_size).map_or(UI_FONT_SIZE_DEFAULT, |px| {
+            px.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX)
+        }),
         code_font: resolve_family(
             file.code_font_family.as_deref(),
             FontRole::Code.default_family(installed),
@@ -274,7 +281,11 @@ fn round_size(stored: Option<f32>) -> Option<u32> {
         .map(|v| v.round().max(0.) as u32)
 }
 
-fn resolve_family(stored: Option<&str>, default: &'static str, installed: &[SharedString]) -> Family {
+fn resolve_family(
+    stored: Option<&str>,
+    default: &'static str,
+    installed: &[SharedString],
+) -> Family {
     let found = stored.and_then(|s| installed.iter().find(|name| name.as_ref() == s));
     Family {
         name: found.map_or_else(|| default.into(), SharedString::clone),
@@ -304,7 +315,10 @@ mod tests {
 
     #[test]
     fn unset_settings_resolve_to_defaults() {
-        let with_plex = resolve(&SettingsFile::default(), &installed(&["IBM Plex Mono", "Arial"]));
+        let with_plex = resolve(
+            &SettingsFile::default(),
+            &installed(&["IBM Plex Mono", "Arial"]),
+        );
         assert_eq!(with_plex.ui_font.name, "IBM Plex Sans");
         assert_eq!(with_plex.ui_font.stored, None);
         assert!(!with_plex.ui_font.not_installed);
@@ -331,7 +345,10 @@ mod tests {
             code_font_family: Some("JetBrains Mono".into()),
             ..Default::default()
         };
-        let a = resolve(&file, &installed(&["Inter", "JetBrains Mono", "IBM Plex Mono"]));
+        let a = resolve(
+            &file,
+            &installed(&["Inter", "JetBrains Mono", "IBM Plex Mono"]),
+        );
         assert_eq!(a.ui_font.name, "Inter");
         assert_eq!(a.ui_font.stored.as_deref(), Some("Inter"));
         assert!(!a.ui_font.not_installed);
@@ -372,7 +389,10 @@ mod tests {
         let mut file = SettingsFile::default();
         FontRole::Ui.set_size(&mut file, Some(14));
         FontRole::Code.set_size(&mut file, Some(18));
-        assert_eq!((file.ui_font_size, file.code_font_size), (Some(14.), Some(18.)));
+        assert_eq!(
+            (file.ui_font_size, file.code_font_size),
+            (Some(14.), Some(18.))
+        );
 
         FontRole::Ui.set_size(&mut file, Some(13));
         FontRole::Code.set_size(&mut file, None);
@@ -394,7 +414,10 @@ mod tests {
         // The resolved Default: Plex Sans for UI, Plex Mono (installed) for Code.
         FontRole::Ui.set_family(&mut file, Some("IBM Plex Sans"), &fonts);
         FontRole::Code.set_family(&mut file, Some("IBM Plex Mono"), &fonts);
-        assert_eq!((file.ui_font_family.clone(), file.code_font_family.clone()), (None, None));
+        assert_eq!(
+            (file.ui_font_family.clone(), file.code_font_family.clone()),
+            (None, None)
+        );
 
         FontRole::Ui.set_family(&mut file, Some("Inter"), &fonts);
         FontRole::Ui.set_family(&mut file, None, &fonts);

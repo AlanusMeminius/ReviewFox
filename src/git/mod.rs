@@ -199,6 +199,7 @@ impl BranchBrowser {
 
     /// Reload ChangedPaths for an explicit OID pair (MR Entry / forced Comparison).
     /// `base_oid: None` = empty tree.
+    #[allow(dead_code)] // Exercised in unit tests; no UI caller yet.
     pub fn set_comparison_oids(&mut self, base_oid: Option<Oid>, head_oid: Oid) -> Result<()> {
         self.comparison.base_oid = base_oid;
         self.comparison.head_oid = head_oid;
@@ -226,7 +227,6 @@ impl BranchBrowser {
 pub enum RemoteUrlError {
     Open(String),
     NoRemotes,
-    UrlMissing { remote_name: String },
 }
 
 /// All remotes with a URL as `(name, url)` in git's order.
@@ -258,17 +258,6 @@ pub fn list_remote_urls(
         return Err(RemoteUrlError::NoRemotes);
     }
     Ok(out)
-}
-
-/// Prefer `origin` if present, else the first remote with a URL.
-pub fn preferred_remote_url(
-    repo_path: &Path,
-) -> std::result::Result<(String, String), RemoteUrlError> {
-    let remotes = list_remote_urls(repo_path)?;
-    if let Some(pair) = remotes.iter().find(|(name, _)| name == "origin") {
-        return Ok(pair.clone());
-    }
-    Ok(remotes[0].clone())
 }
 
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);

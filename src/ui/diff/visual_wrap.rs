@@ -170,8 +170,24 @@ impl<'a> WrapCtx<'a> {
             shared_breaks.as_ref(),
         );
         let pair = old_n.max(new_n);
-        push_wrapped_rows(old, o_ln, kind, old_bytes.clone(), None, old_n, pair - old_n);
-        push_wrapped_rows(new, n_ln, kind, new_bytes.clone(), None, new_n, pair - new_n);
+        push_wrapped_rows(
+            old,
+            o_ln,
+            kind,
+            old_bytes.clone(),
+            None,
+            old_n,
+            pair - old_n,
+        );
+        push_wrapped_rows(
+            new,
+            n_ln,
+            kind,
+            new_bytes.clone(),
+            None,
+            new_n,
+            pair - new_n,
+        );
         pair
     }
 }

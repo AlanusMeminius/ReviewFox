@@ -49,13 +49,6 @@ impl ReqwestClient {
         }
     }
 
-    pub fn new() -> Self {
-        Self::builder(None)
-            .build()
-            .expect("Failed to initialize HTTP client")
-            .into()
-    }
-
     pub fn user_agent(agent: &str) -> anyhow::Result<Self> {
         let mut map = HeaderMap::new();
         map.insert(http::header::USER_AGENT, HeaderValue::from_str(agent)?);

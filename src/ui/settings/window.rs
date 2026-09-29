@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, App, Context, ElementId, Entity, FocusHandle, Focusable, Global, KeyBinding,
-    Render, ScrollHandle, Subscription, Window, WindowControlArea, WindowDecorations,
-    WindowHandle, actions, div, point, prelude::*, px, size,
+    Render, ScrollHandle, Subscription, Window, WindowControlArea, WindowDecorations, WindowHandle,
+    actions, div, point, prelude::*, px, size,
 };
 
 use std::cell::RefCell;
@@ -19,12 +19,12 @@ use super::{
     Button, ButtonSize, ButtonStyle, ConfiguredCard, FontPicker, FontPickerEvent, NumberField,
     NumberFieldEvent, SectionHeader, SettingRow,
 };
+use crate::ui::appearance::{self, Appearance, FontRole, UiTextSize};
 use crate::ui::gitlab_connection::{self, GitLabConnection};
 #[cfg(target_os = "macos")]
 use crate::ui::mac_column_vibrancy::ColumnVibrancy;
 use crate::ui::scrollbar;
 use crate::ui::text_field::{TextField, TextFieldEvent, TextFieldStyle};
-use crate::ui::appearance::{self, Appearance, FontRole, UiTextSize};
 use crate::ui::theme;
 use crate::ui::window_controls::window_controls;
 
@@ -207,7 +207,9 @@ impl SettingsView {
                 .with_style(TextFieldStyle::Settings)
                 .tab_index(TAB_URL)
         });
-        base_url.update(cx, |field, cx| field.set_content(saved_base_url.clone(), cx));
+        base_url.update(cx, |field, cx| {
+            field.set_content(saved_base_url.clone(), cx)
+        });
 
         let pat = cx.new(|cx| {
             TextField::new(token_row::PLACEHOLDER, true, cx)
@@ -218,10 +220,15 @@ impl SettingsView {
 
         let base_url_focus = base_url.read(cx).focus_handle(cx);
         let mut subscriptions = vec![
-            cx.subscribe(&base_url, |view, _, event: &TextFieldEvent, cx| match event {
-                TextFieldEvent::Confirm => view.commit_base_url(cx),
+            cx.subscribe(
+                &base_url,
+                |view, _, event: &TextFieldEvent, cx| match event {
+                    TextFieldEvent::Confirm => view.commit_base_url(cx),
+                },
+            ),
+            cx.on_blur(&base_url_focus, window, |view, _, cx| {
+                view.commit_base_url(cx)
             }),
-            cx.on_blur(&base_url_focus, window, |view, _, cx| view.commit_base_url(cx)),
             // The token commits on Enter only, never on blur.
             cx.subscribe(&pat, |view, _, event: &TextFieldEvent, cx| match event {
                 TextFieldEvent::Confirm => view.commit_token(cx),
@@ -229,35 +236,43 @@ impl SettingsView {
             // Resets (and any other outside change) re-sync the size fields.
             cx.observe_global::<Appearance>(|view, cx| view.sync_font_sizes(cx)),
         ];
-        let font_controls = FONT_GROUPS.map(|group| {
-            let family = cx.new(|cx| {
-                let id = format!("{}-family", group.id);
-                FontPicker::new(id, group.role, group.family_tab_index, cx)
+        let font_controls =
+            FONT_GROUPS.map(|group| {
+                let family = cx.new(|cx| {
+                    let id = format!("{}-family", group.id);
+                    FontPicker::new(id, group.role, group.family_tab_index, cx)
+                });
+                subscriptions.push(cx.subscribe(
+                    &family,
+                    move |_, _, event: &FontPickerEvent, cx| match event {
+                        FontPickerEvent::Confirm(family) => {
+                            appearance::set_family(cx, group.role, Some(family))
+                        }
+                    },
+                ));
+                let size = cx.new(|cx| {
+                    let role = group.role;
+                    let size = role.size(cx.global::<Appearance>());
+                    let id = ElementId::Name(format!("{}-size-field", group.id).into());
+                    NumberField::new(
+                        id,
+                        size,
+                        role.size_range(),
+                        group.size_tab_index,
+                        window,
+                        cx,
+                    )
+                });
+                subscriptions.push(cx.subscribe(
+                    &size,
+                    move |_, _, event: &NumberFieldEvent, cx| match *event {
+                        NumberFieldEvent::Change(size) => {
+                            appearance::update(cx, |file| group.role.set_size(file, Some(size)))
+                        }
+                    },
+                ));
+                FontControls { family, size }
             });
-            subscriptions.push(cx.subscribe(
-                &family,
-                move |_, _, event: &FontPickerEvent, cx| match event {
-                    FontPickerEvent::Confirm(family) => {
-                        appearance::set_family(cx, group.role, Some(family))
-                    }
-                },
-            ));
-            let size = cx.new(|cx| {
-                let role = group.role;
-                let size = role.size(cx.global::<Appearance>());
-                let id = ElementId::Name(format!("{}-size-field", group.id).into());
-                NumberField::new(id, size, role.size_range(), group.size_tab_index, window, cx)
-            });
-            subscriptions.push(cx.subscribe(
-                &size,
-                move |_, _, event: &NumberFieldEvent, cx| match *event {
-                    NumberFieldEvent::Change(size) => {
-                        appearance::update(cx, |file| group.role.set_size(file, Some(size)))
-                    }
-                },
-            ));
-            FontControls { family, size }
-        });
 
         // The scroll handle lives in a global registry and outlives the window.
         let (content_scroll, _) = scrollbar::vertical(CONTENT_SCROLL_ID, cx);
@@ -332,7 +347,9 @@ impl SettingsView {
     fn sync_font_sizes(&mut self, cx: &mut Context<Self>) {
         for (group, controls) in FONT_GROUPS.iter().zip(&self.font_controls) {
             let size = group.role.size(cx.global::<Appearance>());
-            controls.size.update(cx, |field, cx| field.set_value(size, cx));
+            controls
+                .size
+                .update(cx, |field, cx| field.set_value(size, cx));
         }
     }
 
@@ -627,9 +644,13 @@ impl SettingsView {
         let mut tab_index = TAB_TOKEN;
         if can_retry {
             card = card.action(
-                card_button("settings-gitlab-token-retry", token_row::RETRY, "refresh.svg")
-                    .tab_index(tab_index)
-                    .on_click(cx.listener(|view, _, _, cx| view.refresh_connection(cx))),
+                card_button(
+                    "settings-gitlab-token-retry",
+                    token_row::RETRY,
+                    "refresh.svg",
+                )
+                .tab_index(tab_index)
+                .on_click(cx.listener(|view, _, _, cx| view.refresh_connection(cx))),
             );
             tab_index += 1;
         }
@@ -744,9 +765,9 @@ fn render_family_row(
             row.title_action(
                 Button::icon_only(ElementId::Name(format!("{id}-reset").into()), "undo.svg")
                     .tooltip(RESET_TO_DEFAULT)
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        appearance::set_family(cx, role, None)
-                    })),
+                    .on_click(
+                        cx.listener(move |_, _, _, cx| appearance::set_family(cx, role, None)),
+                    ),
             )
         })
         .control(controls.family.clone())
@@ -902,14 +923,13 @@ pub fn open_or_focus_settings(target: Option<SettingsTarget>, cx: &mut App) {
         (state.handle, state.gitlab_connection.clone())
     };
     if let Some(h) = handle
-        && h
-            .update(cx, |view, window, cx| {
-                window.activate_window();
-                if let Some(target) = target {
-                    view.open_target(target, window, cx);
-                }
-            })
-            .is_ok()
+        && h.update(cx, |view, window, cx| {
+            window.activate_window();
+            if let Some(target) = target {
+                view.open_target(target, window, cx);
+            }
+        })
+        .is_ok()
     {
         return;
     }

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use super::layout::{Layout, LineKind, Row};
 use super::pane::nearest_hunk_index;
-use super::visual_wrap::{WrapPlan, WrapSide};
 use super::viewport::{self, Viewport, snap};
+use super::visual_wrap::{WrapPlan, WrapSide};
 use crate::domain::{Alignment, AlignmentOp, FoldState, LineSpan, Side};
 
 const ROW_H: f32 = 20.;
@@ -103,12 +103,8 @@ fn synthetic_wrap_line(ln: u32, tag: &str) -> String {
             s.push('\n');
             s
         }
-        6..=8 => format!(
-            "    ptr->next->child[{ln}]->flags |= MASK_{ln} && ok_{ln} // tail\n"
-        ),
-        9..=11 => format!(
-            "    stream << item_{ln} << delim << a->b->c<<=d&&e// note {ln}\n"
-        ),
+        6..=8 => format!("    ptr->next->child[{ln}]->flags |= MASK_{ln} && ok_{ln} // tail\n"),
+        9..=11 => format!("    stream << item_{ln} << delim << a->b->c<<=d&&e// note {ln}\n"),
         12..=14 => {
             let mut s = String::from("    ");
             for i in 0..120 {
@@ -378,7 +374,13 @@ struct Run {
 fn run(lines: u32, hunks: u32, folded: bool) -> Run {
     let (old, new, alignment, fold) = synthetic(lines, hunks);
     let t = Instant::now();
-    let layout = Layout::build(old.into(), new.into(), &alignment, folded.then_some(&fold), None);
+    let layout = Layout::build(
+        old.into(),
+        new.into(),
+        &alignment,
+        folded.then_some(&fold),
+        None,
+    );
     black_box((layout.old.max_chars(), layout.new.max_chars()));
     let build = t.elapsed();
     let (lo, hi) = viewport::s_range(&layout, VIEW_H, ROW_H);

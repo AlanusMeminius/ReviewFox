@@ -161,11 +161,23 @@ pub struct LineSpan {
 /// How old and new lines correspond for one file under ViewOptions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AlignmentOp {
-    Equal { old: LineSpan, new: LineSpan },
-    Insert { after_old: u32, news: LineSpan },
-    Delete { olds: LineSpan, at_new: u32 },
+    Equal {
+        old: LineSpan,
+        new: LineSpan,
+    },
+    Insert {
+        after_old: u32,
+        news: LineSpan,
+    },
+    Delete {
+        olds: LineSpan,
+        at_new: u32,
+    },
     /// Many-to-many replace; pairwise maps are optional refinement.
-    Replace { olds: LineSpan, news: LineSpan },
+    Replace {
+        olds: LineSpan,
+        news: LineSpan,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -553,6 +565,7 @@ impl Review {
         }
     }
 
+    #[allow(dead_code)] // Exercised in unit tests; no UI caller yet.
     pub fn ensure_comparison(&mut self, comparison: Comparison) {
         if self.comparison != comparison {
             *self = Self::new(comparison);
@@ -658,7 +671,8 @@ fn tokenize(s: &str) -> Vec<&str> {
             rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                 .unwrap_or(rest.len())
         } else if rest.starts_with(char::is_whitespace) {
-            rest.find(|c: char| !c.is_whitespace()).unwrap_or(rest.len())
+            rest.find(|c: char| !c.is_whitespace())
+                .unwrap_or(rest.len())
         } else {
             rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1)
         };
@@ -880,7 +894,13 @@ mod tests {
 
     #[test]
     fn changed_runs_cover_an_all_changed_line_once() {
-        let p = parts(&[("x", true), (" ", false), ("=", true), (" ", false), ("1", true)]);
+        let p = parts(&[
+            ("x", true),
+            (" ", false),
+            ("=", true),
+            (" ", false),
+            ("1", true),
+        ]);
         assert_eq!(changed_runs(&p), vec![(0, 5)]);
         assert!(changed_runs(&parts(&[("same", false)])).is_empty());
     }
@@ -934,7 +954,11 @@ mod tests {
         let news = ["new-a"];
         let (old_marks, new_marks) = replace_marks(&olds, &news);
         assert_eq!(old_marks.len(), 3, "one mark row per old line — no padding");
-        assert_eq!(new_marks.len(), 1, "one mark row per new line — no partner invented");
+        assert_eq!(
+            new_marks.len(),
+            1,
+            "one mark row per new line — no partner invented"
+        );
         // Block marks flag tokens absent from the other side; shared "-" / "a" stay unmarked.
         let old_changed: Vec<&str> = old_marks
             .iter()
@@ -1016,12 +1040,21 @@ mod tests {
         let alignment = Alignment {
             ops: vec![
                 AlignmentOp::Equal {
-                    old: LineSpan { start: 1, count: 10 },
-                    new: LineSpan { start: 1, count: 10 },
+                    old: LineSpan {
+                        start: 1,
+                        count: 10,
+                    },
+                    new: LineSpan {
+                        start: 1,
+                        count: 10,
+                    },
                 },
                 AlignmentOp::Insert {
                     after_old: 10,
-                    news: LineSpan { start: 11, count: 1 },
+                    news: LineSpan {
+                        start: 11,
+                        count: 1,
+                    },
                 },
             ],
         };
@@ -1039,7 +1072,10 @@ mod tests {
 
         // Once expanded, nothing hides the line. Landing row: ui::diff::layout tests.
         fold.expand(0);
-        assert_eq!(match_jump_plan(&alignment, &fold, Side::Old, 5).expand, None);
+        assert_eq!(
+            match_jump_plan(&alignment, &fold, Side::Old, 5).expand,
+            None
+        );
     }
 
     #[test]

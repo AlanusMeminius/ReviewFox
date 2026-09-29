@@ -149,151 +149,148 @@ impl Render for SelectableMarkdown {
             .text_color(theme::text())
             .on_key_down(cx.listener(Self::on_key_down))
             .child(
-                div()
-                    .relative()
-                    .w_full()
-                    .child(body)
-                    .child(
-                        canvas(
-                            |_, _, _| (),
-                            move |bounds, _, window, _cx| {
-                                // Layout bounds of scrolled content can extend past the
-                                // clip; hit-test only the visible intersection so a
-                                // splitter drag below the MR card does not start a selection.
-                                let hit_bounds = bounds.intersect(&window.content_mask().bounds);
+                div().relative().w_full().child(body).child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, _cx| {
+                            // Layout bounds of scrolled content can extend past the
+                            // clip; hit-test only the visible intersection so a
+                            // splitter drag below the MR card does not start a selection.
+                            let hit_bounds = bounds.intersect(&window.content_mask().bounds);
 
-                                if selected.start < selected.end
-                                    && let (
-                                        Some((start_pos, start_height)),
-                                        Some((end_pos, end_height)),
-                                    ) = (
-                                        position_for_plain_index(&segments, selected.start),
-                                        position_for_plain_index(&segments, selected.end),
-                                    )
-                                {
-                                    paint_selection_quads(
-                                        window,
-                                        bounds,
-                                        start_pos,
-                                        start_height,
-                                        end_pos,
-                                        end_height,
-                                    );
-                                }
+                            if selected.start < selected.end
+                                && let (
+                                    Some((start_pos, start_height)),
+                                    Some((end_pos, end_height)),
+                                ) = (
+                                    position_for_plain_index(&segments, selected.start),
+                                    position_for_plain_index(&segments, selected.end),
+                                )
+                            {
+                                paint_selection_quads(
+                                    window,
+                                    bounds,
+                                    start_pos,
+                                    start_height,
+                                    end_pos,
+                                    end_height,
+                                );
+                            }
 
-                                let entity_down = entity.clone();
-                                let segments_down = segments.clone();
-                                window.on_mouse_event({
-                                    move |event: &MouseDownEvent, _, window, cx| {
-                                        if event.button != MouseButton::Left {
-                                            return;
-                                        }
-                                        if splitter::is_resizing()
-                                            || !hit_bounds.contains(&event.position)
-                                        {
-                                            entity_down.update(cx, |this, cx| {
-                                                if this.pending || this.selected.start != this.selected.end
-                                                {
-                                                    this.pending = false;
-                                                    this.selected = 0..0;
-                                                    cx.notify();
-                                                }
-                                            });
-                                            return;
-                                        }
-                                        entity_down.update(cx, |this, cx| {
-                                            window.focus(&this.focus_handle);
-                                            let ix = index_for_position(
-                                                &segments_down,
-                                                plain_len,
-                                                event.position,
-                                            );
-                                            if event.click_count >= 3 {
-                                                this.anchor = 0;
-                                                this.selected = 0..this.plain.len();
-                                                this.pending = false;
-                                            } else if event.click_count == 2 {
-                                                this.selected = word_range(&this.plain, ix);
-                                                this.anchor = this.selected.start;
-                                                this.pending = false;
-                                            } else {
-                                                this.anchor = ix;
-                                                this.selected = ix..ix;
-                                                this.pending = true;
-                                            }
-                                            cx.notify();
-                                        });
+                            let entity_down = entity.clone();
+                            let segments_down = segments.clone();
+                            window.on_mouse_event({
+                                move |event: &MouseDownEvent, _, window, cx| {
+                                    if event.button != MouseButton::Left {
+                                        return;
                                     }
-                                });
-
-                                let entity_move = entity.clone();
-                                let segments_move = segments.clone();
-                                window.on_mouse_event(move |event: &MouseMoveEvent, _, _, cx| {
-                                    entity_move.update(cx, |this, cx| {
-                                        if splitter::is_resizing() {
-                                            if this.pending || this.selected.start != this.selected.end
+                                    if splitter::is_resizing()
+                                        || !hit_bounds.contains(&event.position)
+                                    {
+                                        entity_down.update(cx, |this, cx| {
+                                            if this.pending
+                                                || this.selected.start != this.selected.end
                                             {
                                                 this.pending = false;
                                                 this.selected = 0..0;
                                                 cx.notify();
                                             }
-                                            return;
-                                        }
-                                        if !this.pending || !event.dragging() {
-                                            return;
-                                        }
+                                        });
+                                        return;
+                                    }
+                                    entity_down.update(cx, |this, cx| {
+                                        window.focus(&this.focus_handle);
                                         let ix = index_for_position(
-                                            &segments_move,
+                                            &segments_down,
                                             plain_len,
                                             event.position,
                                         );
-                                        this.select_to(ix);
+                                        if event.click_count >= 3 {
+                                            this.anchor = 0;
+                                            this.selected = 0..this.plain.len();
+                                            this.pending = false;
+                                        } else if event.click_count == 2 {
+                                            this.selected = word_range(&this.plain, ix);
+                                            this.anchor = this.selected.start;
+                                            this.pending = false;
+                                        } else {
+                                            this.anchor = ix;
+                                            this.selected = ix..ix;
+                                            this.pending = true;
+                                        }
                                         cx.notify();
                                     });
-                                });
+                                }
+                            });
 
-                                let entity_up = entity;
-                                let segments_up = segments;
-                                let links_up = links;
-                                window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
-                                    if event.button != MouseButton::Left {
+                            let entity_move = entity.clone();
+                            let segments_move = segments.clone();
+                            window.on_mouse_event(move |event: &MouseMoveEvent, _, _, cx| {
+                                entity_move.update(cx, |this, cx| {
+                                    if splitter::is_resizing() {
+                                        if this.pending || this.selected.start != this.selected.end
+                                        {
+                                            this.pending = false;
+                                            this.selected = 0..0;
+                                            cx.notify();
+                                        }
                                         return;
                                     }
-                                    entity_up.update(cx, |this, cx| {
-                                        let was_pending = this.pending;
-                                        if this.pending {
-                                            this.pending = false;
-                                        }
-                                        // Splitter may clear `is_resizing` before this
-                                        // handler; never treat a release outside the
-                                        // clipped markdown as a link click.
-                                        if !hit_bounds.contains(&event.position) {
-                                            cx.notify();
-                                            return;
-                                        }
-                                        let ix = index_for_position(
-                                            &segments_up,
-                                            this.plain.len(),
-                                            event.position,
-                                        );
-                                        if was_pending
-                                            && this.selected.start == this.selected.end
-                                            && let Some(url) = links_up
-                                                .iter()
-                                                .find(|link| link.range.contains(&ix))
-                                                .map(|link| link.url.clone())
-                                        {
-                                            cx.open_url(&url);
-                                        }
-                                        cx.notify();
-                                    });
+                                    if !this.pending || !event.dragging() {
+                                        return;
+                                    }
+                                    let ix = index_for_position(
+                                        &segments_move,
+                                        plain_len,
+                                        event.position,
+                                    );
+                                    this.select_to(ix);
+                                    cx.notify();
                                 });
-                            },
-                        )
-                        .absolute()
-                        .size_full()
-                        .inset_0(),
-                    ),
+                            });
+
+                            let entity_up = entity;
+                            let segments_up = segments;
+                            let links_up = links;
+                            window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                                if event.button != MouseButton::Left {
+                                    return;
+                                }
+                                entity_up.update(cx, |this, cx| {
+                                    let was_pending = this.pending;
+                                    if this.pending {
+                                        this.pending = false;
+                                    }
+                                    // Splitter may clear `is_resizing` before this
+                                    // handler; never treat a release outside the
+                                    // clipped markdown as a link click.
+                                    if !hit_bounds.contains(&event.position) {
+                                        cx.notify();
+                                        return;
+                                    }
+                                    let ix = index_for_position(
+                                        &segments_up,
+                                        this.plain.len(),
+                                        event.position,
+                                    );
+                                    if was_pending
+                                        && this.selected.start == this.selected.end
+                                        && let Some(url) = links_up
+                                            .iter()
+                                            .find(|link| link.range.contains(&ix))
+                                            .map(|link| link.url.clone())
+                                    {
+                                        cx.open_url(&url);
+                                    }
+                                    cx.notify();
+                                });
+                            });
+                        },
+                    )
+                    .absolute()
+                    .size_full()
+                    .inset_0(),
+                ),
             )
     }
 }
@@ -320,10 +317,7 @@ fn paint_selection_quads(
         return;
     }
     window.paint_quad(gpui::PaintQuad {
-        bounds: Bounds::from_corners(
-            start_pos,
-            point(bounds.right(), start_pos.y + start_height),
-        ),
+        bounds: Bounds::from_corners(start_pos, point(bounds.right(), start_pos.y + start_height)),
         corner_radii: Default::default(),
         background: color.into(),
         border_widths: Default::default(),

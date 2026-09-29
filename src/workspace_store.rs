@@ -327,11 +327,7 @@ mod tests {
     fn remember_with_mr_sets_and_clears_label() {
         let mut store = WorkspaceStore::default();
         remember_in(&mut store, PathBuf::from("/a"), "main".into());
-        set_mr_in(
-            &mut store,
-            Path::new("/a"),
-            Some(label("acme/app", 42)),
-        );
+        set_mr_in(&mut store, Path::new("/a"), Some(label("acme/app", 42)));
         assert_eq!(store.workspaces[0].mr.as_ref().unwrap().iid, 42);
         set_mr_in(&mut store, Path::new("/a"), None);
         assert!(store.workspaces[0].mr.is_none());
@@ -372,7 +368,10 @@ mod tests {
         remember_in(&mut store, PathBuf::from("/a"), "main".into());
         set_mr_in(&mut store, Path::new("/a"), Some(label("acme/app", 42)));
         demote_selected_mr_to_memory_in(&mut store, Path::new("/a"));
-        assert!(store.workspaces[0].mr.is_none(), "open defaults to Branch Browser");
+        assert!(
+            store.workspaces[0].mr.is_none(),
+            "open defaults to Branch Browser"
+        );
         assert_eq!(store.workspaces[0].last_mr, Some(label("acme/app", 42)));
     }
 
@@ -434,7 +433,10 @@ mod tests {
         assert!(json.contains("\"last_mr\""));
         let loaded: WorkspaceStore = serde_json::from_str(&json).unwrap();
         let e = last_entry(&loaded).unwrap();
-        assert!(e.mr.is_none(), "Branch selected: last_mr must not drive Comparison");
+        assert!(
+            e.mr.is_none(),
+            "Branch selected: last_mr must not drive Comparison"
+        );
         assert_eq!(e.last_mr, Some(label("acme/app", 42)));
     }
 

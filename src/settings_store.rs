@@ -16,23 +16,51 @@ const KEYRING_ACCOUNT: &str = "gitlab_pat";
 /// hand edit cannot wipe the others on the next save.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SettingsFile {
-    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub gitlab_base_url: Option<String>,
     /// Stored as written; resolution (installed check, clamping) is
     /// `ui::appearance`'s job, so an uninstalled family survives a save.
-    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ui_font_family: Option<String>,
-    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ui_font_size: Option<f32>,
-    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub code_font_family: Option<String>,
-    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub code_font_size: Option<f32>,
     /// Dual-pane horizontal scroll coupling (§3.1.2). Default on when unset.
-    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub sync_horizontal_scroll: Option<bool>,
     /// Soft wrap in the diff panes (§3.1.1). Default off when unset.
-    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub soft_wrap: Option<bool>,
 }
 
@@ -146,6 +174,7 @@ pub fn clear_pat() -> Result<(), keyring::Error> {
     result
 }
 
+#[cfg(test)]
 pub fn store_path_for_tests(root: &std::path::Path) -> PathBuf {
     root.join("ReviewFox").join(FILENAME)
 }
@@ -243,14 +272,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = store_path_for_tests(dir.path());
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, r#"{ "gitlab_base_url": "https://gitlab.example.com" }"#).unwrap();
+        fs::write(
+            &path,
+            r#"{ "gitlab_base_url": "https://gitlab.example.com" }"#,
+        )
+        .unwrap();
         let loaded = load_file_at(&path);
         assert_eq!(loaded.ui_font_family, None);
         assert_eq!(loaded.code_font_size, None);
 
         save_file_at(&path, &loaded).unwrap();
         let json = fs::read_to_string(&path).unwrap();
-        assert!(!json.contains("font"), "unset font fields must not be written: {json}");
+        assert!(
+            !json.contains("font"),
+            "unset font fields must not be written: {json}"
+        );
         fs::remove_dir_all(dir.path()).ok();
     }
 
