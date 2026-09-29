@@ -1,15 +1,18 @@
 use gpui::{
     AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, StyleRefinement, Styled, Subscription, WeakEntity, Window,
-    WindowControlArea, actions, canvas, div, prelude::*, px, rgb,
+    StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Task, Timer, WeakEntity,
+    Window, WindowControlArea, actions, canvas, div, prelude::*, px, rgb,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::domain::{
-    Anchor, ChangedPath, Comparison, DiffFontSize, PathStatus, Review, SearchMatch, SearchScope,
-    Side, ViewOptions, next_match_index, prev_match_index, search_file,
+    Anchor, ChangedPath, Comparison, DiffFontSize, PathStatus, Review, SearchFileText, SearchFiles,
+    SearchMatch, SearchSide, Side, ViewOptions, next_match_index, next_search_side,
+    prev_match_index, search_file, search_files, toggle_search_files,
 };
 
 use super::appearance::{self, UiTextSize};
@@ -100,11 +103,18 @@ pub struct DiffView {
     soft_wrap: bool,
     /// In-file search query; empty = no hits. Mirrored from [`Self::search_field`].
     search_query: String,
-    search_scope: SearchScope,
+    /// Side factor: Old / New / Both. Default on open: New.
+    search_side: SearchSide,
+    /// Files factor: current file or all changed paths. Default on open: File.
+    search_files: SearchFiles,
     /// When true, the floating find bar is open and the field should hold focus.
     searching: bool,
-    /// 0-based index into [`Self::current_matches`]; `None` until first jump.
+    /// 0-based index into [`Self::current_matches`]; set when hits exist.
     search_match_index: Option<usize>,
+    /// Pending query recompute (~150ms). Cancelled by Enter / prev / next / factor change.
+    search_debounce: Option<Task<()>>,
+    /// Cached old/new texts for All-files find, in tree order.
+    all_search_texts: Option<Vec<(String, Arc<str>, Arc<str>)>>,
     /// Real IME-capable input (same control as Settings); drives `search_query`.
     search_field: Entity<TextField>,
     _search_subscriptions: Vec<Subscription>,
@@ -157,16 +167,7 @@ impl DiffView {
                 }
                 this.search_query = q;
                 this.search_match_index = None;
-                // IME calls set_marked_text from nounwind ObjC. Syncing the pane /
-                // re-rendering the overlay inside that stack aborts on panic — defer.
-                let view = cx.entity().downgrade();
-                cx.defer(move |cx| {
-                    view.update(cx, |this, cx| {
-                        this.sync_search_to_pane(cx);
-                        cx.notify();
-                    })
-                    .ok();
-                });
+                this.schedule_search_recompute(cx);
             }),
             cx.subscribe(&search_field, |this, _, event: &TextFieldEvent, cx| match event {
                 TextFieldEvent::Confirm => this.jump_search(1, cx),
@@ -198,9 +199,12 @@ impl DiffView {
             ),
             soft_wrap: crate::settings_store::soft_wrap(&crate::settings_store::load_file()),
             search_query: String::new(),
-            search_scope: SearchScope::Both,
+            search_side: SearchSide::New,
+            search_files: SearchFiles::File,
             searching: false,
             search_match_index: None,
+            search_debounce: None,
+            all_search_texts: None,
             search_field,
             _search_subscriptions: search_subscriptions,
             bounds_sub: None,
@@ -303,7 +307,117 @@ impl DiffView {
 
     fn sync_search_to_pane(&mut self, cx: &mut Context<Self>) {
         let q = SharedString::from(self.search_query.clone());
-        self.with_pane(cx, |pane, cx| pane.set_search_query(q, cx));
+        let side = self.search_side;
+        let active = self.active_search_hit();
+        self.with_pane(cx, |pane, cx| {
+            pane.set_search_query(q, cx);
+            pane.set_search_side(side, cx);
+            pane.set_active_search_match(active, cx);
+        });
+    }
+
+    fn active_search_hit(&self) -> Option<pane::ActiveSearchMatch> {
+        let matches = self.current_matches();
+        let i = self.search_match_index.filter(|&i| i < matches.len())?;
+        let m = &matches[i];
+        // Only paint active identity when the hit is on the selected path.
+        let selected = self.snapshot.as_ref().map(|s| s.selected_path.as_str());
+        if let Some(path) = m.path.as_deref() {
+            if selected != Some(path) {
+                return None;
+            }
+        }
+        Some(pane::ActiveSearchMatch {
+            side: m.side,
+            ln: m.ln,
+            bytes: m.bytes.clone(),
+        })
+    }
+
+    fn cancel_search_debounce(&mut self) {
+        self.search_debounce = None;
+    }
+
+    /// Debounced recompute after query edits (~150ms).
+    fn schedule_search_recompute(&mut self, cx: &mut Context<Self>) {
+        self.cancel_search_debounce();
+        // Highlight follows the query immediately; select/land waits for debounce.
+        let view = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            view.update(cx, |this, cx| {
+                this.sync_search_to_pane(cx);
+                cx.notify();
+            })
+            .ok();
+        });
+        self.search_debounce = Some(cx.spawn(async move |this, cx| {
+            Timer::after(Duration::from_millis(150)).await;
+            this.update(cx, |this, cx| {
+                this.search_debounce = None;
+                this.apply_search_hits(true, cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// Recompute matches; when `land_first` and any hits, select first and center-scroll.
+    fn apply_search_hits(&mut self, land_first: bool, cx: &mut Context<Self>) {
+        if self.search_files == SearchFiles::All {
+            self.ensure_all_search_texts();
+        }
+        let matches = self.current_matches();
+        if matches.is_empty() {
+            self.search_match_index = None;
+            self.sync_search_to_pane(cx);
+            cx.notify();
+            return;
+        }
+        if land_first || self.search_match_index.is_none() {
+            self.search_match_index = Some(0);
+            let m = matches[0].clone();
+            self.jump_to_search_match(m, cx);
+        } else if let Some(i) = self.search_match_index {
+            if i >= matches.len() {
+                self.search_match_index = Some(0);
+                let m = matches[0].clone();
+                self.jump_to_search_match(m, cx);
+            } else {
+                self.sync_search_to_pane(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn ensure_all_search_texts(&mut self) {
+        if self.all_search_texts.is_some() {
+            return;
+        }
+        let Some(snap) = &self.snapshot else {
+            self.all_search_texts = Some(Vec::new());
+            return;
+        };
+        let opts = self.view_options.clone();
+        let order = file_tree::file_order(&snap.changed_paths);
+        let mut out = Vec::with_capacity(order.len());
+        for path in order {
+            let status = snap
+                .changed_paths
+                .iter()
+                .find(|p| p.path == path)
+                .map(|p| p.status)
+                .unwrap_or(PathStatus::Modify);
+            if let FileDiff::Text {
+                old_text, new_text, ..
+            } = git::file_diff(&snap.comparison, &path, status, &opts)
+            {
+                out.push((path, old_text, new_text));
+            }
+        }
+        self.all_search_texts = Some(out);
+    }
+
+    fn invalidate_all_search_texts(&mut self) {
+        self.all_search_texts = None;
     }
 
     fn jump_hunk(&mut self, dir: i32, cx: &mut Context<Self>) {
@@ -341,14 +455,39 @@ impl DiffView {
         }
     }
 
-    fn jump_match(&mut self, side: Side, ln: u32, cx: &mut Context<Self>) {
-        self.with_pane(cx, |pane, cx| pane.jump_match(side, ln, cx));
+    fn jump_to_search_match(&mut self, m: SearchMatch, cx: &mut Context<Self>) {
+        if let Some(path) = m.path.clone() {
+            let needs = self
+                .snapshot
+                .as_ref()
+                .is_none_or(|s| s.selected_path != path);
+            if needs {
+                self.select_path(path, cx);
+            }
+        }
+        let byte = m.bytes.start;
+        let side = m.side;
+        let ln = m.ln;
+        let active = pane::ActiveSearchMatch {
+            side,
+            ln,
+            bytes: m.bytes.clone(),
+        };
+        let q = SharedString::from(self.search_query.clone());
+        let search_side = self.search_side;
+        self.with_pane(cx, |pane, cx| {
+            pane.set_search_query(q, cx);
+            pane.set_search_side(search_side, cx);
+            pane.set_active_search_match(Some(active), cx);
+            pane.jump_match(side, ln, Some(byte), cx);
+        });
     }
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.searching = false;
         self.search_query.clear();
         self.search_match_index = None;
+        self.cancel_search_debounce();
         self.search_field
             .update(cx, |field, cx| field.set_content("", cx));
         self.sync_search_to_pane(cx);
@@ -358,15 +497,29 @@ impl DiffView {
 
     fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.searching = true;
+        self.search_side = SearchSide::New;
+        self.search_files = SearchFiles::File;
         self.set_drafting(None, cx);
         let handle = self.search_field.read(cx).focus_handle(cx);
         window.focus(&handle);
+        self.sync_search_to_pane(cx);
         cx.notify();
     }
 
     /// `dir > 0` next, `dir < 0` prev; wraps. Lands and updates `search_match_index`.
     fn jump_search(&mut self, dir: i32, cx: &mut Context<Self>) {
+        self.cancel_search_debounce();
+        if self.search_files == SearchFiles::All {
+            self.ensure_all_search_texts();
+        }
         let matches = self.current_matches();
+        // Stale index after a mid-debounce query change — treat as no selection.
+        if self
+            .search_match_index
+            .is_some_and(|i| i >= matches.len())
+        {
+            self.search_match_index = None;
+        }
         let next = if dir < 0 {
             prev_match_index(matches.len(), self.search_match_index)
         } else {
@@ -374,34 +527,79 @@ impl DiffView {
         };
         let Some(i) = next else {
             self.search_match_index = None;
+            self.sync_search_to_pane(cx);
             cx.notify();
             return;
         };
         self.search_match_index = Some(i);
-        if let Some(m) = matches.get(i).copied() {
-            self.jump_match(m.side, m.ln, cx);
+        if let Some(m) = matches.get(i).cloned() {
+            self.jump_to_search_match(m, cx);
         }
         cx.notify();
     }
 
-    fn cycle_search_scope(&mut self, cx: &mut Context<Self>) {
-        self.search_scope = match self.search_scope {
-            SearchScope::Both => SearchScope::Old,
-            SearchScope::Old => SearchScope::New,
-            SearchScope::New => SearchScope::Both,
-        };
-        self.search_match_index = None;
-        cx.notify();
+    fn cycle_search_side(&mut self, cx: &mut Context<Self>) {
+        self.cancel_search_debounce();
+        self.search_side = next_search_side(self.search_side);
+        self.apply_search_hits(true, cx);
+    }
+
+    fn toggle_search_files_factor(&mut self, cx: &mut Context<Self>) {
+        self.cancel_search_debounce();
+        self.search_files = toggle_search_files(self.search_files);
+        if self.search_files == SearchFiles::All {
+            self.ensure_all_search_texts();
+        }
+        self.apply_search_hits(true, cx);
+    }
+
+    fn set_search_side(&mut self, side: SearchSide, cx: &mut Context<Self>) {
+        if self.search_side == side {
+            return;
+        }
+        self.cancel_search_debounce();
+        self.search_side = side;
+        self.apply_search_hits(true, cx);
+    }
+
+    fn set_search_files_factor(&mut self, files: SearchFiles, cx: &mut Context<Self>) {
+        if self.search_files == files {
+            return;
+        }
+        self.cancel_search_debounce();
+        self.search_files = files;
+        if self.search_files == SearchFiles::All {
+            self.ensure_all_search_texts();
+        }
+        self.apply_search_hits(true, cx);
     }
 
     fn current_matches(&self) -> Vec<SearchMatch> {
-        let Some(FileDiff::Text {
-            old_text, new_text, ..
-        }) = self.snapshot.as_ref().map(|s| &s.file)
-        else {
-            return Vec::new();
-        };
-        search_file(old_text, new_text, &self.search_query, self.search_scope)
+        match self.search_files {
+            SearchFiles::File => {
+                let Some(FileDiff::Text {
+                    old_text, new_text, ..
+                }) = self.snapshot.as_ref().map(|s| &s.file)
+                else {
+                    return Vec::new();
+                };
+                search_file(old_text, new_text, &self.search_query, self.search_side)
+            }
+            SearchFiles::All => {
+                let Some(files) = &self.all_search_texts else {
+                    return Vec::new();
+                };
+                let inputs: Vec<SearchFileText<'_>> = files
+                    .iter()
+                    .map(|(path, old, new)| SearchFileText {
+                        path: path.as_str(),
+                        old_text: old.as_ref(),
+                        new_text: new.as_ref(),
+                    })
+                    .collect();
+                search_files(&inputs, &self.search_query, self.search_side)
+            }
+        }
     }
 
     fn tree_resize_handler(&self, cx: &Context<Self>) -> splitter::ResizeHandler {
@@ -446,6 +644,7 @@ impl DiffView {
                 self.snapshot = Some(incoming);
             }
         }
+        self.invalidate_all_search_texts();
         self.recompute_alignment();
         self.open_in_pane(cx);
     }
@@ -542,10 +741,11 @@ impl DiffView {
             }
         }
         if self.searching {
-            // Typing goes through TextField (IME). Tab / Shift+Enter stay here.
+            // Typing goes through TextField (IME). Tab / Shift-Tab / Shift+Enter stay here.
             match event.keystroke.key.as_str() {
                 "enter" if mods.shift => self.jump_search(-1, cx),
-                "tab" => self.cycle_search_scope(cx),
+                "tab" if mods.shift => self.toggle_search_files_factor(cx),
+                "tab" => self.cycle_search_side(cx),
                 _ => {}
             }
             return;
@@ -1158,9 +1358,11 @@ fn render_search_bar(
         .read(cx)
         .focus_handle(cx)
         .is_focused(window);
+    let side = view.search_side;
+    let files = view.search_files;
 
     // Fills the measured OverlaySlot (window-root, after DualPane) so shadow
-    // falls on the code. Controls: input | Find | n/N | prev | next | close.
+    // falls on the code. Controls: input | Side | Files | Find | n/N | prev | next | close.
     div()
         .size_full()
         .flex()
@@ -1186,6 +1388,8 @@ fn render_search_bar(
                 })
                 .child(view.search_field.clone()),
         )
+        .child(render_side_segment(side, cx))
+        .child(render_files_segment(files, cx))
         .child(
             IconButton::new("search-run", "search.svg", "Find")
                 .shortcut("Enter")
@@ -1221,6 +1425,127 @@ fn render_search_bar(
                 .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx))),
         )
         .into_any_element()
+}
+
+fn render_side_segment(side: SearchSide, cx: &mut Context<DiffView>) -> impl IntoElement {
+    div()
+        .id("search-side")
+        .flex_none()
+        .h(px(theme::FIND_FIELD_HEIGHT))
+        .flex()
+        .items_center()
+        .gap(px(2.))
+        .px(px(2.))
+        .rounded(px(theme::FIND_FIELD_RADIUS))
+        .bg(theme::hover())
+        .child(side_seg_btn("search-side-old", "Old", side == SearchSide::Old, SearchSide::Old, cx))
+        .child(side_seg_btn("search-side-new", "New", side == SearchSide::New, SearchSide::New, cx))
+        .child(side_seg_btn(
+            "search-side-both",
+            "Both",
+            side == SearchSide::Both,
+            SearchSide::Both,
+            cx,
+        ))
+}
+
+fn side_seg_btn(
+    id: &'static str,
+    label: &'static str,
+    selected: bool,
+    value: SearchSide,
+    cx: &mut Context<DiffView>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .h(px(theme::FIND_FIELD_HEIGHT - 4.))
+        .px(px(6.))
+        .rounded(px(theme::FIND_FIELD_RADIUS - 2.))
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .when(selected, |d| d.bg(theme::capsule()))
+        .when(!selected, |d| d.hover(|d| d.bg(theme::capsule_track_hover())))
+        .on_click(cx.listener(move |this, _, _, cx| this.set_search_side(value, cx)))
+        .child(
+            div()
+                .ui_label_size(11., cx)
+                .font_weight(if selected {
+                    gpui::FontWeight::MEDIUM
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
+                .text_color(if selected {
+                    theme::text()
+                } else {
+                    theme::muted()
+                })
+                .child(label),
+        )
+}
+
+fn render_files_segment(files: SearchFiles, cx: &mut Context<DiffView>) -> impl IntoElement {
+    div()
+        .id("search-files")
+        .flex_none()
+        .h(px(theme::FIND_FIELD_HEIGHT))
+        .flex()
+        .items_center()
+        .gap(px(2.))
+        .px(px(2.))
+        .rounded(px(theme::FIND_FIELD_RADIUS))
+        .bg(theme::hover())
+        .child(files_seg_btn(
+            "search-files-file",
+            "File",
+            files == SearchFiles::File,
+            SearchFiles::File,
+            cx,
+        ))
+        .child(files_seg_btn(
+            "search-files-all",
+            "All",
+            files == SearchFiles::All,
+            SearchFiles::All,
+            cx,
+        ))
+}
+
+fn files_seg_btn(
+    id: &'static str,
+    label: &'static str,
+    selected: bool,
+    value: SearchFiles,
+    cx: &mut Context<DiffView>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .h(px(theme::FIND_FIELD_HEIGHT - 4.))
+        .px(px(6.))
+        .rounded(px(theme::FIND_FIELD_RADIUS - 2.))
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .when(selected, |d| d.bg(theme::capsule()))
+        .when(!selected, |d| d.hover(|d| d.bg(theme::capsule_track_hover())))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.set_search_files_factor(value, cx);
+        }))
+        .child(
+            div()
+                .ui_label_size(11., cx)
+                .font_weight(if selected {
+                    gpui::FontWeight::MEDIUM
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
+                .text_color(if selected {
+                    theme::text()
+                } else {
+                    theme::muted()
+                })
+                .child(label),
+        )
 }
 
 /// The pane's place in the shell. The pane itself is mounted over it by

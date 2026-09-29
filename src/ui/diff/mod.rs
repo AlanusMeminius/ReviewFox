@@ -10,6 +10,7 @@ mod visual_wrap;
 mod wrap;
 pub mod viewport;
 
+pub use pane::ActiveSearchMatch;
 
 #[cfg(test)]
 mod perf;

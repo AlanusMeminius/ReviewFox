@@ -41,13 +41,32 @@ pub(super) const TEXT_PAD: f32 = 12.;
 pub(super) const COMMENT_BAR: f32 = 2.;
 const SEAM_H: f32 = 2.;
 const DRAFTING_BG: u32 = 0xdbe4ff;
-const SEARCH_HIT_BG: u32 = 0xfff59d;
+/// Non-current search hit (`--hit` in find-capsule prototype).
+const SEARCH_HIT_BG: u32 = 0xffe08a;
+/// Current search hit (`--hit-cur`).
+const SEARCH_HIT_CUR_BG: u32 = 0xffc53d;
+/// Outline on the current hit (`box-shadow: 0 0 0 1px #e6a800`).
+const SEARCH_HIT_CUR_RING: u32 = 0xe6a800;
+
+/// Current Diff find occurrence for paint (side + line + byte range).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveSearchMatch {
+    pub side: Side,
+    pub ln: u32,
+    pub bytes: std::ops::Range<usize>,
+}
 
 /// State that changes without touching Layout or the shaped-line cache.
 pub(super) struct Decorations {
     pub drafting: Option<(Side, u32)>,
     /// Case-insensitive query for in-file search highlights on visible rows.
     pub search_query: Option<Arc<str>>,
+    /// Side factor: only highlight occurrences on these sides.
+    pub search_side: crate::domain::SearchSide,
+    /// Active occurrence (darker fill + ring); identity must match byte range.
+    pub active_match: Option<ActiveSearchMatch>,
+    /// Pulse strength 1→0 over ~250ms after land; `None` = settled.
+    pub search_pulse: Option<f32>,
 }
 
 /// Shaped text and line number per `(side, visual row)`. Cleared on Layout
@@ -235,8 +254,8 @@ struct RowPaint {
     text_leading: f32,
     /// Word-mark runs, x relative to the text origin; one rect per run.
     marks: Vec<(f32, f32)>,
-    /// Search-hit runs, x relative to the text origin.
-    search: Vec<(f32, f32)>,
+    /// Search-hit runs, x relative to the text origin; `true` = current hit.
+    search: Vec<(f32, f32, bool)>,
     label: Option<ShapedLine>,
     show_label: bool,
 }
@@ -279,6 +298,8 @@ struct WinBridge {
 pub struct Frame {
     geom: Geom,
     row_h: f32,
+    /// Pulse strength for the current search hit (1→0); None = settled.
+    search_pulse: Option<f32>,
     pub(super) hitbox: Hitbox,
     pub(super) code: [Hitbox; 2],
     pub(super) tracks: [Option<Hitbox>; 2],
@@ -324,6 +345,7 @@ pub(super) fn build_frame(
         decorations,
         bars,
     } = input;
+    let search_pulse = decorations.search_pulse;
     let t_build = trace::start();
     let mut stats = FrameStats::default();
     let top = geom.top();
@@ -341,7 +363,14 @@ pub(super) fn build_frame(
             .drafting
             .and_then(|(s, ln)| (s == side).then_some(ln));
         let search_query = decorations.search_query.as_deref();
+        let search_side = decorations.search_side;
+        let active_match = decorations.active_match.as_ref();
         let side_spans = highlights[side_ix(side)].as_deref();
+        let side_ok = match search_side {
+            crate::domain::SearchSide::Old => side == Side::Old,
+            crate::domain::SearchSide::New => side == Side::New,
+            crate::domain::SearchSide::Both => true,
+        };
         let mut out = Vec::with_capacity(visible.len());
         let mut widest = 0f32;
         for i in visible {
@@ -378,28 +407,36 @@ pub(super) fn build_frame(
                             _ => Vec::new(),
                         };
                         let pad = l.is_equal_padding();
-                        let search = if pad {
+                        let search = if pad || !side_ok {
                             Vec::new()
                         } else {
                             shape
                                 .text
                                 .as_ref()
                                 .zip(shape.tabs.as_ref())
-                                .map(|(text, tabs)| {
+                                .zip(search_query)
+                                .map(|((text, tabs), q)| {
                                     let line_text = layout.side(side).text(l);
-                                    let ranges: Vec<_> = search_query
-                                        .map(|q| {
-                                            crate::domain::match_byte_ranges(line_text, q)
-                                                .into_iter()
-                                                .map(|r| (r.start, r.end))
-                                                .collect::<Vec<_>>()
-                                        })
-                                        .unwrap_or_default();
                                     let (seg, _) =
                                         wrap_segment(layout, side, l, tabs, layout.side(side));
-                                    let clipped =
-                                        clip_runs_to_display_segment(&ranges, tabs, seg);
-                                    run_spans(&clipped, text)
+                                    let mut hits = Vec::new();
+                                    for r in crate::domain::match_byte_ranges(line_text, q) {
+                                        let is_cur = active_match.is_some_and(|m| {
+                                            m.side == side
+                                                && m.ln == l.ln
+                                                && m.bytes.start == r.start
+                                                && m.bytes.end == r.end
+                                        });
+                                        let clipped = clip_runs_to_display_segment(
+                                            &[(r.start, r.end)],
+                                            tabs,
+                                            seg.clone(),
+                                        );
+                                        for (a, b) in run_spans(&clipped, text) {
+                                            hits.push((a, b, is_cur));
+                                        }
+                                    }
+                                    hits
                                 })
                                 .unwrap_or_default()
                         };
@@ -507,6 +544,7 @@ pub(super) fn build_frame(
     Frame {
         geom,
         row_h,
+        search_pulse,
         hitbox,
         code,
         tracks: [None, None],
@@ -845,14 +883,28 @@ impl Frame {
                 if row.commented {
                     text_x += COMMENT_BAR;
                 }
-                for &(a, b) in &row.search {
-                    let rect = hline(
-                        text_x + a,
-                        text_x + b,
-                        row.y0 + (self.row_h - mark_h) / 2.,
-                        mark_h,
-                    );
-                    window.paint_quad(fill(rect, rgb(SEARCH_HIT_BG)).corner_radii(px(2.)));
+                for &(a, b, is_cur) in &row.search {
+                    let y = row.y0 + (self.row_h - mark_h) / 2.;
+                    let rect = hline(text_x + a, text_x + b, y, mark_h);
+                    if is_cur {
+                        // Pulse: briefly enlarge ring, then settle on hit-cur + 1px ring.
+                        let pulse = self.search_pulse.unwrap_or(0.);
+                        let ring = 1. + pulse * 2.;
+                        let ring_rect = hline(
+                            text_x + a - ring,
+                            text_x + b + ring,
+                            y - ring,
+                            mark_h + ring * 2.,
+                        );
+                        window.paint_quad(
+                            fill(ring_rect, rgb(SEARCH_HIT_CUR_RING)).corner_radii(px(2. + ring)),
+                        );
+                        window.paint_quad(
+                            fill(rect, rgb(SEARCH_HIT_CUR_BG)).corner_radii(px(2.)),
+                        );
+                    } else {
+                        window.paint_quad(fill(rect, rgb(SEARCH_HIT_BG)).corner_radii(px(2.)));
+                    }
                 }
                 for &(a, b) in &row.marks {
                     let rect = hline(

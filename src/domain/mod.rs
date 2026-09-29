@@ -255,19 +255,29 @@ impl FoldState {
     }
 }
 
-/// Which side(s) in-file search inspects (§3.5).
+/// Which side(s) Diff find inspects (§3.5). Orthogonal to [`SearchFiles`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SearchScope {
+pub enum SearchSide {
     Old,
     New,
     Both,
 }
 
-/// One hit from [`search_file`]: side + 1-based line.
+/// Whether Diff find covers the current file only or every changed path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchFiles {
+    File,
+    All,
+}
+
+/// One occurrence hit: side, 1-based line, byte range on that line.
+/// `path` is set when the hit comes from [`search_files`] (All-files).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchMatch {
     pub side: Side,
     pub ln: u32,
+    pub bytes: std::ops::Range<usize>,
+    pub path: Option<String>,
 }
 
 /// Byte offset of the first case-insensitive match of `query` in `line`, if any.
@@ -355,33 +365,73 @@ pub fn prev_match_index(len: usize, current: Option<usize>) -> Option<usize> {
     }
 }
 
-/// Case-insensitive substring search over old and/or new text.
-/// Empty / whitespace-only query yields no matches.
+/// One path's old/new text for [`search_files`] (tree order).
+#[derive(Clone, Copy, Debug)]
+pub struct SearchFileText<'a> {
+    pub path: &'a str,
+    pub old_text: &'a str,
+    pub new_text: &'a str,
+}
+
+/// Case-insensitive occurrence search over one file's old and/or new text.
+/// Empty / whitespace-only query yields no matches. Order: Side (Old before
+/// New when Both) → line number → byte start.
 pub fn search_file(
     old_text: &str,
     new_text: &str,
     query: &str,
-    scope: SearchScope,
+    side: SearchSide,
 ) -> Vec<SearchMatch> {
-    let q = query.trim().to_lowercase();
-    if q.is_empty() {
+    search_file_inner(old_text, new_text, query, side, None)
+}
+
+/// Occurrence search over many files in the given order. Each hit carries
+/// `path`. Within a file, same order as [`search_file`].
+pub fn search_files(
+    files: &[SearchFileText<'_>],
+    query: &str,
+    side: SearchSide,
+) -> Vec<SearchMatch> {
+    let mut out = Vec::new();
+    for f in files {
+        out.extend(search_file_inner(
+            f.old_text,
+            f.new_text,
+            query,
+            side,
+            Some(f.path.to_string()),
+        ));
+    }
+    out
+}
+
+fn search_file_inner(
+    old_text: &str,
+    new_text: &str,
+    query: &str,
+    side: SearchSide,
+    path: Option<String>,
+) -> Vec<SearchMatch> {
+    if query.trim().is_empty() {
         return Vec::new();
     }
     let mut out = Vec::new();
-    let take = |side: Side, text: &str, out: &mut Vec<SearchMatch>| {
+    let take = |s: Side, text: &str, out: &mut Vec<SearchMatch>| {
         for (i, line) in split_lines(text).into_iter().enumerate() {
-            if line.to_lowercase().contains(&q) {
+            for bytes in match_byte_ranges(line, query) {
                 out.push(SearchMatch {
-                    side,
+                    side: s,
                     ln: (i + 1) as u32,
+                    bytes,
+                    path: path.clone(),
                 });
             }
         }
     };
-    match scope {
-        SearchScope::Old => take(Side::Old, old_text, &mut out),
-        SearchScope::New => take(Side::New, new_text, &mut out),
-        SearchScope::Both => {
+    match side {
+        SearchSide::Old => take(Side::Old, old_text, &mut out),
+        SearchSide::New => take(Side::New, new_text, &mut out),
+        SearchSide::Both => {
             take(Side::Old, old_text, &mut out);
             take(Side::New, new_text, &mut out);
         }
@@ -389,9 +439,27 @@ pub fn search_file(
     out
 }
 
+/// Next Side in Tab cycle: Old → New → Both → Old.
+pub fn next_search_side(side: SearchSide) -> SearchSide {
+    match side {
+        SearchSide::Old => SearchSide::New,
+        SearchSide::New => SearchSide::Both,
+        SearchSide::Both => SearchSide::Old,
+    }
+}
+
+/// Toggle Files factor: File ↔ All.
+pub fn toggle_search_files(files: SearchFiles) -> SearchFiles {
+    match files {
+        SearchFiles::File => SearchFiles::All,
+        SearchFiles::All => SearchFiles::File,
+    }
+}
+
 /// Expand-then-land plan for jumping to a search match (§3.5).
 /// If the line lies in a collapsed Equal span, `expand` is that op index;
-/// after expanding both sides, land on `target` using post-expansion rows.
+/// after expanding both sides, land on `target`. The Diff viewport chooses
+/// scroll fraction (search → center; hunk → §3.1 one-third anchor).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MatchJumpPlan {
     pub expand: Option<usize>,
@@ -399,7 +467,7 @@ pub struct MatchJumpPlan {
 }
 
 /// Plan a search-match jump: expand the collapsed Equal that hides `ln` (if any),
-/// then land on that line — same landing rule as a Hunk jump.
+/// then land on that line. Scroll fraction is chosen by the Diff viewport.
 pub fn match_jump_plan(
     alignment: &Alignment,
     fold: &FoldState,
@@ -998,38 +1066,114 @@ mod tests {
     }
 
     #[test]
-    fn search_file_lists_matches_with_side_and_line_by_scope() {
-        let old = "alpha\nneedle here\nomega\n";
+    fn search_file_lists_occurrence_matches_by_side() {
+        let old = "alpha\nneedle here needle\nomega\n";
         let new = "alpha\nbeta\nother NEEDLE\n";
 
         assert_eq!(
-            search_file(old, new, "needle", SearchScope::Old),
-            vec![SearchMatch {
-                side: Side::Old,
-                ln: 2,
-            }]
-        );
-        assert_eq!(
-            search_file(old, new, "needle", SearchScope::New),
-            vec![SearchMatch {
-                side: Side::New,
-                ln: 3,
-            }]
-        );
-        assert_eq!(
-            search_file(old, new, "needle", SearchScope::Both),
+            search_file(old, new, "needle", SearchSide::Old),
             vec![
                 SearchMatch {
                     side: Side::Old,
                     ln: 2,
+                    bytes: 0..6,
+                    path: None,
+                },
+                SearchMatch {
+                    side: Side::Old,
+                    ln: 2,
+                    bytes: 12..18,
+                    path: None,
+                },
+            ]
+        );
+        assert_eq!(
+            search_file(old, new, "needle", SearchSide::New),
+            vec![SearchMatch {
+                side: Side::New,
+                ln: 3,
+                bytes: 6..12,
+                path: None,
+            }]
+        );
+        assert_eq!(
+            search_file(old, new, "needle", SearchSide::Both),
+            vec![
+                SearchMatch {
+                    side: Side::Old,
+                    ln: 2,
+                    bytes: 0..6,
+                    path: None,
+                },
+                SearchMatch {
+                    side: Side::Old,
+                    ln: 2,
+                    bytes: 12..18,
+                    path: None,
                 },
                 SearchMatch {
                     side: Side::New,
                     ln: 3,
+                    bytes: 6..12,
+                    path: None,
                 },
             ]
         );
-        assert!(search_file(old, new, "  ", SearchScope::Both).is_empty());
+        assert!(search_file(old, new, "  ", SearchSide::Both).is_empty());
+    }
+
+    #[test]
+    fn search_file_both_orders_old_before_new_then_line_then_byte() {
+        // New has an earlier line hit; Both still lists all Old before all New.
+        let old = "zzz\nx needle\n";
+        let new = "needle top\nother\n";
+        let hits = search_file(old, new, "needle", SearchSide::Both);
+        assert_eq!(
+            hits
+                .iter()
+                .map(|m| (m.side, m.ln, m.bytes.start))
+                .collect::<Vec<_>>(),
+            vec![
+                (Side::Old, 2, 2),
+                (Side::New, 1, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_files_walks_paths_in_given_order() {
+        let files = [
+            SearchFileText {
+                path: "b.rs",
+                old_text: "nope\n",
+                new_text: "needle in b\n",
+            },
+            SearchFileText {
+                path: "a.rs",
+                old_text: "needle in a\n",
+                new_text: "\n",
+            },
+        ];
+        let hits = search_files(&files, "needle", SearchSide::Both);
+        assert_eq!(
+            hits
+                .iter()
+                .map(|m| (m.path.as_deref(), m.side, m.ln))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some("b.rs"), Side::New, 1),
+                (Some("a.rs"), Side::Old, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_side_and_files_cycle_helpers() {
+        assert_eq!(next_search_side(SearchSide::Old), SearchSide::New);
+        assert_eq!(next_search_side(SearchSide::New), SearchSide::Both);
+        assert_eq!(next_search_side(SearchSide::Both), SearchSide::Old);
+        assert_eq!(toggle_search_files(SearchFiles::File), SearchFiles::All);
+        assert_eq!(toggle_search_files(SearchFiles::All), SearchFiles::File);
     }
 
     #[test]
