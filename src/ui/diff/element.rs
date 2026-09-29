@@ -1157,8 +1157,7 @@ impl Frame {
             }
             self.paint_block_edges(side, c0, c1, window);
         }
-        let ln_w = self.geom.ln_w;
-        paint_bridges(window, &self.bridges, ln_w);
+        paint_bridges(window, &self.bridges, self.geom.flat_w());
         let row_h = px(self.row_h);
         for side in [Side::Preimage, Side::Postimage] {
             let (c0, c1) = self.geom.ln_col(side);
@@ -1254,11 +1253,11 @@ fn paint_comment_icon(window: &mut Window, icon: &IconSlot) {
     }
 }
 
-fn paint_bridges(window: &mut Window, placed: &[WinBridge], ln_w: f32) {
+fn paint_bridges(window: &mut Window, placed: &[WinBridge], flat_w: f32) {
     for bridge in placed {
         let (fill_path, edges) = match bridge.tab_side {
-            None => ribbon(bridge, ln_w),
-            Some(side) => tab(bridge, side, ln_w),
+            None => ribbon(bridge, flat_w),
+            Some(side) => tab(bridge, side, flat_w),
         };
         if let Ok(path) = fill_path.build() {
             window.paint_path(path, kind_bg(Some(bridge.kind)));
@@ -1285,9 +1284,9 @@ fn edge_ys((y0, y1): (f32, f32)) -> (f32, f32) {
 /// Fill and top/bottom outline of a bridge: straight through each
 /// line-number column, a cubic with horizontal tangents across the middle.
 /// The ends overshoot half a pixel so the outline meets the code panes'.
-fn ribbon(bridge: &WinBridge, ln_w: f32) -> (PathBuilder, PathBuilder) {
+fn ribbon(bridge: &WinBridge, flat_w: f32) -> (PathBuilder, PathBuilder) {
     let (x0, x1) = (bridge.x_l - EDGE_W / 2., bridge.x_r + EDGE_W / 2.);
-    let (mid_l, mid_r) = (bridge.x_l + ln_w, bridge.x_r - ln_w);
+    let (mid_l, mid_r) = (bridge.x_l + flat_w, bridge.x_r - flat_w);
     let mid = (mid_l + mid_r) / 2.;
     let (l0, l1) = edge_ys(bridge.ends(Side::Preimage));
     let (r0, r1) = edge_ys(bridge.ends(Side::Postimage));
@@ -1316,11 +1315,11 @@ fn ribbon(bridge: &WinBridge, ln_w: f32) -> (PathBuilder, PathBuilder) {
 
 /// A culled bridge: a rounded tab from `side`'s line-number column into the
 /// middle gutter. Its open end sits against the column.
-fn tab(bridge: &WinBridge, side: Side, ln_w: f32) -> (PathBuilder, PathBuilder) {
+fn tab(bridge: &WinBridge, side: Side, flat_w: f32) -> (PathBuilder, PathBuilder) {
     let (top, bot) = edge_ys(bridge.ends(side));
     let (base, dir) = match side {
-        Side::Preimage => (bridge.x_l + ln_w, 1.),
-        Side::Postimage => (bridge.x_r - ln_w, -1.),
+        Side::Preimage => (bridge.x_l + flat_w, 1.),
+        Side::Postimage => (bridge.x_r - flat_w, -1.),
     };
     let r = TAB_W.min((bot - top) / 2.);
     let tip = base + dir * r;
