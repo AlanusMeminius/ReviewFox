@@ -74,7 +74,6 @@ const CAPSULE_DRAG_ALPHA: f32 = 0.72;
 /// Floor for Diff dual-pane (L|gutter|R) when clamping the file-tree column.
 pub const MIN_DIFF_CONTENT_WIDTH: f32 = 400.;
 
-pub const DEFAULT_HEAD_META_HEIGHT: f32 = 120.;
 pub const MIN_HEAD_META_HEIGHT: f32 = 72.;
 pub const MIN_FILE_TREE_HEIGHT: f32 = 100.;
 
@@ -94,6 +93,11 @@ pub fn default_files_width() -> f32 {
 /// Initial MR detail height: half the island column (clamped).
 pub fn default_mr_detail_height(available: f32) -> f32 {
     clamp_mr_detail_height(available * 0.5, available)
+}
+
+/// Initial head-meta height: 40% of the Changes island (clamped).
+pub fn default_head_meta_height(available: f32) -> f32 {
+    clamp_height(available * 0.4, available)
 }
 
 /// Changes floats over commits — sidebar only needs to leave a readable commits strip.
@@ -121,7 +125,7 @@ pub fn clamp_diff_tree_width(requested: f32, available: f32) -> f32 {
 pub fn clamp_height(requested: f32, available: f32) -> f32 {
     let max_by_pct = available * 0.4;
     let max_by_tree = (available - MIN_FILE_TREE_HEIGHT).max(MIN_HEAD_META_HEIGHT);
-    let maximum = max_by_pct.min(max_by_tree);
+    let maximum = max_by_pct.min(max_by_tree).max(MIN_HEAD_META_HEIGHT);
     requested.clamp(MIN_HEAD_META_HEIGHT, maximum)
 }
 
@@ -365,6 +369,8 @@ mod tests {
 
     #[test]
     fn mr_detail_default_is_half_the_column() {
+        assert_eq!(default_head_meta_height(800.), 320.);
+        assert_eq!(default_head_meta_height(100.), 72.);
         assert_eq!(default_mr_detail_height(800.), 400.);
         assert_eq!(default_mr_detail_height(200.), 100.);
         assert_eq!(default_mr_detail_height(100.), 72.);

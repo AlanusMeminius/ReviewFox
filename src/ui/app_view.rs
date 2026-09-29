@@ -72,6 +72,8 @@ pub struct AppView {
     files_width: f32,
     files_resize_state: Rc<ResizeState>,
     head_meta_height: f32,
+    /// Once the user drags the tree↔head-meta splitter, stop auto-following 40%.
+    head_meta_height_user_set: bool,
     head_meta_resize_state: Rc<ResizeState>,
     mr_detail_height: f32,
     /// Once the user drags the MR↔commit splitter, stop auto-following half height.
@@ -142,7 +144,8 @@ impl AppView {
             sidebar_resize_state: Rc::new(ResizeState::default()),
             files_width: splitter::default_files_width(),
             files_resize_state: Rc::new(ResizeState::default()),
-            head_meta_height: splitter::DEFAULT_HEAD_META_HEIGHT,
+            head_meta_height: splitter::MIN_HEAD_META_HEIGHT,
+            head_meta_height_user_set: false,
             head_meta_resize_state: Rc::new(ResizeState::default()),
             mr_detail_height: splitter::DEFAULT_MR_DETAIL_HEIGHT,
             mr_detail_height_user_set: false,
@@ -213,6 +216,7 @@ impl AppView {
         let view = cx.entity().downgrade();
         Rc::new(move |height, _, cx: &mut App| {
             view.update(cx, |this, cx| {
+                this.head_meta_height_user_set = true;
                 if this.head_meta_height != height {
                     this.head_meta_height = height;
                     cx.notify();
@@ -248,6 +252,17 @@ impl AppView {
         let next = splitter::default_mr_detail_height(mr_detail_column_available(window));
         if (self.mr_detail_height - next).abs() > 0.5 {
             self.mr_detail_height = next;
+        }
+    }
+
+    /// Until the user drags the splitter, keep head-meta at 40% of the Changes island.
+    fn sync_default_head_meta_height(&mut self, window: &Window) {
+        if self.head_meta_height_user_set {
+            return;
+        }
+        let next = splitter::default_head_meta_height(changes_island_height(window));
+        if (self.head_meta_height - next).abs() > 0.5 {
+            self.head_meta_height = next;
         }
     }
 
@@ -1110,6 +1125,7 @@ impl Focusable for AppView {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_default_mr_detail_height(window);
+        self.sync_default_head_meta_height(window);
         if let Some(h) = self.diff_window {
             if h.update(cx, |_, _, _| ()).is_err() {
                 self.diff_window = None;
@@ -2137,6 +2153,14 @@ fn mr_detail_column_available(window: &Window) -> f32 {
     f32::from(window.viewport_size().height) - mr_detail_chrome_offset() - theme::CHANGES_INSET
 }
 
+/// `#files-slot` spans CHANGES_TOP_INSET below the titlebar to CHANGES_INSET above the bottom.
+fn changes_island_height(window: &Window) -> f32 {
+    f32::from(window.viewport_size().height)
+        - f32::from(theme::TITLEBAR_HEIGHT)
+        - theme::CHANGES_TOP_INSET
+        - theme::CHANGES_INSET
+}
+
 /// Show MR picker only when a remote host matches Settings.
 fn gitlab_chrome_visible(view: &AppView) -> bool {
     let MainState::Ready(loaded) = &view.state else {
@@ -2734,7 +2758,12 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                         view.head_meta_resize_state.clone(),
                         true,
                     ))
-                    .child(render_head_meta(&meta, view.head_meta_height, cx))
+                    .child(render_head_meta(
+                        &meta,
+                        view.files_width - 24.,
+                        view.head_meta_height,
+                        cx,
+                    ))
                 }),
         )
 }
@@ -2770,7 +2799,14 @@ fn head_commit_meta(
     })
 }
 
-fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> impl IntoElement {
+/// `width` is the inner px width: an indefinite width chain lets GPUI shape text
+/// at a layout-probe width, collapsing the title to a few glyphs.
+fn render_head_meta(
+    meta: &HeadMeta,
+    width: f32,
+    height: f32,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     let mono = appearance::code_font(cx);
     let full_oid = meta.commit.oid.to_string();
     let short = meta.commit.oid.short();
@@ -2793,16 +2829,17 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
         .rounded_b(px(theme::CHANGES_RADIUS))
         .child(
             div()
-                .min_w(px(0.))
+                .w(px(width))
+                .flex_none()
                 .ui_text_size(12., cx)
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme::text())
-                .overflow_hidden()
-                .text_ellipsis()
                 .child(meta.commit.summary.clone()),
         )
         .child(
             div()
+                .w(px(width))
+                .overflow_hidden()
                 .flex()
                 .items_center()
                 .gap_1()
@@ -2811,6 +2848,7 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
                 .child(
                     div()
                         .id("head-meta-hash")
+                        .flex_none()
                         .font_family(mono.clone())
                         // Own size: the UI text around it scales, Code Font chrome does not.
                         .text_xs()
@@ -2821,18 +2859,22 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
                         }))
                         .child(short),
                 )
-                .child(div().child("·"))
+                .child(div().flex_none().child("·"))
                 .child(
                     div()
+                        .min_w(px(0.))
+                        .flex_shrink()
                         .overflow_hidden()
+                        .whitespace_nowrap()
                         .text_ellipsis()
                         .child(meta.commit.author.clone()),
                 )
-                .child(div().child("·"))
-                .child(div().child(meta.commit.time_label.clone()))
+                .child(div().flex_none().child("·"))
+                .child(div().flex_none().child(meta.commit.time_label.clone()))
                 .when_some(meta.range_label.clone(), |d, label| {
-                    d.child(div().child("·")).child(
+                    d.child(div().flex_none().child("·")).child(
                         div()
+                            .flex_none()
                             .font_family(mono.clone())
                             // Own size: the UI text around it scales, Code Font chrome does not.
                             .text_xs()
