@@ -6,8 +6,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui::{
-    App, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Size, Window,
-    canvas, div, prelude::*, px,
+    App, Bounds, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Size,
+    Window, canvas, div, fill, point, prelude::*, px, size,
 };
 
 use super::theme;
@@ -36,6 +36,8 @@ fn end_resize_drag() {
 #[derive(Default)]
 pub struct ResizeState {
     active: Cell<bool>,
+    /// Pointer is over this handle's hit strip (chrome reads this for hover fill).
+    hovered: Cell<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,8 +57,20 @@ pub const MAX_SIDEBAR_WIDTH: f32 = 360.;
 pub const MIN_COMMITS_WIDTH: f32 = 280.;
 pub const MIN_FILES_WIDTH: f32 = 200.;
 pub const MAX_FILES_WIDTH: f32 = 480.;
-/// Hit-target thickness for resize handles (ADR 0004).
+/// Hit-target thickness for most resize handles (ADR 0004).
 pub const HANDLE_WIDTH: f32 = 5.;
+/// Hit strip for sidebar|stage and Diff tree|stage — room around the 3px capsule.
+pub const RAIL_HANDLE_WIDTH: f32 = 8.;
+/// Short stadium painted at the seam center when chrome is on (paint-only).
+pub const CAPSULE_THICKNESS: f32 = 3.;
+pub const CAPSULE_LENGTH: f32 = 24.;
+/// Stadium corner radius = half the short side.
+pub const CAPSULE_RADIUS: f32 = CAPSULE_THICKNESS / 2.;
+
+const CAPSULE_IDLE_ALPHA: f32 = 0.35;
+const CAPSULE_HOVER_ALPHA: f32 = 0.55;
+const CAPSULE_DRAG_ALPHA: f32 = 0.72;
+
 /// Floor for Diff dual-pane (L|gutter|R) when clamping the file-tree column.
 pub const MIN_DIFF_CONTENT_WIDTH: f32 = 400.;
 
@@ -132,63 +146,131 @@ pub fn size_at_pointer(axis: Axis, position: Point<Pixels>, viewport: Size<Pixel
     }
 }
 
+fn capsule_size(axis: Axis) -> (f32, f32) {
+    match axis {
+        Axis::HorizontalLeading | Axis::HorizontalTrailing => {
+            (CAPSULE_THICKNESS, CAPSULE_LENGTH)
+        }
+        Axis::Vertical | Axis::VerticalNorth => (CAPSULE_LENGTH, CAPSULE_THICKNESS),
+    }
+}
+
+fn capsule_bounds(axis: Axis, seam: Bounds<Pixels>) -> Bounds<Pixels> {
+    let (cw, ch) = capsule_size(axis);
+    let origin = point(
+        seam.origin.x + (seam.size.width - px(cw)) / 2.,
+        seam.origin.y + (seam.size.height - px(ch)) / 2.,
+    );
+    Bounds {
+        origin,
+        size: size(px(cw), px(ch)),
+    }
+}
+
+fn capsule_alpha(state: &ResizeState) -> f32 {
+    if state.active.get() {
+        CAPSULE_DRAG_ALPHA
+    } else if state.hovered.get() {
+        CAPSULE_HOVER_ALPHA
+    } else {
+        CAPSULE_IDLE_ALPHA
+    }
+}
+
+/// Dual-axis resize hit strip. `chrome` paints a short center stadium; default off
+/// keeps the strip invisible for any caller that does not opt in.
 pub fn handle(
     id: &'static str,
     axis: Axis,
     on_resize: ResizeHandler,
     resize_state: Rc<ResizeState>,
+    chrome: bool,
 ) -> impl IntoElement {
     let down_state = resize_state.clone();
     let move_state = resize_state.clone();
-    let up_state = resize_state;
-    let mut el = div().id(id).flex_none().child(
-        canvas(
-            |_, _, _| (),
-            move |bounds, _, window, _| {
-                let down_state = down_state.clone();
-                window.on_mouse_event(move |event: &MouseDownEvent, _, _, _| {
-                    if event.button == MouseButton::Left && bounds.contains(&event.position) {
-                        // `replace` returns the previous value — count only transitions.
-                        if !down_state.active.replace(true) {
-                            begin_resize_drag();
-                        }
-                    }
-                });
+    let hover_state = resize_state.clone();
+    let up_state = resize_state.clone();
+    let paint_state = resize_state;
+    let hit = canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            if chrome {
+                window.paint_quad(
+                    fill(capsule_bounds(axis, bounds), theme::splitter_capsule(capsule_alpha(&paint_state)))
+                        .corner_radii(px(CAPSULE_RADIUS)),
+                );
+            }
 
-                let move_state = move_state.clone();
-                let on_resize = on_resize.clone();
-                window.on_mouse_event(move |event: &MouseMoveEvent, _, window, cx| {
-                    if !move_state.active.get() {
-                        return;
+            let down_state = down_state.clone();
+            window.on_mouse_event(move |event: &MouseDownEvent, _, window, _| {
+                if event.button == MouseButton::Left && bounds.contains(&event.position) {
+                    // `replace` returns the previous value — count only transitions.
+                    if !down_state.active.replace(true) {
+                        begin_resize_drag();
+                        window.refresh();
                     }
-                    let size = size_at_pointer(axis, event.position, window.viewport_size());
-                    on_resize(size, window, cx);
-                });
+                }
+            });
 
-                let up_state = up_state.clone();
-                window.on_mouse_event(move |event: &MouseUpEvent, _, _, _| {
-                    if event.button == MouseButton::Left && up_state.active.replace(false) {
-                        end_resize_drag();
-                    }
-                });
-            },
-        )
-        .size_full(),
-    );
+            let move_state = move_state.clone();
+            let hover_state = hover_state.clone();
+            let on_resize = on_resize.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, _, window, cx| {
+                let hovering = bounds.contains(&event.position);
+                if hover_state.hovered.get() != hovering {
+                    hover_state.hovered.set(hovering);
+                    window.refresh();
+                }
+                if !move_state.active.get() {
+                    return;
+                }
+                let size = size_at_pointer(axis, event.position, window.viewport_size());
+                on_resize(size, window, cx);
+            });
+
+            let up_state = up_state.clone();
+            window.on_mouse_event(move |event: &MouseUpEvent, _, window, _| {
+                if event.button == MouseButton::Left && up_state.active.replace(false) {
+                    end_resize_drag();
+                    window.refresh();
+                }
+            });
+        },
+    )
+    .size_full();
+
+    let mut el = div().id(id).flex_none().relative().child(hit);
 
     el = match axis {
-        // Leading sits over column vibrancy on macOS — leave clear.
-        Axis::HorizontalLeading => el.w(px(HANDLE_WIDTH)).h_full().cursor_col_resize(),
-        // Trailing is the Changes capsule's left-edge hit target — leave clear
-        // so the soft cast shadow is not covered by an opaque strip.
-        Axis::HorizontalTrailing => el.w(px(HANDLE_WIDTH)).h_full().cursor_col_resize(),
-        // Vertical sits between white panes inside the capsule; fill so a
-        // Transparent window root doesn't punch through the 5px seam.
-        Axis::Vertical => el
-            .h(px(HANDLE_WIDTH))
-            .w_full()
-            .bg(theme::white())
-            .cursor_row_resize(),
+        // Leading rail: wider hit when chromed so the 3px capsule has air.
+        Axis::HorizontalLeading => {
+            let w = if chrome {
+                RAIL_HANDLE_WIDTH
+            } else {
+                HANDLE_WIDTH
+            };
+            el.w(px(w)).h_full().cursor_col_resize()
+        }
+        // Trailing chrome fills the frost gap between Commit and Changes islands.
+        // Without chrome, keep a slim clear strip (soft cast must stay uncovered).
+        Axis::HorizontalTrailing => {
+            let w = if chrome {
+                theme::CHANGES_SHADOW_GAP
+            } else {
+                HANDLE_WIDTH
+            };
+            el.w(px(w)).h_full().cursor_col_resize()
+        }
+        // Without chrome, fill white so a Transparent root doesn't punch through.
+        // With chrome, the strip stays clear — only the center stadium paints.
+        Axis::Vertical => {
+            let el = el.h(px(HANDLE_WIDTH)).w_full().cursor_row_resize();
+            if chrome {
+                el
+            } else {
+                el.bg(theme::white())
+            }
+        }
         // MR detail ↔ Commit island: clear hit strip doubles as the frost gap.
         Axis::VerticalNorth => el.h(px(theme::CHANGES_INSET)).w_full().cursor_row_resize(),
     };
@@ -286,5 +368,24 @@ mod tests {
         assert_eq!(default_mr_detail_height(800.), 400.);
         assert_eq!(default_mr_detail_height(200.), 100.);
         assert_eq!(default_mr_detail_height(100.), 72.);
+    }
+
+    #[test]
+    fn capsule_chrome_tokens_are_stadium_shaped() {
+        assert_eq!(CAPSULE_RADIUS, CAPSULE_THICKNESS / 2.);
+        assert!(RAIL_HANDLE_WIDTH > HANDLE_WIDTH);
+        assert!(RAIL_HANDLE_WIDTH >= CAPSULE_THICKNESS + 2.);
+        assert_eq!(CAPSULE_THICKNESS, 3.);
+        assert_eq!(CAPSULE_LENGTH, 24.);
+    }
+
+    #[test]
+    fn capsule_alpha_follows_resize_state() {
+        let state = ResizeState::default();
+        assert_eq!(capsule_alpha(&state), CAPSULE_IDLE_ALPHA);
+        state.hovered.set(true);
+        assert_eq!(capsule_alpha(&state), CAPSULE_HOVER_ALPHA);
+        state.active.set(true);
+        assert_eq!(capsule_alpha(&state), CAPSULE_DRAG_ALPHA);
     }
 }

@@ -89,6 +89,13 @@ pub fn text() -> Rgba {
 pub fn muted() -> Rgba {
     rgb(0x596579)
 }
+/// Splitter stadium chrome: [`muted`] at the given alpha (idle / hover / drag).
+pub fn splitter_capsule(alpha: f32) -> Rgba {
+    Rgba {
+        a: alpha,
+        ..muted()
+    }
+}
 pub fn faint() -> Rgba {
     rgb(0x98a2b3)
 }

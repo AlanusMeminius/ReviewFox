@@ -1147,6 +1147,7 @@ impl Render for AppView {
                             Axis::HorizontalLeading,
                             self.sidebar_resize_handler(cx),
                             self.sidebar_resize_state.clone(),
+                            true,
                         ))
                     })
                     // Frosted desk: floating capsules (Commit / MR / Changes). Stage stays
@@ -1535,7 +1536,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
     let leading_w = if view.repos_collapsed {
         px(collapsed_leading_width())
     } else {
-        px(view.sidebar_width + splitter::HANDLE_WIDTH)
+        px(view.sidebar_width + splitter::RAIL_HANDLE_WIDTH)
     };
 
     div()
@@ -1872,6 +1873,7 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
                 Axis::VerticalNorth,
                 view.mr_detail_resize_handler(cx),
                 view.mr_detail_resize_state.clone(),
+                true,
             ))
         })
         .child(render_commit_capsule(view, cx));
@@ -2576,110 +2578,114 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         MainState::Empty | MainState::Error(_) => None,
     };
     let inset = px(theme::CHANGES_INSET);
+    let gap = theme::CHANGES_SHADOW_GAP;
 
+    // Slot spans the frost gap + Changes island so the trailing handle can sit
+    // between the two floats (outside `#files` overflow_hidden).
     div()
-        .id("files")
+        .id("files-slot")
         .absolute()
         .top(px(theme::CHANGES_TOP_INSET))
         .right(inset)
         .bottom(inset)
-        .w(px(view.files_width))
+        .w(px(view.files_width + gap))
         .flex()
-        .flex_col()
-        .bg(theme::white())
-        .rounded(px(theme::CHANGES_RADIUS))
-        .overflow_hidden()
-        // Left-edge resize (HorizontalTrailing measures from viewport right).
+        .flex_row()
+        .child(splitter::handle(
+            "files-resize-handle",
+            Axis::HorizontalTrailing,
+            view.files_resize_handler(cx),
+            view.files_resize_state.clone(),
+            true,
+        ))
         .child(
             div()
-                .absolute()
-                .left(px(0.))
-                .top(px(0.))
-                .bottom(px(0.))
-                .w(px(5.))
-                .child(splitter::handle(
-                    "files-resize-handle",
-                    Axis::HorizontalTrailing,
-                    view.files_resize_handler(cx),
-                    view.files_resize_state.clone(),
-                )),
-        )
-        // No titlebar — faint section label + Open Diff in the corner.
-        .child(
-            div()
-                .relative()
-                .flex_none()
-                .pt_2()
-                .pl_3()
-                .pr(px(36.))
-                .pb_1()
+                .id("files")
+                .w(px(view.files_width))
+                .h_full()
+                .flex()
+                .flex_col()
+                .bg(theme::white())
+                .rounded(px(theme::CHANGES_RADIUS))
+                .overflow_hidden()
+                // No titlebar — faint section label + Open Diff in the corner.
                 .child(
                     div()
-                        .ui_text_size(12., cx)
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::faint())
-                        .child(format!("Changes ({})", paths.len())),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(6.))
-                        .right(px(8.))
-                        .child(open_diff_button(can_open, cx)),
-                ),
-        )
-        .child({
-            let (scroll, sb) = scrollbar::vertical("file-tree-sb", cx);
-            scrollbar::overlay_flex(
-                div()
-                    .id("file-tree")
-                    .size_full()
-                    .px_1()
-                    .track_scroll(&scroll)
-                    .overflow_y_scroll()
-                    .children(rows.into_iter().enumerate().map(|(i, row)| match row {
-                        TreeRow::Dir { depth, name, path } => {
-                            let collapsed = view.collapsed_dirs.contains(&path);
-                            let toggle_path = path.clone();
-                            file_tree_rows::dir_row(
-                                ("dir", i),
-                                depth,
-                                name,
-                                collapsed,
-                                RowSurface::Island,
-                                cx,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    if !this.collapsed_dirs.remove(&toggle_path) {
-                                        this.collapsed_dirs.insert(toggle_path.clone());
-                                    }
-                                    cx.notify();
-                                },
-                            ))
-                        }
-                        TreeRow::File { depth, path } => file_tree_rows::file_row(
-                            ("file", i),
-                            depth,
-                            &path,
-                            false,
-                            RowSurface::Island,
-                            mono.clone(),
-                            cx,
+                        .relative()
+                        .flex_none()
+                        .pt_2()
+                        .pl_3()
+                        .pr(px(36.))
+                        .pb_1()
+                        .child(
+                            div()
+                                .ui_text_size(12., cx)
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme::faint())
+                                .child(format!("Changes ({})", paths.len())),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(6.))
+                                .right(px(8.))
+                                .child(open_diff_button(can_open, cx)),
                         ),
-                    })),
-                sb,
-            )
-        })
-        .when_some(head_meta, |d, meta| {
-            d.child(splitter::handle(
-                "head-meta-resize-handle",
-                Axis::Vertical,
-                view.head_meta_resize_handler(cx),
-                view.head_meta_resize_state.clone(),
-            ))
-            .child(render_head_meta(&meta, view.head_meta_height, cx))
-        })
+                )
+                .child({
+                    let (scroll, sb) = scrollbar::vertical("file-tree-sb", cx);
+                    scrollbar::overlay_flex(
+                        div()
+                            .id("file-tree")
+                            .size_full()
+                            .px_1()
+                            .track_scroll(&scroll)
+                            .overflow_y_scroll()
+                            .children(rows.into_iter().enumerate().map(|(i, row)| match row {
+                                TreeRow::Dir { depth, name, path } => {
+                                    let collapsed = view.collapsed_dirs.contains(&path);
+                                    let toggle_path = path.clone();
+                                    file_tree_rows::dir_row(
+                                        ("dir", i),
+                                        depth,
+                                        name,
+                                        collapsed,
+                                        RowSurface::Island,
+                                        cx,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            if !this.collapsed_dirs.remove(&toggle_path) {
+                                                this.collapsed_dirs.insert(toggle_path.clone());
+                                            }
+                                            cx.notify();
+                                        },
+                                    ))
+                                }
+                                TreeRow::File { depth, path } => file_tree_rows::file_row(
+                                    ("file", i),
+                                    depth,
+                                    &path,
+                                    false,
+                                    RowSurface::Island,
+                                    mono.clone(),
+                                    cx,
+                                ),
+                            })),
+                        sb,
+                    )
+                })
+                .when_some(head_meta, |d, meta| {
+                    d.child(splitter::handle(
+                        "head-meta-resize-handle",
+                        Axis::Vertical,
+                        view.head_meta_resize_handler(cx),
+                        view.head_meta_resize_state.clone(),
+                        true,
+                    ))
+                    .child(render_head_meta(&meta, view.head_meta_height, cx))
+                }),
+        )
 }
 
 struct HeadMeta {
@@ -2718,8 +2724,6 @@ fn render_head_meta(meta: &HeadMeta, height: f32, cx: &mut Context<AppView>) -> 
         .pt_2()
         .pb_2()
         .gap_1()
-        .border_t_1()
-        .border_color(theme::line())
         .bg(theme::white())
         // Parent overflow_hidden+rounded still paints square at the south edge in
         // GPUI; match capsule radii on the footer so the bottom corners read round.

@@ -592,6 +592,7 @@ impl DiffView {
                             Axis::HorizontalLeading,
                             self.tree_resize_handler(cx),
                             self.tree_resize_state.clone(),
+                            true,
                         ))
                     })
                     // Frosted desk: the content island floats here, inset on all four
@@ -763,7 +764,7 @@ fn render_titlebar(
     let leading_w = if view.tree_collapsed {
         px(collapsed_leading_width())
     } else {
-        px(view.tree_width + splitter::HANDLE_WIDTH)
+        px(view.tree_width + splitter::RAIL_HANDLE_WIDTH)
     };
     div()
         .id("diff-titlebar")
