@@ -107,12 +107,16 @@ pub struct DiffView {
     comments_visible: bool,
     /// Last width the user gave the comment island.
     comment_width: f32,
-    /// Shown by the toggle while the window yields it: the diff floor is dropped
-    /// until the island fits again.
+    /// Shown by the toggle while the window yields it: the diff floor and the
+    /// snap threshold are dropped until the island fits again.
     comments_forced: bool,
-    /// Bumped per animated show/hide so the drawer animation restarts; `None`
-    /// while nothing should animate (window open, drag-out).
-    comment_anim: Option<usize>,
+    /// Generation bumped per animated show/hide so the drawer animation restarts.
+    /// `None` while nothing should animate (window open, live resize).
+    comment_anim_gen: Option<usize>,
+    /// Diff card width held until the show/hide slide finishes. The pane keeps
+    /// this layout so its code does not reflow over the comment island; the
+    /// card edge and the island edge move together, then the pane catches up.
+    comment_pane_freeze: Option<f32>,
     comment_resize_state: Rc<ResizeState>,
     pub snapshot: Option<DiffSnapshot>,
     review: Option<Review>,
@@ -251,11 +255,12 @@ impl DiffView {
             tree_collapsed: false,
             tree_width: f32::from(theme::DIFF_TREE_WIDTH),
             tree_resize_state: Rc::new(ResizeState::default()),
-            comments_visible: true,
+            comments_visible: false,
             comment_width: theme::COMMENT_ISLAND_WIDTH,
             comments_forced: false,
-            comment_anim: None,
-            comment_resize_state: Rc::new(ResizeState::default()),
+            comment_anim_gen: None,
+            comment_pane_freeze: None,
+            comment_resize_state: Rc::new(ResizeState::with_drag_latch()),
             snapshot: Some(snapshot),
             review: Some(review),
             drafting: None,
@@ -728,46 +733,96 @@ impl DiffView {
         } else {
             splitter::MIN_DIFF_CONTENT_WIDTH
         };
-        splitter::resolve_collapsible(
-            self.comment_width,
-            room,
-            floor,
-            splitter::COLLAPSE_THRESHOLD,
-        )
+        let threshold = if self.comments_forced {
+            0.
+        } else {
+            splitter::COLLAPSE_THRESHOLD
+        };
+        splitter::resolve_collapsible(self.comment_width, room, floor, threshold)
     }
 
-    fn animate_comments(&mut self) {
-        self.comment_anim = Some(self.comment_anim.map_or(0, |n| n + 1));
+    /// Width of the diff card for the current comment layout.
+    fn diff_card_width(&self, room: f32) -> f32 {
+        match self.comment_layout(room) {
+            splitter::Collapse::Width(width) => (room - width).max(0.),
+            splitter::Collapse::Hidden => room + theme::CHANGES_SHADOW_GAP,
+        }
+    }
+
+    /// Start a show/hide slide from the pane's current width. The freeze drops
+    /// when this generation's animation has finished.
+    fn begin_comment_anim(&mut self, room: f32, cx: &mut Context<Self>) {
+        let visual = self
+            .pane_bounds
+            .get()
+            .map(|bounds| f32::from(bounds.size.width))
+            .unwrap_or_else(|| self.diff_card_width(room));
+        self.comment_pane_freeze = Some(visual);
+        let generation = self.comment_anim_gen.map_or(0, |n| n + 1);
+        self.comment_anim_gen = Some(generation);
+        cx.spawn(async move |this, cx| {
+            Timer::after(COMMENT_DRAWER_ANIM).await;
+            this.update(cx, |this, cx| {
+                if this.comment_anim_gen == Some(generation) {
+                    this.comment_pane_freeze = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Show at the last width. Drops the diff floor (and, via `comment_fit`,
+    /// the snap threshold) when that width cannot sit beside a 400px diff.
+    fn reveal_comments(&mut self, room: f32, cx: &mut Context<Self>) {
+        self.begin_comment_anim(room, cx);
+        self.comments_visible = true;
+        self.comments_forced = splitter::resolve_collapsible(
+            self.comment_width,
+            room,
+            splitter::MIN_DIFF_CONTENT_WIDTH,
+            splitter::COLLAPSE_THRESHOLD,
+        ) == splitter::Collapse::Hidden;
+        cx.notify();
     }
 
     fn toggle_comments(&mut self, window: &Window, cx: &mut Context<Self>) {
         let room = self.comment_room(window);
         if self.comment_layout(room) == splitter::Collapse::Hidden {
-            self.comments_visible = true;
-            self.comments_forced = splitter::resolve_collapsible(
-                self.comment_width,
-                room,
-                splitter::MIN_DIFF_CONTENT_WIDTH,
-                splitter::COLLAPSE_THRESHOLD,
-            ) == splitter::Collapse::Hidden;
+            self.reveal_comments(room, cx);
         } else {
+            self.begin_comment_anim(room, cx);
             self.comments_visible = false;
             self.comments_forced = false;
+            cx.notify();
         }
-        self.animate_comments();
-        cx.notify();
     }
 
     fn comment_resize_handler(&self, cx: &Context<Self>) -> splitter::ResizeHandler {
         let view = cx.entity().downgrade();
-        Rc::new(move |requested, window, cx: &mut App| {
+        Rc::new(move |raw, window, cx: &mut App| {
             view.update(cx, |this, cx| {
+                if this.comment_resize_state.drag_consumed() {
+                    return;
+                }
                 let room = this.comment_room(window);
                 let shown = this.comment_layout(room) != splitter::Collapse::Hidden;
+                // A short leftward nudge on the parked handle opens like the button.
+                // Hide-on-drag still uses the 160px threshold below.
+                if !shown {
+                    let origin = this.comment_resize_state.drag_origin().unwrap_or(raw);
+                    if raw - origin < COMMENT_REVEAL_NUDGE {
+                        return;
+                    }
+                    this.comment_resize_state.consume_drag();
+                    this.reveal_comments(room, cx);
+                    return;
+                }
                 // HorizontalTrailing reports distance to viewport right; the pointer
                 // rides the middle of the gap, and the stage is inset on the right.
                 let requested =
-                    requested - theme::CHANGES_INSET - theme::CHANGES_SHADOW_GAP / 2.;
+                    raw - theme::CHANGES_INSET - theme::CHANGES_SHADOW_GAP / 2.;
                 this.comments_forced = false;
                 match splitter::resolve_collapsible(
                     requested,
@@ -777,14 +832,15 @@ impl DiffView {
                 ) {
                     splitter::Collapse::Width(width) => {
                         if !shown {
-                            this.comment_anim = None;
+                            this.comment_anim_gen = None;
+                            this.comment_pane_freeze = None;
                         }
                         this.comments_visible = true;
                         this.comment_width = width;
                     }
                     splitter::Collapse::Hidden => {
                         if shown {
-                            this.animate_comments();
+                            this.begin_comment_anim(room, cx);
                         }
                         this.comments_visible = false;
                     }
@@ -1271,7 +1327,11 @@ impl Render for DiffView {
                 this.handle_key(event, window, cx);
             }))
             .child(AnyView::from(shell).cached(StyleRefinement::default().size_full()))
-            .child(pane::slot(&self.pane, self.pane_bounds.clone()))
+            .child(pane::slot(
+                &self.pane,
+                self.pane_bounds.clone(),
+                self.comment_pane_freeze,
+            ))
             .children(find_overlay)
             .children(draft_overlay)
     }
@@ -1893,8 +1953,15 @@ fn render_body(view: &DiffView, find_open: bool, cx: &mut Context<DiffView>) -> 
     }
 }
 
-/// Gap handle + comment island as a drawer: its width runs 0 ↔ gap + island while
-/// the content keeps its width and is clipped, so the diff re-lays out each frame.
+/// How long the comment drawer takes to slide. The pane stays frozen for the
+/// same span, then reflows once the edges have arrived.
+const COMMENT_DRAWER_ANIM: Duration = Duration::from_millis(220);
+/// Leftward travel on the parked handle that opens the island like the button.
+const COMMENT_REVEAL_NUDGE: f32 = 8.;
+
+/// Gap handle + comment island as a drawer. Width runs 0 ↔ gap + island.
+/// Content stays left-aligned at the full width and the right side clips, so
+/// the island's left edge stays one gap from the diff card's right edge.
 fn render_comment_drawer(
     view: &DiffView,
     room: f32,
@@ -1925,30 +1992,20 @@ fn render_comment_drawer(
             .w(px(theme::CHANGES_SHADOW_GAP))
             .into_any_element()
     };
-    // Pin the full-width content to the right edge so the clip reveals the island
-    // from the window side (a drawer) instead of cutting off its outer edge.
-    let drawer = div()
-        .flex_none()
-        .relative()
-        .h_full()
-        .overflow_hidden()
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .right_0()
-                .w(px(full))
-                .h_full()
-                .flex()
-                .child(gap)
-                .child(render_comment_island(view, width, cx)),
-        );
-    match view.comment_anim {
+    let drawer = div().flex_none().h_full().overflow_hidden().child(
+        div()
+            .w(px(full))
+            .h_full()
+            .flex()
+            .child(gap)
+            .child(render_comment_island(view, width, cx)),
+    );
+    match view.comment_anim_gen {
         Some(generation) => Some(
             drawer
                 .with_animation(
                     ("diff-comment-drawer", generation),
-                    Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+                    Animation::new(COMMENT_DRAWER_ANIM).with_easing(ease_out_quint()),
                     move |this, t| this.w(px(full * if shown { t } else { 1. - t })),
                 )
                 .into_any_element(),
@@ -2437,8 +2494,7 @@ fn toggle_button(
         }))
 }
 
-/// Pressed while the island is actually on screen, so a narrow-window yield
-/// reads as off.
+/// Highlighted while the island is closed, same as the file-tree toggle.
 fn comments_toggle_button(
     view: &DiffView,
     window: &Window,
@@ -2451,7 +2507,7 @@ fn comments_toggle_button(
         "Show Comments"
     };
     IconButton::new("diff-comments-toggle", "sidebar_right.svg", label)
-        .pressed(shown)
+        .pressed(!shown)
         .on_click(cx.listener(|this, _, window, cx| this.toggle_comments(window, cx)))
 }
 

@@ -4,10 +4,10 @@
 //! docs/diffview-architecture.md §4–§5.
 
 use gpui::{
-    AnyElement, AnyView, App, Bounds, Context, Element, ElementId, Entity, EventEmitter,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Position,
-    Render, SharedString, Style, StyleRefinement, Styled, Subscription, Task, Timer, Window, div,
-    font, px,
+    AnyElement, AnyView, App, Bounds, ContentMask, Context, Element, ElementId, Entity,
+    EventEmitter, GlobalElementId, InspectorElementId, IntoElement, LayoutId, ParentElement,
+    Pixels, Position, Render, SharedString, Style, StyleRefinement, Styled, Subscription, Task,
+    Timer, Window, div, font, px, size,
 };
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -1489,12 +1489,17 @@ pub type SlotBounds = Rc<Cell<Option<Bounds<Pixels>>>>;
 /// dirty, and the pane reuses its last frame while only the shell is.
 pub struct PaneSlot {
     bounds: SlotBounds,
+    /// Lay the pane out at this width instead of the measured slot. Paint stays
+    /// clipped to the slot, so a show/hide slide can move the card edge without
+    /// the code reflowing over the comment island.
+    layout_width: Option<f32>,
     view: AnyElement,
 }
 
-pub fn slot(pane: &Entity<DualPane>, bounds: SlotBounds) -> PaneSlot {
+pub fn slot(pane: &Entity<DualPane>, bounds: SlotBounds, layout_width: Option<f32>) -> PaneSlot {
     PaneSlot {
         bounds,
+        layout_width,
         view: AnyView::from(pane.clone())
             .cached(StyleRefinement::default().size_full())
             .into_any_element(),
@@ -1549,8 +1554,12 @@ impl Element for PaneSlot {
         let Some(bounds) = self.bounds.get() else {
             return false;
         };
-        self.view.layout_as_root(bounds.size.into(), window, cx);
-        self.view.prepaint_at(bounds.origin, window, cx);
+        let width = self.layout_width.map(px).unwrap_or(bounds.size.width);
+        self.view
+            .layout_as_root(size(width, bounds.size.height).into(), window, cx);
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            self.view.prepaint_at(bounds.origin, window, cx);
+        });
         true
     }
 
@@ -1565,7 +1574,12 @@ impl Element for PaneSlot {
         cx: &mut App,
     ) {
         if *mounted {
-            self.view.paint(window, cx);
+            let Some(bounds) = self.bounds.get() else {
+                return;
+            };
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                self.view.paint(window, cx);
+            });
         }
     }
 }

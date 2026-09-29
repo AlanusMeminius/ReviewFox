@@ -33,11 +33,61 @@ fn end_resize_drag() {
     });
 }
 
+/// Present only on a handle whose caller may swallow the rest of a drag.
+#[derive(Default)]
+struct DragLatch {
+    /// A nudge already opened the pane; moves do nothing until mouseup.
+    consumed: Cell<bool>,
+    /// `size_at_pointer` at mousedown.
+    origin: Cell<Option<f32>>,
+}
+
 #[derive(Default)]
 pub struct ResizeState {
     active: Cell<bool>,
     /// Pointer is over this handle's hit strip (chrome reads this for hover fill).
     hovered: Cell<bool>,
+    latch: Option<Rc<DragLatch>>,
+}
+
+impl ResizeState {
+    /// Opt in to [`Self::consume_drag`]: other splitters leave the latch off.
+    pub fn with_drag_latch() -> Self {
+        Self {
+            latch: Some(Rc::new(DragLatch::default())),
+            ..Self::default()
+        }
+    }
+
+    /// Ignore further moves until mouseup.
+    pub fn consume_drag(&self) {
+        if let Some(latch) = &self.latch {
+            latch.consumed.set(true);
+        }
+    }
+
+    pub fn drag_consumed(&self) -> bool {
+        self.latch.as_ref().is_some_and(|latch| latch.consumed.get())
+    }
+
+    /// `size_at_pointer` at the mousedown that started this drag.
+    pub fn drag_origin(&self) -> Option<f32> {
+        self.latch.as_ref().and_then(|latch| latch.origin.get())
+    }
+
+    fn note_drag_start(&self, origin: f32) {
+        if let Some(latch) = &self.latch {
+            latch.consumed.set(false);
+            latch.origin.set(Some(origin));
+        }
+    }
+
+    fn note_drag_end(&self) {
+        if let Some(latch) = &self.latch {
+            latch.consumed.set(false);
+            latch.origin.set(None);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,6 +275,11 @@ pub fn handle(
             let down_state = down_state.clone();
             window.on_mouse_event(move |event: &MouseDownEvent, _, window, _| {
                 if event.button == MouseButton::Left && bounds.contains(&event.position) {
+                    down_state.note_drag_start(size_at_pointer(
+                        axis,
+                        event.position,
+                        window.viewport_size(),
+                    ));
                     // `replace` returns the previous value — count only transitions.
                     if !down_state.active.replace(true) {
                         begin_resize_drag();
@@ -252,6 +307,7 @@ pub fn handle(
             let up_state = up_state.clone();
             window.on_mouse_event(move |event: &MouseUpEvent, _, window, _| {
                 if event.button == MouseButton::Left && up_state.active.replace(false) {
+                    up_state.note_drag_end();
                     end_resize_drag();
                     window.refresh();
                 }
@@ -479,10 +535,13 @@ mod tests {
             resolve_collapsible(268., 200., 0., COLLAPSE_THRESHOLD),
             Collapse::Width(200.)
         );
+        // A forced show drops the snap threshold too: a 100px stage still shows,
+        // clamped to the room, instead of staying hidden.
+        assert_eq!(resolve_collapsible(268., 100., 0., 0.), Collapse::Width(100.));
     }
 
     #[test]
-    fn drag_out_from_collapsed_reappears_only_past_threshold() {
+    fn collapsible_stays_hidden_until_threshold() {
         let at = |pointer| {
             resolve_collapsible(pointer, 1200., MIN_DIFF_CONTENT_WIDTH, COLLAPSE_THRESHOLD)
         };
