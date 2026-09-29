@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ReviewFox — comment island prototype (throwaway)</title>
+  <!--
+    PROTOTYPE — throwaway. Not production.
+
+    Question: Comment 如何发起、且不抢代码文本选取？评论显示在哪？
+
+    VERDICT (in progress, user 2026-09-29):
+      — 中间行号列拖选 → 出现 +（代码列保持原生文本选取）
+      — 起草：底部 find-style 浮岛（Enter / Shift+Enter / Esc）
+      — 展示：diff 浮岛右侧 comment 浮岛，仅在有评论时自动出现
+      B/C parked（见 git history / 上一版）
+
+    open prototype/diff-comment-island.html
+  -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --text: #172033;
+      --muted: #596579;
+      --faint: #98a2b3;
+      --ln: #98a2b3;
+      --frost: #f4f5f7;
+      --bg: #ffffff;
+      --line: #dfe3ea;
+      --hover: #e9ebef;
+      --del-bg: #d8dce1;
+      --add-bg: #e8f7ee;
+      --mod-bg: #e8f0fe;
+      --accent: #2457d6;
+      --accent-soft: rgba(36, 87, 214, 0.12);
+      --sel: rgba(36, 87, 214, 0.18);
+      --commented: rgba(36, 87, 214, 0.08);
+      --chrome: 32px;
+      --diff-tree-w: 160px;
+      --comment-w: 268px;
+      --island-inset: 12px;
+      --island-top: 6px;
+      --island-radius: 12px;
+      --fs: 13px;
+      --rh: 22px;
+      --ln-w: 40px;
+      --icon-w: 18px;
+      --gutter-w: 24px;
+      --dock-inset: 6px;
+      --dock-pad: 4px;
+      --dock-radius: 8px;
+      --dock-clear: 100px;
+      --field-border: #c5cad3;
+      --focus-ring: 0 0 0 2px rgba(36, 87, 214, 0.22);
+      --island-shadow:
+        0 4px 12px rgba(23, 32, 51, 0.08),
+        0 12px 32px rgba(23, 32, 51, 0.12);
+      --desk-selected: rgba(0, 0, 0, 0.07);
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: "IBM Plex Sans", sans-serif;
+      font-size: 13px;
+      background: #c5ccd6;
+      color: var(--text);
+      overflow: hidden;
+    }
+    button, textarea { font: inherit; }
+    .proto-root {
+      height: 100%;
+      padding: 12px 12px 56px;
+      display: flex;
+      justify-content: center;
+    }
+    .win {
+      width: min(1280px, 100%);
+      height: 100%;
+      background: var(--frost);
+      border: 1px solid #b4bcc8;
+      border-radius: 10px;
+      box-shadow: 0 16px 36px rgba(23, 32, 51, 0.16);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .traffic { display: flex; gap: 6px; align-items: center; flex-shrink: 0; width: 52px; }
+    .traffic i { width: 10px; height: 10px; border-radius: 50%; display: block; }
+    .traffic .r { background: #ff5f57; }
+    .traffic .y { background: #febc2e; }
+    .traffic .g { background: #28c840; }
+    .titlebar {
+      height: var(--chrome); flex-shrink: 0;
+      display: flex; align-items: stretch;
+    }
+    .titlebar-leading {
+      width: var(--diff-tree-w); flex-shrink: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 0 0 12px;
+    }
+    .titlebar-main {
+      flex: 1; min-width: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px var(--island-inset) 0 var(--island-inset);
+      font-size: 12px; color: var(--muted);
+    }
+    .titlebar-main strong { color: var(--text); font-weight: 500; }
+    .hint-pill {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--muted);
+      background: var(--bg);
+      padding: 3px 8px;
+      border-radius: 6px;
+      box-shadow: var(--island-shadow);
+      white-space: nowrap;
+    }
+    .body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+    .side {
+      width: var(--diff-tree-w); flex-shrink: 0;
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    .side-body { flex: 1; overflow: auto; padding: 8px; }
+    .leaf {
+      display: flex; align-items: center; gap: 6px;
+      height: 22px; padding: 0 6px; margin-bottom: 2px;
+      border-radius: 4px; font-size: 12px;
+      border: 0; background: var(--desk-selected); width: 100%;
+      text-align: left; color: var(--text);
+    }
+    .badge {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px; font-weight: 500; color: #9a6700; width: 14px;
+    }
+
+    .stage-row {
+      flex: 1; min-width: 0; min-height: 0;
+      padding: var(--island-top) var(--island-inset) var(--island-inset) 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 10px;
+      transition: grid-template-columns 160ms ease;
+    }
+    .stage-row.has-comments {
+      grid-template-columns: minmax(0, 1fr) var(--comment-w);
+    }
+    .diff-col { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    .file-status {
+      flex-shrink: 0; padding: 0 4px 6px;
+      font-size: 12px; color: var(--muted);
+    }
+    .diff-island {
+      flex: 1; min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) var(--gutter-w) minmax(0, 1fr);
+      position: relative;
+      background: var(--bg);
+      border-radius: var(--island-radius);
+      box-shadow: var(--island-shadow);
+      overflow: hidden;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: var(--fs);
+      line-height: var(--rh);
+    }
+    .pane {
+      min-width: 0; min-height: 0;
+      overflow: auto;
+      position: relative;
+    }
+    .diff-island.draft-open .pane { scroll-padding-bottom: var(--dock-clear); }
+    .rows { padding: 8px 0 24px; }
+    .diff-island.draft-open .rows { padding-bottom: var(--dock-clear); }
+    .gutter-mid {
+      background: #fafbfc;
+      border-left: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+    }
+
+    .row {
+      display: grid;
+      height: var(--rh);
+      line-height: var(--rh);
+      position: relative;
+    }
+    .pane.old .row {
+      grid-template-columns: minmax(0, 1fr) calc(var(--ln-w) + var(--icon-w));
+    }
+    .pane.new .row {
+      grid-template-columns: calc(var(--ln-w) + var(--icon-w)) minmax(0, 1fr);
+    }
+    .row.add { background: var(--add-bg); }
+    .row.del { background: var(--del-bg); }
+    .row.mod { background: var(--mod-bg); }
+    .row.selected .code { background: var(--sel); }
+    .row.commented .code {
+      box-shadow: inset 3px 0 0 var(--accent);
+      background: var(--commented);
+    }
+    .pane.old .row.commented .code { box-shadow: inset -3px 0 0 var(--accent); }
+    .row.selected.commented .code { background: var(--sel); }
+    .row.drafting .code { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+    .ln-cell {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      color: var(--ln);
+      font-size: 11px;
+      user-select: none;
+      padding: 0 2px;
+      cursor: ns-resize;
+    }
+    .pane.old .ln-cell { justify-content: flex-end; }
+    .pane.new .ln-cell { justify-content: flex-start; }
+    .ln-num { min-width: 22px; text-align: right; }
+    .pane.new .ln-num { text-align: left; }
+    .ln-cell:hover { background: rgba(36, 87, 214, 0.06); }
+    .row.selected .ln-cell { background: var(--accent-soft); color: var(--accent); }
+
+    .code {
+      padding: 0 10px;
+      white-space: pre;
+      overflow: hidden;
+      cursor: text;
+      user-select: text;
+      -webkit-user-select: text;
+    }
+
+    .comment-btn {
+      width: 16px; height: 16px; padding: 0; border: 0;
+      border-radius: 4px; background: transparent;
+      color: var(--faint); cursor: pointer;
+      display: grid; place-items: center;
+      flex-shrink: 0;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .row:hover .comment-btn.offer,
+    .row.selected .comment-btn.offer,
+    .comment-btn.has,
+    .comment-btn.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .comment-btn.has { color: var(--accent); }
+    .comment-btn.open { background: var(--accent-soft); color: var(--accent); }
+    .comment-btn:hover { background: var(--hover); color: var(--accent); }
+    .comment-btn svg { width: 12px; height: 12px; display: block; }
+
+    /* Bottom draft dock — find capsule B chrome */
+    .draft-dock {
+      position: absolute;
+      z-index: 5;
+      bottom: var(--dock-inset);
+      left: var(--dock-inset);
+      right: var(--dock-inset);
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-radius: var(--dock-radius);
+      box-shadow: var(--island-shadow);
+      padding: var(--dock-pad);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .draft-dock .meta-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 2px 4px 0;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .draft-dock .meta-row strong { color: var(--accent); font-weight: 600; }
+    .draft-dock .keys { margin-left: auto; font-size: 10px; color: var(--faint); }
+    .draft-dock .close-btn {
+      width: 22px; height: 22px; border: 0; border-radius: 4px;
+      background: transparent; color: var(--muted); cursor: pointer;
+    }
+    .draft-dock .close-btn:hover { background: var(--hover); color: var(--text); }
+    .draft-dock .field textarea {
+      width: 100%;
+      min-height: 52px;
+      resize: none;
+      border: 1px solid var(--field-border);
+      border-radius: 4px;
+      padding: 6px 8px;
+      outline: none;
+      background: #fff;
+      color: var(--text);
+      line-height: 1.4;
+    }
+    .draft-dock .field textarea:focus {
+      box-shadow: var(--focus-ring);
+      border-color: var(--accent);
+    }
+
+    /* Right comment island — only when has comments */
+    .comment-island {
+      min-height: 0;
+      background: var(--bg);
+      border-radius: var(--island-radius);
+      box-shadow: var(--island-shadow);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      animation: island-in 160ms ease;
+    }
+    @keyframes island-in {
+      from { opacity: 0; transform: translateX(8px); }
+      to { opacity: 1; transform: none; }
+    }
+    .ci-head {
+      flex-shrink: 0;
+      padding: 10px 12px 8px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .ci-head h2 {
+      margin: 0;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--faint);
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .ci-count {
+      font-size: 11px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .ci-body {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .ci-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: #fff;
+      cursor: pointer;
+      text-align: left;
+      width: 100%;
+      color: inherit;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .ci-card:hover { border-color: #c5cad3; background: #fafbfd; }
+    .ci-card.active {
+      border-color: var(--accent);
+      background: #f8faff;
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+    .ci-card .anchor {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--accent);
+      font-family: "IBM Plex Mono", monospace;
+    }
+    .ci-card .body-text {
+      font-size: 12px;
+      color: var(--text);
+      line-height: 1.4;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .state-dump {
+      position: fixed;
+      right: 10px;
+      bottom: 14px;
+      width: 260px;
+      max-height: 28vh;
+      overflow: auto;
+      margin: 0;
+      padding: 8px 10px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px;
+      line-height: 1.35;
+      background: rgba(23, 32, 51, 0.88);
+      color: #e8ecf4;
+      border-radius: 8px;
+      z-index: 40;
+      pointer-events: none;
+    }
+    .proto-note {
+      position: fixed;
+      left: 50%;
+      bottom: 14px;
+      transform: translateX(-50%);
+      z-index: 50;
+      padding: 8px 14px;
+      background: #172033;
+      color: #fff;
+      border-radius: 999px;
+      font-size: 12px;
+      box-shadow: 0 8px 24px rgba(23, 32, 51, 0.35);
+      white-space: nowrap;
+    }
+    .proto-note a { color: #93c5fd; text-decoration: none; margin-left: 10px; }
+  </style>
+</head>
+<body>
+  <div class="proto-root">
+    <div class="win">
+      <header class="titlebar">
+        <div class="titlebar-leading">
+          <div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+        </div>
+        <div class="titlebar-main">
+          <strong>StressBridge.hpp</strong>
+          <span>a1b2c3d..9f8e7d6</span>
+          <span class="hint-pill">行号拖选 → + → 底部起草 · 有评论后右侧浮岛出现</span>
+        </div>
+      </header>
+      <div class="body">
+        <aside class="side">
+          <div class="side-body">
+            <button type="button" class="leaf"><span class="badge">M</span>StressBridge.hpp</button>
+          </div>
+        </aside>
+        <div class="stage-row" id="stageRow"></div>
+      </div>
+    </div>
+  </div>
+  <pre class="state-dump" id="stateDump"></pre>
+  <div class="proto-note">
+    chosen · gutter drag + bottom dock + comment island on demand
+    <a href="diff-comment.html">旧原型 →</a>
+  </div>
+
+  <script>
+    /**
+     * Chosen direction: mid-gutter drag select → + → bottom draft dock.
+     * Right comment island appears only when comments.length > 0.
+     * Code column: native text selection only.
+     */
+    const ICON_EMPTY = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3.5 3.5h9v7.2H8.2L5.5 13V10.7H3.5z"/></svg>`;
+    const ICON_FILLED = `<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3 3h10v7.5H8.1L5 13.2V10.5H3z"/><path d="M5.2 6.2h5.6M5.2 8.2h3.8" stroke="#fff" stroke-width="1.2" fill="none"/></svg>`;
+
+    const OLD_LINES = [
+      { ln: 1, text: "#pragma once", kind: "" },
+      { ln: 2, text: '#include "MechanicsError.hpp"', kind: "" },
+      { ln: 3, text: "#include <optional>", kind: "" },
+      { ln: 4, text: "#include <string>", kind: "" },
+      { ln: 5, text: "#include <vector>", kind: "" },
+      { ln: 6, text: "namespace Nuwa {", kind: "" },
+      { ln: 7, text: "class StressBridge {", kind: "" },
+      { ln: 8, text: "public:", kind: "" },
+      { ln: 9, text: "  explicit StressBridge();", kind: "" },
+      { ln: 10, text: "  void bind(const Mesh& mesh);", kind: "" },
+      { ln: 11, text: "  int timeoutMs = 10;", kind: "del" },
+      { ln: 12, text: "  void step_1();", kind: "" },
+      { ln: 13, text: "  void step_2();", kind: "" },
+      { ln: 14, text: "  void step_3();", kind: "" },
+      { ln: 15, text: "  std::optional<MechanicsError> takeFailure();", kind: "" },
+      { ln: 16, text: "  void alpha();", kind: "del" },
+      { ln: 17, text: "  void beta();", kind: "del" },
+      { ln: 18, text: "protected:", kind: "" },
+      { ln: 19, text: "  double timeS = 0;", kind: "" },
+      { ln: 20, text: "  int ticks = 0;", kind: "" },
+      { ln: 21, text: "  void note();", kind: "" },
+      { ln: 22, text: "  void poll();", kind: "" },
+      { ln: 23, text: "};", kind: "" },
+      { ln: 24, text: "} // namespace Nuwa", kind: "" },
+    ];
+    const NEW_LINES = [
+      { ln: 1, text: "#pragma once", kind: "" },
+      { ln: 2, text: '#include "MechanicsError.hpp"', kind: "" },
+      { ln: 3, text: "#include <optional>", kind: "" },
+      { ln: 4, text: "#include <string>", kind: "" },
+      { ln: 5, text: "#include <vector>", kind: "" },
+      { ln: 6, text: "#include <memory>", kind: "add" },
+      { ln: 7, text: "namespace Nuwa {", kind: "" },
+      { ln: 8, text: "class StressBridge {", kind: "" },
+      { ln: 9, text: "public:", kind: "" },
+      { ln: 10, text: "  explicit StressBridge();", kind: "" },
+      { ln: 11, text: "  void bind(const Mesh& mesh);", kind: "" },
+      { ln: 12, text: "  int timeoutMs = 40;", kind: "add" },
+      { ln: 13, text: "  void step_1();", kind: "" },
+      { ln: 14, text: "  void step_2();", kind: "" },
+      { ln: 15, text: "  void step_3();", kind: "" },
+      { ln: 16, text: "  std::optional<MechanicsError> takeFailure();", kind: "" },
+      { ln: 17, text: "  void searchReady();", kind: "add" },
+      { ln: 18, text: "  void gamma();", kind: "add" },
+      { ln: 19, text: "protected:", kind: "" },
+      { ln: 20, text: "  double timeS = 0;", kind: "" },
+      { ln: 21, text: "  int ticks = 0;", kind: "" },
+      { ln: 22, text: "  void note();", kind: "" },
+      { ln: 23, text: "  void poll();", kind: "" },
+      { ln: 24, text: "};", kind: "" },
+      { ln: 25, text: "} // namespace Nuwa", kind: "" },
+    ];
+
+    /** @typedef {{ id: string, side: 'old'|'new', start: number, end: number, body: string }} Comment */
+
+    const state = {
+      /** @type {{ side: 'old'|'new', start: number, end: number } | null} */
+      selection: null,
+      /** @type {Comment[]} */
+      comments: [],
+      draftId: null,
+      draftBody: "",
+      draftOpen: false,
+      draftTarget: null,
+      dragging: false,
+      dragSide: null,
+      dragAnchor: null,
+      highlightId: null,
+    };
+
+    let nextId = 1;
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+      );
+    }
+
+    function linesFor(side) {
+      return side === "old" ? OLD_LINES : NEW_LINES;
+    }
+
+    function commentOnLine(side, ln) {
+      return state.comments.find((c) => c.side === side && ln >= c.start && ln <= c.end);
+    }
+
+    function commentsStartingAt(side, ln) {
+      return state.comments.filter((c) => c.side === side && c.start === ln);
+    }
+
+    function rangeLabel(side, start, end) {
+      const s = side === "old" ? "Old" : "New";
+      return start === end ? `${s} L${start}` : `${s} L${start}–${end}`;
+    }
+
+    function normalizeSel(a, b) {
+      return { start: Math.min(a, b), end: Math.max(a, b) };
+    }
+
+    function openDraft({ id = null, side, start, end, body = "" }) {
+      state.draftOpen = true;
+      state.draftId = id;
+      state.draftBody = body;
+      state.draftTarget = { side, start, end };
+      state.selection = { side, start, end };
+      state.highlightId = id;
+      render();
+      requestAnimationFrame(() => {
+        const ta = document.querySelector("[data-draft-input]");
+        if (ta) {
+          ta.focus();
+          ta.setSelectionRange(ta.value.length, ta.value.length);
+        }
+      });
+    }
+
+    function closeDraft(clearSelection = true) {
+      state.draftOpen = false;
+      state.draftId = null;
+      state.draftBody = "";
+      state.draftTarget = null;
+      if (clearSelection) state.selection = null;
+    }
+
+    function saveDraft() {
+      const body = state.draftBody.trim();
+      const target = state.draftTarget;
+      if (!target || !body) return;
+      if (state.draftId) {
+        const c = state.comments.find((x) => x.id === state.draftId);
+        if (c) c.body = body;
+        state.highlightId = state.draftId;
+      } else {
+        const id = `c${nextId++}`;
+        state.comments.push({
+          id,
+          side: target.side,
+          start: target.start,
+          end: target.end,
+          body,
+        });
+        state.highlightId = id;
+      }
+      closeDraft(false);
+      render();
+    }
+
+    function dumpState() {
+      document.getElementById("stateDump").textContent = JSON.stringify(
+        {
+          selection: state.selection,
+          draftOpen: state.draftOpen,
+          draftId: state.draftId,
+          draftTarget: state.draftTarget,
+          draftBody: state.draftBody,
+          highlightId: state.highlightId,
+          commentIslandVisible: state.comments.length > 0,
+          comments: state.comments,
+        },
+        null,
+        2
+      );
+    }
+
+    function renderCommentBtn(side, ln, { offer, has, open }) {
+      if (!offer && !has) return "";
+      const cls = ["comment-btn", offer ? "offer" : "", has ? "has" : "", open ? "open" : ""]
+        .filter(Boolean)
+        .join(" ");
+      const title = has ? "Open comment" : "Add comment";
+      return `<button type="button" class="${cls}" data-act="icon" data-side="${side}" data-ln="${ln}" title="${title}">${has ? ICON_FILLED : ICON_EMPTY}</button>`;
+    }
+
+    function isSelected(side, ln) {
+      const sel = state.selection;
+      return sel && sel.side === side && ln >= sel.start && ln <= sel.end;
+    }
+
+    function isDrafting(side, ln) {
+      const t = state.draftTarget;
+      return state.draftOpen && t && t.side === side && ln >= t.start && ln <= t.end;
+    }
+
+    function renderPane(side) {
+      const lines = linesFor(side);
+      const sel = state.selection;
+      const rows = lines.map((line) => {
+        const ln = line.ln;
+        const cmt = commentOnLine(side, ln);
+        const selected = isSelected(side, ln);
+        const drafting = isDrafting(side, ln);
+        const isFirstOfSel = selected && sel && ln === sel.start;
+        const isFirstOfCmt = cmt && ln === cmt.start;
+        const showOpen =
+          state.draftOpen &&
+          state.draftTarget &&
+          state.draftTarget.side === side &&
+          ln === state.draftTarget.start;
+        const btn = renderCommentBtn(side, ln, {
+          offer: (selected && isFirstOfSel) || (cmt && isFirstOfCmt),
+          has: !!(cmt && isFirstOfCmt),
+          open: showOpen,
+        });
+
+        const classes = [
+          "row",
+          line.kind,
+          selected ? "selected" : "",
+          cmt ? "commented" : "",
+          drafting ? "drafting" : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+
+        const lnInner =
+          side === "old"
+            ? `<span class="ln-num">${ln}</span>${btn}`
+            : `${btn}<span class="ln-num">${ln}</span>`;
+        const lnCell = `<div class="ln-cell" data-ln-hit data-side="${side}" data-ln="${ln}">${lnInner}</div>`;
+        const code = `<div class="code">${esc(line.text)}</div>`;
+        const inner = side === "old" ? `${code}${lnCell}` : `${lnCell}${code}`;
+        return `<div class="${classes}" data-side="${side}" data-ln="${ln}">${inner}</div>`;
+      });
+
+      return `<div class="pane ${side}" data-pane="${side}"><div class="rows">${rows.join("")}</div></div>`;
+    }
+
+    function renderDock() {
+      if (!state.draftOpen || !state.draftTarget) return "";
+      const t = state.draftTarget;
+      const editing = state.draftId ? " · editing" : "";
+      return `
+        <div class="draft-dock" id="draftDock">
+          <div class="meta-row">
+            <span>DraftComment · <strong>${esc(rangeLabel(t.side, t.start, t.end))}</strong>${editing}</span>
+            <span class="keys">Enter 保存 · Shift+Enter 换行 · Esc 取消</span>
+            <button type="button" class="close-btn" data-act="close" title="Cancel" aria-label="Cancel">✕</button>
+          </div>
+          <div class="field">
+            <textarea data-draft-input placeholder="Write a comment…">${esc(state.draftBody)}</textarea>
+          </div>
+        </div>`;
+    }
+
+    function renderCommentIsland() {
+      if (!state.comments.length) return "";
+      const cards = state.comments
+        .slice()
+        .sort((a, b) => (a.side === b.side ? a.start - b.start : a.side.localeCompare(b.side)))
+        .map((c) => {
+          const active = state.highlightId === c.id || state.draftId === c.id;
+          return `
+            <button type="button" class="ci-card${active ? " active" : ""}" data-act="card" data-id="${c.id}">
+              <span class="anchor">${esc(rangeLabel(c.side, c.start, c.end))}</span>
+              <span class="body-text">${esc(c.body)}</span>
+            </button>`;
+        })
+        .join("");
+
+      return `
+        <aside class="comment-island">
+          <div class="ci-head">
+            <h2>Comments</h2>
+            <span class="ci-count">${state.comments.length}</span>
+          </div>
+          <div class="ci-body">${cards}</div>
+        </aside>`;
+    }
+
+    function render() {
+      const has = state.comments.length > 0;
+      const stage = document.getElementById("stageRow");
+      stage.classList.toggle("has-comments", has);
+      stage.innerHTML = `
+        <div class="diff-col">
+          <div class="file-status">
+            prototype · ${state.comments.length} comment(s)
+            · ${has ? "右侧 comment 浮岛已显示" : "无评论 · 右侧浮岛隐藏 · diff 占满"}
+          </div>
+          <div class="diff-island${state.draftOpen ? " draft-open" : ""}" id="diffIsland">
+            ${renderPane("old")}
+            <div class="gutter-mid"></div>
+            ${renderPane("new")}
+            ${renderDock()}
+          </div>
+        </div>
+        ${renderCommentIsland()}
+      `;
+      dumpState();
+      bind();
+    }
+
+    function paintSelectionOnly() {
+      const sel = state.selection;
+      document.querySelectorAll(".row").forEach((row) => {
+        const side = row.dataset.side;
+        const ln = Number(row.dataset.ln);
+        const on = sel && sel.side === side && ln >= sel.start && ln <= sel.end;
+        row.classList.toggle("selected", !!on);
+      });
+      // Offer icon only on selection start — full re-render on mouseup
+      dumpState();
+    }
+
+    function bind() {
+      const island = document.getElementById("diffIsland");
+      const stage = document.getElementById("stageRow");
+
+      island.querySelectorAll("[data-ln-hit]").forEach((el) => {
+        el.addEventListener("mousedown", (e) => {
+          if (e.button !== 0) return;
+          if (e.target.closest("[data-act=icon]")) return;
+          const side = el.dataset.side;
+          const ln = Number(el.dataset.ln);
+          state.dragging = true;
+          state.dragSide = side;
+          state.dragAnchor = ln;
+          if (state.draftOpen) closeDraft(false);
+          state.selection = { side, start: ln, end: ln };
+          render();
+          e.preventDefault();
+        });
+      });
+
+      stage.addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-act]");
+        if (!btn) return;
+        e.stopPropagation();
+        const act = btn.dataset.act;
+        if (act === "close") {
+          closeDraft(false);
+          render();
+          return;
+        }
+        if (act === "icon") {
+          const side = btn.dataset.side;
+          const ln = Number(btn.dataset.ln);
+          const existing = commentsStartingAt(side, ln)[0] || commentOnLine(side, ln);
+          if (existing && existing.start === ln) {
+            openDraft({
+              id: existing.id,
+              side: existing.side,
+              start: existing.start,
+              end: existing.end,
+              body: existing.body,
+            });
+          } else if (state.selection && state.selection.side === side) {
+            openDraft({
+              side: state.selection.side,
+              start: state.selection.start,
+              end: state.selection.end,
+            });
+          } else {
+            openDraft({ side, start: ln, end: ln });
+          }
+          return;
+        }
+        if (act === "card") {
+          const c = state.comments.find((x) => x.id === btn.dataset.id);
+          if (!c) return;
+          openDraft({
+            id: c.id,
+            side: c.side,
+            start: c.start,
+            end: c.end,
+            body: c.body,
+          });
+        }
+      });
+
+      const ta = island.querySelector("[data-draft-input]");
+      if (ta) {
+        ta.addEventListener("input", () => {
+          state.draftBody = ta.value;
+          dumpState();
+        });
+        ta.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            saveDraft();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            closeDraft(false);
+            render();
+          }
+        });
+      }
+    }
+
+    window.addEventListener("mousemove", (e) => {
+      if (!state.dragging || !state.dragSide) return;
+      const hit = e.target.closest?.("[data-ln-hit]");
+      if (!hit || hit.dataset.side !== state.dragSide) return;
+      const ln = Number(hit.dataset.ln);
+      const n = normalizeSel(state.dragAnchor, ln);
+      if (
+        state.selection &&
+        state.selection.start === n.start &&
+        state.selection.end === n.end
+      ) {
+        return;
+      }
+      state.selection = { side: state.dragSide, start: n.start, end: n.end };
+      paintSelectionOnly();
+    });
+
+    window.addEventListener("mouseup", () => {
+      if (!state.dragging) return;
+      state.dragging = false;
+      state.dragSide = null;
+      state.dragAnchor = null;
+      render();
+    });
+
+    window.addEventListener("keydown", (e) => {
+      const tag = (e.target && e.target.tagName) || "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || e.target?.isContentEditable) return;
+      if (e.key === "Escape" && state.draftOpen) {
+        closeDraft(false);
+        render();
+      }
+    });
+
+    render();
+  </script>
+</body>
+</html>

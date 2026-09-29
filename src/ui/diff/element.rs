@@ -206,8 +206,9 @@ impl Geom {
         }
     }
 
-    /// Line numbers plus icon slot — the band that carries the row's kind tint.
-    fn gutter_band(&self, side: Side) -> (f32, f32) {
+    /// Line numbers plus icon slot — the band that carries the row's kind tint
+    /// and starts a comment line-selection drag.
+    pub(super) fn gutter_band(&self, side: Side) -> (f32, f32) {
         match side {
             Side::Old => {
                 let l = f32::from(self.gutter.left());
@@ -1575,6 +1576,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
     let down_code = code.clone();
     let down_tracks = tracks.clone();
     let down_h_tracks = h_tracks.clone();
+    let down_hitbox = hitbox.clone();
     let down_icons: Vec<(Hitbox, IconMark)> = frame
         .icon_hitboxes
         .iter()
@@ -1617,15 +1619,28 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                     if pane.h_bar_shown(side) {
                         pane.press_h_track(side, local, cx);
                     } else {
-                        pane.press_row(side, y, cx);
+                        // Bar hidden: still allow omit-expand under the track strip.
+                        pane.press_code(side, y, cx);
                     }
                 });
                 return;
             }
         }
+        // Comment line selection: center gutter band (ln + icon) only.
+        if down_hitbox.is_hovered(window) {
+            let x = f32::from(event.position.x);
+            for side in [Side::Old, Side::New] {
+                let (l, r) = geom.gutter_band(side);
+                if x >= l && x < r {
+                    entity.update(cx, |pane, cx| pane.press_gutter_select(side, y, cx));
+                    return;
+                }
+            }
+        }
+        // Code column: omit-expand click only — never starts a line selection.
         for side in [Side::Old, Side::New] {
             if down_code[side_ix(side)].is_hovered(window) {
-                entity.update(cx, |pane, cx| pane.press_row(side, y, cx));
+                entity.update(cx, |pane, cx| pane.press_code(side, y, cx));
                 return;
             }
         }

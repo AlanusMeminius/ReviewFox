@@ -2,7 +2,7 @@ use gpui::{
     AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, ParentElement, Render, SharedString,
     StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Task, Timer, WeakEntity,
-    Window, WindowControlArea, actions, canvas, div, prelude::*, px, rgb,
+    Window, WindowControlArea, actions, canvas, div, prelude::*, px,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -146,6 +146,7 @@ pub struct DiffView {
     /// dock can open on the very first icon click without re-creating it.
     draft_field: Entity<TextField>,
     _draft_subscription: Subscription,
+    _draft_observe: Subscription,
     bounds_sub: Option<gpui::Subscription>,
 }
 
@@ -223,6 +224,8 @@ impl DiffView {
                 TextFieldEvent::Confirm => this.commit_draft(window, cx),
             },
         );
+        // Grow/shrink the bottom dock when Shift+Enter adds lines.
+        let draft_observe = cx.observe(&draft_field, |_, _, cx| cx.notify());
         let mut this = Self {
             focus: cx.focus_handle(),
             tree_collapsed: false,
@@ -260,6 +263,7 @@ impl DiffView {
             _search_subscriptions: search_subscriptions,
             draft_field,
             _draft_subscription: draft_subscription,
+            _draft_observe: draft_observe,
             bounds_sub: None,
         };
         this.with_pane(cx, |pane, cx| {
@@ -970,7 +974,8 @@ impl DiffView {
                         ))
                     })
                     // Frosted desk: the content island floats here, inset on all four
-                    // sides so the material reads around it.
+                    // sides so the material reads around it. Comment island sits to
+                    // the right of the diff island when the path has comments.
                     .child(
                         div()
                             .id("diff-stage")
@@ -985,7 +990,16 @@ impl DiffView {
                             .pt(px(theme::CHANGES_TOP_INSET))
                             .pl(px(theme::CHANGES_INSET))
                             .pr(px(theme::CHANGES_INSET))
-                            .child(render_dual_pane(self, cx))
+                            .child(
+                                div()
+                                    .id("diff-stage-islands")
+                                    .flex_1()
+                                    .min_h(px(0.))
+                                    .flex()
+                                    .gap(px(theme::COMMENT_ISLAND_GAP))
+                                    .child(render_dual_pane(self, cx))
+                                    .child(render_comment_island(self, cx)),
+                            )
                             .child(render_status_bar(self, cx)),
                     ),
             )
@@ -1416,16 +1430,15 @@ fn has_search(view: &DiffView) -> bool {
 /// Whether anything renders below the pane inside the island. The pane cannot
 /// round its own corners (see the note on the island's bottom inset), so this is
 /// what decides who owns the island's bottom edge.
-fn has_footer(view: &DiffView) -> bool {
-    let path = view
-        .snapshot
-        .as_ref()
-        .map(|s| s.selected_path.clone())
-        .unwrap_or_default();
-    view.review
-        .as_ref()
-        .is_some_and(|r| r.comments_for_path(&path).next().is_some())
+
+fn draft_line_count(view: &DiffView, cx: &App) -> usize {
+    view.draft_field.read(cx).visual_line_count()
 }
+
+fn draft_dock_h_for(view: &DiffView, cx: &App) -> f32 {
+    theme::draft_dock_height(draft_line_count(view, cx))
+}
+
 
 fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     let find_open = has_search(view);
@@ -1447,15 +1460,11 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
         // Find is an absolute overlay (not in flex flow) so open/close never changes
         // island flow height; when open, body top pad clears the capsule instead.
         .when(!find_open, |island| island.pt(px(theme::CHANGES_RADIUS)))
-        // Same for the bottom: the draft clearance replaces the radius pad, so
-        // the dock sits the same inset off the island edge as the find bar.
-        .when(!has_footer(view) && view.drafting.is_none(), |island| {
-            island.pb(px(theme::CHANGES_RADIUS))
-        })
+        .pb(px(theme::CHANGES_RADIUS))
         .child(render_body(view, find_open, cx))
         // Measure only — chrome paints after DualPane (see DiffView::render).
         .child(render_find_measure(view))
-        .child(render_comments(view, cx))
+        .child(render_draft_measure(view, cx))
 }
 
 /// Invisible slot where the floating find bar will be painted above DualPane.
@@ -1661,11 +1670,14 @@ fn render_files_segment(files: SearchFiles, cx: &mut Context<DiffView>) -> impl 
 /// When find is open, a leading spacer clears the floating capsule so the
 /// measured slot (and DualPane) starts below the bar. Top lines stay reachable
 /// without putting the find chrome in flex flow (no island height jitter).
+///
+/// Draft dock matches find's chrome path: island-absolute measure +
+/// `overlay_slot` after DualPane. No bottom flex clearance — opening it must
+/// not resize DualPane (that was the jitter). The dock floats over the code.
 fn render_body(view: &DiffView, find_open: bool, cx: &mut Context<DiffView>) -> impl IntoElement {
     match view.snapshot.as_ref().map(|s| &s.file) {
         Some(FileDiff::Text { .. }) => {
             let slot = view.pane_bounds.clone();
-            let draft_open = view.drafting.is_some();
             div()
                 .id("diff-pane-slot")
                 .relative()
@@ -1688,17 +1700,6 @@ fn render_body(view: &DiffView, find_open: bool, cx: &mut Context<DiffView>) -> 
                             .size_full(),
                     ),
                 )
-                // Mirror of the find clearance: the dock floats over this strip,
-                // so the last lines stay reachable while drafting.
-                .when(draft_open, |body| {
-                    body.child(
-                        div()
-                            .id("diff-draft-clearance")
-                            .flex_none()
-                            .h(px(theme::DRAFT_CONTENT_PAD)),
-                    )
-                })
-                .child(render_draft_measure(view))
                 .into_any_element()
         }
         Some(FileDiff::Binary) => placeholder("Binary file — no Alignment", cx),
@@ -1707,7 +1708,9 @@ fn render_body(view: &DiffView, find_open: bool, cx: &mut Context<DiffView>) -> 
     }
 }
 
-fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
+/// Right-hand comment island: only when the selected path has DraftComments.
+/// Click a card to reopen edit in the bottom dock (same path as the filled icon).
+fn render_comment_island(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     let mono = appearance::code_font(cx);
     let path = view
         .snapshot
@@ -1724,60 +1727,100 @@ fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElem
         return div().into_any_element();
     }
 
+    let n = comments.len();
+    let editing_id = view.drafting.as_ref().and_then(|d| d.editing);
     let (scroll, sb) = scrollbar::vertical("diff-comments-sb", cx);
+
     div()
+        .id("diff-comment-island")
         .flex_none()
-        .max_h(px(160.))
-        .border_t_1()
-        .border_color(theme::line())
-        .bg(rgb(0xfafbfd))
-        // Always the island's last child: match the island radius so the card's
-        // bottom corners read round.
-        .rounded_b(px(theme::CHANGES_RADIUS))
-        .child(scrollbar::overlay_max(
-            px(160.),
+        .w(px(theme::COMMENT_ISLAND_WIDTH))
+        .h_full()
+        .min_h(px(0.))
+        .flex()
+        .flex_col()
+        .bg(theme::white())
+        .rounded(px(theme::CHANGES_RADIUS))
+        .overflow_hidden()
+        .child(
+            div()
+                .flex_none()
+                .px(px(12.))
+                .pt(px(10.))
+                .pb(px(8.))
+                .border_b_1()
+                .border_color(theme::line())
+                .flex()
+                .items_baseline()
+                .gap_2()
+                .child(
+                    div()
+                        .ui_text_size(11., cx)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme::faint())
+                        .child("COMMENTS"),
+                )
+                .child(
+                    div()
+                        .ui_text_size(11., cx)
+                        .text_color(theme::muted())
+                        .child(format!("{n}")),
+                ),
+        )
+        .child(scrollbar::overlay_flex(
             div()
                 .id("diff-comments-scroll")
-                .w_full()
-                .max_h(px(160.))
-                // Row padding carries the rest of the island inset, so a row's
-                // hover tint has room without moving the text.
-                .px_2()
-                .py_2()
+                .size_full()
+                .px(px(8.))
+                .py(px(8.))
                 .track_scroll(&scroll)
                 .overflow_y_scroll()
                 .children(comments.into_iter().map(|c| {
                     let label = match &c.anchor {
                         Anchor::Line { side, span, .. } => {
-                            format!("{} · ", span_label(*side, span.start, span.count))
+                            span_label(*side, span.start, span.count)
                         }
-                        Anchor::File { .. } => "file · ".into(),
+                        Anchor::File { .. } => "file".into(),
                     };
                     let id = c.id;
+                    let active = editing_id == Some(id);
                     div()
                         .id(("cmt", c.id as usize))
-                        .ui_text_size(12., cx)
-                        .px_1()
-                        // Same reopen as the filled gutter icon.
+                        .w_full()
+                        .mb(px(8.))
+                        .px(px(10.))
+                        .py(px(8.))
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(if active {
+                            theme::accent()
+                        } else {
+                            theme::line()
+                        })
+                        .bg(if active {
+                            theme::selection_wash()
+                        } else {
+                            theme::white()
+                        })
                         .cursor_pointer()
-                        .rounded(px(4.))
                         .hover(|row| row.bg(theme::hover()))
                         .on_click(
                             cx.listener(move |this, _, window, cx| this.begin_edit(id, window, cx)),
                         )
                         .child(
                             div()
-                                .flex()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .font_family(mono.clone())
-                                        // Own size: the UI text around it scales, Code Font chrome does not.
-                                        .text_xs()
-                                        .text_color(theme::faint())
-                                        .child(label),
-                                )
-                                .child(div().text_color(theme::text()).child(c.body)),
+                                .font_family(mono.clone())
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme::accent())
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .mt(px(4.))
+                                .ui_text_size(12., cx)
+                                .text_color(theme::text())
+                                .child(c.body),
                         )
                 })),
             sb,
@@ -1785,19 +1828,21 @@ fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElem
         .into_any_element()
 }
 
+
 /// Invisible slot where the bottom draft dock will be painted above DualPane.
 /// Bottom-anchored mirror of [`render_find_measure`].
-fn render_draft_measure(view: &DiffView) -> impl IntoElement {
+fn render_draft_measure(view: &DiffView, cx: &App) -> impl IntoElement {
     if view.drafting.is_none() {
         return div().into_any_element();
     }
     let slot = view.draft_dock_bounds.clone();
+    let h = draft_dock_h_for(view, cx);
     div()
         .absolute()
         .bottom(px(theme::FIND_BAR_INSET))
         .left(px(theme::FIND_BAR_INSET))
         .right(px(theme::FIND_BAR_INSET))
-        .h(px(theme::DRAFT_DOCK_HEIGHT))
+        .h(px(h))
         .child(canvas(move |bounds, _, _| slot.set(Some(bounds)), |_, _, _, _| {}).size_full())
         .into_any_element()
 }
@@ -1820,6 +1865,9 @@ fn render_draft_dock(
         .is_focused(window);
     let mono = appearance::code_font(cx);
 
+    // Occlude so DualPane under the float does not take the click (that was
+    // starting a selection and cancelling the draft). Find avoids this because
+    // its clearance keeps DualPane out from under the bar; draft floats over.
     div()
         .size_full()
         .flex()
@@ -1829,6 +1877,7 @@ fn render_draft_dock(
         .rounded(px(theme::FIND_BAR_RADIUS))
         .bg(theme::find_bar_bg())
         .shadow(theme::find_bar_shadow())
+        .occlude()
         .child(
             div()
                 .flex_none()

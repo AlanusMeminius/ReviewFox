@@ -45,7 +45,7 @@ pub enum PaneEvent {
     OpenEdit {
         id: u64,
     },
-    /// A code-column drag began a new selection, so any open DraftComment is
+    /// A gutter-band drag began a new selection, so any open DraftComment is
     /// no longer the user's target.
     SelectionStarted,
     HunkIndexChanged(Option<usize>),
@@ -68,8 +68,8 @@ pub(super) struct PointerMove {
     pub h_track_x: [f32; 2],
 }
 
-/// Contiguous, same-side, line-granular selection from a code-column drag.
-/// `start..=end` in 1-based line numbers of `side`.
+/// Contiguous, same-side, line-granular selection from a center-gutter drag
+/// (line-number column + icon slot). `start..=end` in 1-based line numbers of `side`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LineSelection {
     side: Side,
@@ -1116,14 +1116,21 @@ impl DualPane {
         }
     }
 
-    /// Left press in `side`'s code column. On a line it starts a selection drag
-    /// (replacing any selection, including one on the other side); on an
-    /// omission separator it only arms the click that expands it.
-    pub(super) fn press_row(&mut self, side: Side, y: f32, cx: &mut Context<Self>) {
+    /// Left press in `side`'s code column: arm an omission-separator click only.
+    /// Line selection belongs to the gutter band so the code column stays free
+    /// for text selection.
+    pub(super) fn press_code(&mut self, side: Side, y: f32, _cx: &mut Context<Self>) {
         self.press = self.row_index_at(side, y).map(|row| (side, row));
+    }
+
+    /// Left press on `side`'s center-gutter band (line numbers + icon slot).
+    /// On a line it starts a selection drag (replacing any selection, including
+    /// one on the other side).
+    pub(super) fn press_gutter_select(&mut self, side: Side, y: f32, cx: &mut Context<Self>) {
         let Some(ln) = self.line_at(side, y) else {
             return;
         };
+        self.press = None;
         self.sel_drag = Some((side, ln));
         self.selection = Some(LineSelection {
             side,
