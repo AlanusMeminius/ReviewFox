@@ -41,7 +41,9 @@ pub enum TextFieldEvent {
 /// Visual variant. `Default` is the original full-width field; `Settings`
 /// follows Zed's settings input (min 256px wide, focused border); `Number` is
 /// the bare centered value inside a `NumberField`, which draws the frame;
-/// `Search` is the frameless full-width query bar atop a picker popover.
+/// `Search` is the frameless full-width query bar atop a picker popover;
+/// `Draft` is the frameless body field inside the Diff draft dock, which draws
+/// its own frame and is taller than one line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TextFieldStyle {
     #[default]
@@ -49,6 +51,7 @@ pub enum TextFieldStyle {
     Settings,
     Number,
     Search,
+    Draft,
 }
 
 pub struct TextField {
@@ -61,6 +64,8 @@ pub struct TextField {
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
+    /// Draft multi-line: `(byte_start_in_content, shaped line without the trailing newline)`.
+    last_lines: Option<Vec<(usize, ShapedLine)>>,
     last_bounds: Option<Bounds<Pixels>>,
     /// Horizontal scroll that keeps the cursor inside a field narrower than its text.
     scroll_x: Pixels,
@@ -79,6 +84,7 @@ impl TextField {
             selection_reversed: false,
             marked_range: None,
             last_layout: None,
+            last_lines: None,
             last_bounds: None,
             scroll_x: px(0.),
             is_selecting: false,
@@ -100,6 +106,11 @@ impl TextField {
         &self.content
     }
 
+    /// Visual rows for Draft (and any content with newlines): one per soft line.
+    pub fn visual_line_count(&self) -> usize {
+        self.content.split('\n').count().max(1)
+    }
+
     pub fn set_content(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.content = text.into();
         let end = self.content.len();
@@ -107,6 +118,12 @@ impl TextField {
         self.selection_reversed = false;
         self.marked_range = None;
         cx.notify();
+    }
+
+    /// Insert `text` at the caret, replacing any selection — what typing does,
+    /// for owners that need to place characters a key binding cannot produce.
+    pub fn insert(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_text_in_range(None, text, window, cx);
     }
 
     fn display_text(&self, focused: bool) -> SharedString {
@@ -202,7 +219,14 @@ impl TextField {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace("\n", " "), window, cx);
+            // Draft keeps newlines in content (paint flattens via
+            // `single_line_shape_text`). Other styles stay single-line.
+            let text = if self.style == TextFieldStyle::Draft {
+                text
+            } else {
+                text.replace('\n', " ")
+            };
+            self.replace_text_in_range(None, &text, window, cx);
         }
     }
 
@@ -240,8 +264,7 @@ impl TextField {
             return 0;
         }
 
-        let (Some(bounds), Some(line)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
-        else {
+        let Some(bounds) = self.last_bounds.as_ref() else {
             return 0;
         };
         if position.y < bounds.top() {
@@ -250,6 +273,19 @@ impl TextField {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
+
+        if let Some(lines) = self.last_lines.as_ref() {
+            let line_h = bounds.size.height / lines.len().max(1) as f32;
+            let mut row = ((position.y - bounds.top()) / line_h).floor() as usize;
+            row = row.min(lines.len().saturating_sub(1));
+            let (start, line) = &lines[row];
+            let local = line.closest_index_for_x(position.x - bounds.left());
+            return (*start + local).min(self.content.len());
+        }
+
+        let Some(line) = self.last_layout.as_ref() else {
+            return 0;
+        };
         line.closest_index_for_x(position.x - bounds.left())
     }
 
@@ -471,12 +507,15 @@ struct TextElement {
 const CARET_INSET: f32 = 3.;
 
 struct PrepaintState {
+    /// Single-line styles.
     line: Option<ShapedLine>,
+    /// Draft multi-line: one shaped line per visual row, with content byte start.
+    lines: Option<Vec<(usize, ShapedLine)>>,
     cursor: Option<PaintQuad>,
-    selection: Option<PaintQuad>,
+    selection: Vec<PaintQuad>,
     scroll_x: Pixels,
-    /// Downward shift so glyph ink centres in the ascent+descent line box.
     ink_nudge: Pixels,
+    line_height: Pixels,
 }
 
 impl IntoElement for TextElement {
@@ -506,9 +545,16 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        let input = self.input.read(cx);
+        let multiline = input.style == TextFieldStyle::Draft;
+        let rows = if multiline {
+            input.visual_line_count()
+        } else {
+            1
+        };
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = window.line_height().into();
+        style.size.height = (window.line_height() * rows as f32).into();
         (window.request_layout(style, [], cx), ())
     }
 
@@ -523,11 +569,13 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let centered = input.style == TextFieldStyle::Number;
+        let multiline = input.style == TextFieldStyle::Draft;
         let focused = input.focus_handle.is_focused(window);
         let content = input.display_text(focused);
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let style = window.text_style();
+        let line_height = window.line_height();
 
         let (display_text, text_color) = if input.content.is_empty() {
             (input.placeholder.clone(), hsla(0., 0., 0., 0.35))
@@ -535,14 +583,95 @@ impl Element for TextElement {
             (content, style.color)
         };
 
-        let run = TextRun {
-            len: display_text.len(),
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let run_for = |text: &str| TextRun {
+            len: text.len(),
             font: style.font(),
             color: text_color,
             background_color: None,
             underline: None,
             strikethrough: None,
         };
+
+        if multiline {
+            let slices = draft_line_slices(&display_text);
+            let mut shaped: Vec<(usize, ShapedLine)> = Vec::with_capacity(slices.len());
+            for (start, piece) in &slices {
+                let line = window.text_system().shape_line(
+                    (*piece).to_owned().into(),
+                    font_size,
+                    &[run_for(piece)],
+                    None,
+                );
+                shaped.push((*start, line));
+            }
+            let ink_nudge = shaped
+                .first()
+                .map(|(_, line)| ink_nudge_for_line(line, &display_text, font_size, cx))
+                .unwrap_or(px(0.));
+
+            let cursor_width = px(2.);
+            let (line_ix, local) = cursor_line_local(&shaped, cursor, display_text.len());
+            let (_, cursor_line) = &shaped[line_ix];
+            let cursor_x = cursor_line.x_for_index(local);
+            let row_top = bounds.top() + line_height * line_ix as f32;
+            let chrome_top = row_top + px(CARET_INSET);
+            let chrome_bottom = row_top + line_height - px(CARET_INSET);
+            let left = bounds.left();
+
+            let mut selection = Vec::new();
+            let cursor_quad = if selected_range.is_empty() {
+                Some(fill(
+                    Bounds::new(
+                        point(left + cursor_x, chrome_top),
+                        size(cursor_width, chrome_bottom - chrome_top),
+                    ),
+                    gpui::blue(),
+                ))
+            } else {
+                let (a, b) = (selected_range.start, selected_range.end);
+                let (start_ix, start_local) = cursor_line_local(&shaped, a, display_text.len());
+                let (end_ix, end_local) = cursor_line_local(&shaped, b, display_text.len());
+                for row in start_ix..=end_ix {
+                    let (byte_start, line) = &shaped[row];
+                    let x0 = if row == start_ix {
+                        line.x_for_index(start_local)
+                    } else {
+                        px(0.)
+                    };
+                    let x1 = if row == end_ix {
+                        line.x_for_index(end_local)
+                    } else {
+                        line.width
+                    };
+                    let top = bounds.top() + line_height * row as f32 + px(CARET_INSET);
+                    let bottom = bounds.top() + line_height * (row as f32 + 1.) - px(CARET_INSET);
+                    selection.push(fill(
+                        Bounds::from_corners(
+                            point(left + x0, top),
+                            point(left + x1.max(x0 + px(1.)), bottom),
+                        ),
+                        rgba(0x3311ff30),
+                    ));
+                    let _ = byte_start;
+                }
+                None
+            };
+
+            return PrepaintState {
+                line: None,
+                lines: Some(shaped),
+                cursor: cursor_quad,
+                selection,
+                scroll_x: px(0.),
+                ink_nudge,
+                line_height,
+            };
+        }
+
+        // Single-line styles: never pass `\n` to shape_line.
+        let display_text = single_line_shape_text(&display_text);
+        let run = run_for(&display_text);
         let runs = if let Some(marked_range) = input.marked_range.as_ref() {
             let mark_start = marked_range.start.min(display_text.len());
             let mark_end = marked_range.end.min(display_text.len()).max(mark_start);
@@ -572,17 +701,14 @@ impl Element for TextElement {
             vec![run]
         };
 
-        let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window
             .text_system()
             .shape_line(display_text.clone(), font_size, &runs, None);
         let ink_nudge = ink_nudge_for_line(&line, &display_text, font_size, cx);
 
-        // Scroll just enough to keep the cursor (2px wide) in view.
         let cursor_width = px(2.);
         let visible = bounds.size.width - cursor_width;
         let cursor_x = line.x_for_index(cursor);
-        // A centered line that fits is drawn as a negative scroll.
         let mut scroll_x = input.scroll_x.max(px(0.));
         if line.width <= visible {
             scroll_x = if centered {
@@ -604,13 +730,12 @@ impl Element for TextElement {
         let left = bounds.left() - scroll_x;
         let chrome_top = bounds.top() + px(CARET_INSET);
         let chrome_bottom = bounds.bottom() - px(CARET_INSET);
-        let cursor_pos = cursor_x;
-        let (selection, cursor) = if selected_range.is_empty() {
+        let (selection, cursor_quad) = if selected_range.is_empty() {
             (
-                None,
+                Vec::new(),
                 Some(fill(
                     Bounds::new(
-                        point(left + cursor_pos, chrome_top),
+                        point(left + cursor_x, chrome_top),
                         size(cursor_width, chrome_bottom - chrome_top),
                     ),
                     gpui::blue(),
@@ -618,22 +743,24 @@ impl Element for TextElement {
             )
         } else {
             (
-                Some(fill(
+                vec![fill(
                     Bounds::from_corners(
                         point(left + line.x_for_index(selected_range.start), chrome_top),
                         point(left + line.x_for_index(selected_range.end), chrome_bottom),
                     ),
                     rgba(0x3311ff30),
-                )),
+                )],
                 None,
             )
         };
         PrepaintState {
             line: Some(line),
-            cursor,
+            lines: None,
+            cursor: cursor_quad,
             selection,
             scroll_x,
             ink_nudge,
+            line_height,
         }
     }
 
@@ -655,32 +782,47 @@ impl Element for TextElement {
         );
         let scroll_x = prepaint.scroll_x;
         let ink_nudge = prepaint.ink_nudge;
-        // Hit-testing / IME use the un-nudged box; paint origin is shifted so
-        // ink centres in the ascent+descent line box.
+        let line_height = prepaint.line_height;
         let hit_bounds = Bounds::new(
             point(bounds.left() - scroll_x, bounds.top()),
             size(bounds.size.width + scroll_x, bounds.size.height),
         );
-        let paint_origin = point(hit_bounds.origin.x, hit_bounds.origin.y + ink_nudge);
-        let line = prepaint.line.take().unwrap();
+
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            if let Some(selection) = prepaint.selection.take() {
-                window.paint_quad(selection)
+            for quad in prepaint.selection.drain(..) {
+                window.paint_quad(quad);
             }
-            line.paint(paint_origin, window.line_height(), window, cx)
-                .unwrap();
+            if let Some(lines) = prepaint.lines.take() {
+                for (row, (_start, line)) in lines.iter().enumerate() {
+                    let origin = point(
+                        hit_bounds.origin.x,
+                        hit_bounds.origin.y + line_height * row as f32 + ink_nudge,
+                    );
+                    line.paint(origin, line_height, window, cx).unwrap();
+                }
+                self.input.update(cx, |input, _cx| {
+                    input.last_layout = None;
+                    input.last_lines = Some(lines);
+                    input.last_bounds = Some(hit_bounds);
+                    input.scroll_x = scroll_x;
+                });
+            } else {
+                let line = prepaint.line.take().unwrap();
+                let paint_origin = point(hit_bounds.origin.x, hit_bounds.origin.y + ink_nudge);
+                line.paint(paint_origin, line_height, window, cx).unwrap();
+                self.input.update(cx, |input, _cx| {
+                    input.last_layout = Some(line);
+                    input.last_lines = None;
+                    input.last_bounds = Some(hit_bounds);
+                    input.scroll_x = scroll_x;
+                });
+            }
 
             if focus_handle.is_focused(window)
                 && let Some(cursor) = prepaint.cursor.take()
             {
                 window.paint_quad(cursor);
             }
-        });
-
-        self.input.update(cx, |input, _cx| {
-            input.last_layout = Some(line);
-            input.last_bounds = Some(hit_bounds);
-            input.scroll_x = scroll_x;
         });
     }
 }
@@ -767,6 +909,15 @@ impl Render for TextField {
                         .h(px(theme::FIND_FIELD_HEIGHT))
                         .line_height(px(theme::FIND_FIELD_HEIGHT))
                         .px_2(),
+                    // The dock owns the frame; the caret sits on the field's
+                    // first line rather than centred in its taller box.
+                    TextFieldStyle::Draft => field
+                        .w_full()
+                        .h_full()
+                        .items_start()
+                        .line_height(px(22.))
+                        .px_2()
+                        .py_1(),
                 }
             })
             .ui_text_size(13., cx)
@@ -775,10 +926,85 @@ impl Render for TextField {
     }
 }
 
+/// Split Draft content into visual rows. Each entry is `(byte_start, text)`
+/// where `text` never contains `\n` (the newline itself sits between rows).
+fn draft_line_slices(text: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, ch) in text.char_indices() {
+        if ch == '\n' {
+            out.push((start, &text[start..i]));
+            start = i + ch.len_utf8();
+        }
+    }
+    out.push((start, &text[start..]));
+    if out.is_empty() {
+        out.push((0, ""));
+    }
+    out
+}
+
+/// Map a content byte offset onto `(line_index, offset_within_shaped_line)`.
+fn cursor_line_local(
+    lines: &[(usize, ShapedLine)],
+    offset: usize,
+    content_len: usize,
+) -> (usize, usize) {
+    let offset = offset.min(content_len);
+    if lines.is_empty() {
+        return (0, 0);
+    }
+    for (ix, (start, line)) in lines.iter().enumerate() {
+        let next_start = lines
+            .get(ix + 1)
+            .map(|(s, _)| *s)
+            .unwrap_or(usize::MAX);
+        if offset < next_start || ix + 1 == lines.len() {
+            let local = offset.saturating_sub(*start).min(line.len());
+            return (ix, local);
+        }
+        let _ = line;
+    }
+    let last = lines.len() - 1;
+    (last, lines[last].1.len())
+}
+
+/// GPUI `shape_line` panics on `\n`. Non-Draft styles flatten; Draft uses
+/// [`draft_line_slices`].
+fn single_line_shape_text(text: &str) -> SharedString {
+    if text.as_bytes().contains(&b'\n') {
+        text.replace('\n', " ").into()
+    } else {
+        text.to_owned().into()
+    }
+}
+
 impl gpui::EventEmitter<TextFieldEvent> for TextField {}
 
 impl Focusable for TextField {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{draft_line_slices, single_line_shape_text};
+
+    #[test]
+    fn draft_line_slices_splits_on_newlines() {
+        assert_eq!(draft_line_slices("a\nb"), vec![(0, "a"), (2, "b")]);
+        assert_eq!(draft_line_slices("a\n"), vec![(0, "a"), (2, "")]);
+        assert_eq!(draft_line_slices(""), vec![(0, "")]);
+        assert_eq!(draft_line_slices("plain"), vec![(0, "plain")]);
+    }
+
+    #[test]
+    fn single_line_shape_text_flattens_newlines_without_changing_len() {
+        let raw = "line one\nline two\n";
+        let flat = single_line_shape_text(raw);
+        assert_eq!(flat.as_ref(), "line one line two ");
+        assert_eq!(flat.len(), raw.len());
+        assert!(!flat.as_bytes().contains(&b'\n'));
     }
 }

@@ -24,7 +24,7 @@ const FRAMES: usize = 2000;
 /// insert / delete / replace (3→2, 2→4) between Equal runs. Every fifth Equal
 /// run is expanded, the rest fold.
 fn synthetic(lines: u32, hunks: u32) -> (String, String, Alignment, FoldState) {
-    let (mut old, mut new) = (String::new(), String::new());
+    let (mut preimage, mut postimage) = (String::new(), String::new());
     let (mut o, mut n) = (1u32, 1u32);
     let mut ops = Vec::new();
     let mut fold = FoldState::collapsed();
@@ -40,53 +40,53 @@ fn synthetic(lines: u32, hunks: u32) -> (String, String, Alignment, FoldState) {
             fold.expand(ops.len());
         }
         ops.push(AlignmentOp::Equal {
-            old: span(o, equal),
-            new: span(n, equal),
+            preimage: span(o, equal),
+            postimage: span(n, equal),
         });
         for i in 0..equal {
-            push(&mut old, o + i, "same");
-            push(&mut new, o + i, "same");
+            push(&mut preimage, o + i, "same");
+            push(&mut postimage, o + i, "same");
         }
         o += equal;
         n += equal;
-        let (olds, news) = match h % 4 {
+        let (preimages, postimages) = match h % 4 {
             0 => (0, 3),
             1 => (3, 0),
             2 => (3, 2),
             _ => (2, 4),
         };
-        for i in 0..olds {
-            push(&mut old, o + i, "before");
+        for i in 0..preimages {
+            push(&mut preimage, o + i, "before");
         }
-        for i in 0..news {
-            push(&mut new, n + i, "after");
+        for i in 0..postimages {
+            push(&mut postimage, n + i, "after");
         }
-        ops.push(match (olds, news) {
+        ops.push(match (preimages, postimages) {
             (0, _) => AlignmentOp::Insert {
-                after_old: o - 1,
-                news: span(n, news),
+                after_preimage: o - 1,
+                postimages: span(n, postimages),
             },
             (_, 0) => AlignmentOp::Delete {
-                olds: span(o, olds),
-                at_new: n - 1,
+                preimages: span(o, preimages),
+                at_postimage: n - 1,
             },
             _ => AlignmentOp::Replace {
-                olds: span(o, olds),
-                news: span(n, news),
+                preimages: span(o, preimages),
+                postimages: span(n, postimages),
             },
         });
-        o += olds;
-        n += news;
+        o += preimages;
+        n += postimages;
     }
     ops.push(AlignmentOp::Equal {
-        old: span(o, equal),
-        new: span(n, equal),
+        preimage: span(o, equal),
+        postimage: span(n, equal),
     });
     for i in 0..equal {
-        push(&mut old, o + i, "tail");
-        push(&mut new, n + i, "tail");
+        push(&mut preimage, o + i, "tail");
+        push(&mut postimage, n + i, "tail");
     }
-    (old, new, Alignment { ops }, fold)
+    (preimage, postimage, Alignment { ops }, fold)
 }
 
 /// One display line for wrap perf: short, long, punct-heavy, or megabyte-ish.
@@ -136,7 +136,7 @@ fn synthetic_wrap_line(ln: u32, tag: &str) -> String {
 
 /// Like [`synthetic`] but with [`synthetic_wrap_line`] bodies for rewrap timing.
 fn synthetic_wrap(lines: u32, hunks: u32) -> (String, String, Alignment, FoldState) {
-    let (mut old, mut new) = (String::new(), String::new());
+    let (mut preimage, mut postimage) = (String::new(), String::new());
     let (mut o, mut n) = (1u32, 1u32);
     let mut ops = Vec::new();
     let mut fold = FoldState::collapsed();
@@ -150,53 +150,53 @@ fn synthetic_wrap(lines: u32, hunks: u32) -> (String, String, Alignment, FoldSta
             fold.expand(ops.len());
         }
         ops.push(AlignmentOp::Equal {
-            old: span(o, equal),
-            new: span(n, equal),
+            preimage: span(o, equal),
+            postimage: span(n, equal),
         });
         for i in 0..equal {
-            push(&mut old, o + i, "same");
-            push(&mut new, o + i, "same");
+            push(&mut preimage, o + i, "same");
+            push(&mut postimage, o + i, "same");
         }
         o += equal;
         n += equal;
-        let (olds, news) = match h % 4 {
+        let (preimages, postimages) = match h % 4 {
             0 => (0, 3),
             1 => (3, 0),
             2 => (3, 2),
             _ => (2, 4),
         };
-        for i in 0..olds {
-            push(&mut old, o + i, "before");
+        for i in 0..preimages {
+            push(&mut preimage, o + i, "before");
         }
-        for i in 0..news {
-            push(&mut new, n + i, "after");
+        for i in 0..postimages {
+            push(&mut postimage, n + i, "after");
         }
-        ops.push(match (olds, news) {
+        ops.push(match (preimages, postimages) {
             (0, _) => AlignmentOp::Insert {
-                after_old: o - 1,
-                news: span(n, news),
+                after_preimage: o - 1,
+                postimages: span(n, postimages),
             },
             (_, 0) => AlignmentOp::Delete {
-                olds: span(o, olds),
-                at_new: n - 1,
+                preimages: span(o, preimages),
+                at_postimage: n - 1,
             },
             _ => AlignmentOp::Replace {
-                olds: span(o, olds),
-                news: span(n, news),
+                preimages: span(o, preimages),
+                postimages: span(n, postimages),
             },
         });
-        o += olds;
-        n += news;
+        o += preimages;
+        n += postimages;
     }
     ops.push(AlignmentOp::Equal {
-        old: span(o, equal),
-        new: span(n, equal),
+        preimage: span(o, equal),
+        postimage: span(n, equal),
     });
     for i in 0..equal {
-        push(&mut old, o + i, "tail");
-        push(&mut new, n + i, "tail");
+        push(&mut preimage, o + i, "tail");
+        push(&mut postimage, n + i, "tail");
     }
-    (old, new, Alignment { ops }, fold)
+    (preimage, postimage, Alignment { ops }, fold)
 }
 
 const REWRAP_WARM: usize = 15;
@@ -218,34 +218,34 @@ fn median(mut samples: Vec<Duration>) -> Duration {
 }
 
 fn time_layout_rewrap(
-    old: &str,
-    new: &str,
+    preimage: &str,
+    postimage: &str,
     alignment: &Alignment,
     fold: Option<&FoldState>,
     width_px: f32,
 ) -> RewrapRun {
-    let old_arc: Arc<str> = old.into();
-    let new_arc: Arc<str> = new.into();
+    let preimage_arc: Arc<str> = preimage.into();
+    let postimage_arc: Arc<str> = postimage.into();
     let t0 = Instant::now();
     let off = Layout::build(
-        Arc::clone(&old_arc),
-        Arc::clone(&new_arc),
+        Arc::clone(&preimage_arc),
+        Arc::clone(&postimage_arc),
         alignment,
         fold,
         None,
     );
     let wrap_off = t0.elapsed();
-    black_box((off.old.rows(), off.new.rows()));
+    black_box((off.preimage.rows(), off.postimage.rows()));
 
     let plan = WrapPlan {
-        old: WrapSide { width_px },
-        new: WrapSide { width_px },
+        preimage: WrapSide { width_px },
+        postimage: WrapSide { width_px },
     };
     for _ in 0..2 {
         let mut cw = fake_char_width;
         let _ = Layout::build(
-            Arc::clone(&old_arc),
-            Arc::clone(&new_arc),
+            Arc::clone(&preimage_arc),
+            Arc::clone(&postimage_arc),
             alignment,
             fold,
             Some((&plan, &mut cw)),
@@ -258,8 +258,8 @@ fn time_layout_rewrap(
         let t = Instant::now();
         let mut cw = fake_char_width;
         let layout = Layout::build(
-            Arc::clone(&old_arc),
-            Arc::clone(&new_arc),
+            Arc::clone(&preimage_arc),
+            Arc::clone(&postimage_arc),
             alignment,
             fold,
             Some((&plan, &mut cw)),
@@ -267,7 +267,7 @@ fn time_layout_rewrap(
         let took = t.elapsed();
         samples.push(took);
         max = max.max(took);
-        rows = [layout.old.rows(), layout.new.rows()];
+        rows = [layout.preimage.rows(), layout.postimage.rows()];
         black_box(layout.wrap.is_some());
     }
     let wrap_median = median(samples);
@@ -280,14 +280,14 @@ fn time_layout_rewrap(
 }
 
 fn wrap_off_build(
-    old: &str,
-    new: &str,
+    preimage: &str,
+    postimage: &str,
     alignment: &Alignment,
     fold: Option<&FoldState>,
 ) -> Duration {
     let t = Instant::now();
-    let layout = Layout::build(old.into(), new.into(), alignment, fold, None);
-    black_box((layout.old.rows(), layout.new.rows()));
+    let layout = Layout::build(preimage.into(), postimage.into(), alignment, fold, None);
+    black_box((layout.preimage.rows(), layout.postimage.rows()));
     t.elapsed()
 }
 
@@ -309,7 +309,7 @@ fn frame(layout: &Layout, scroll_s: &mut f32, dy: f32) -> usize {
     *scroll_s = viewport::clamp_s(layout, *scroll_s + dy, VIEW_H, ROW_H);
     let vp = Viewport::new(layout, *scroll_s, VIEW_H, ROW_H).snapped(SCALE);
     let mut visible = 0;
-    for side in [Side::Old, Side::New] {
+    for side in [Side::Preimage, Side::Postimage] {
         let rows = layout.side(side);
         let range = vp.visible_rows(side);
         visible += range.len();
@@ -372,16 +372,16 @@ struct Run {
 /// `FRAMES` steps twice (cold: word marks computed as rows appear; warm:
 /// memoized) and time each frame.
 fn run(lines: u32, hunks: u32, folded: bool) -> Run {
-    let (old, new, alignment, fold) = synthetic(lines, hunks);
+    let (preimage, postimage, alignment, fold) = synthetic(lines, hunks);
     let t = Instant::now();
     let layout = Layout::build(
-        old.into(),
-        new.into(),
+        preimage.into(),
+        postimage.into(),
         &alignment,
         folded.then_some(&fold),
         None,
     );
-    black_box((layout.old.max_chars(), layout.new.max_chars()));
+    black_box((layout.preimage.max_chars(), layout.postimage.max_chars()));
     let build = t.elapsed();
     let (lo, hi) = viewport::s_range(&layout, VIEW_H, ROW_H);
     let dy = (hi - lo) / FRAMES as f32;
@@ -401,7 +401,7 @@ fn run(lines: u32, hunks: u32, folded: bool) -> Run {
     let (warm, warm_max, visible) = pass();
     Run {
         build,
-        rows: [layout.old.rows(), layout.new.rows()],
+        rows: [layout.preimage.rows(), layout.postimage.rows()],
         cold,
         warm,
         warm_max,
@@ -458,26 +458,26 @@ const REWRAP_WIDTH_PX: f32 = 640.;
 #[test]
 #[ignore = "timing; run with --release --ignored --nocapture"]
 fn rewrap_cost_report() {
-    let (old, new, alignment, fold) = synthetic_wrap(20_000, 500);
+    let (preimage, postimage, alignment, fold) = synthetic_wrap(20_000, 500);
     let (small_old, small_new, small_align, small_fold) = synthetic_wrap(2_000, 50);
     let width = REWRAP_WIDTH_PX;
     // Allocator / icache warm-up.
     {
         let mut cw = fake_char_width;
         let plan = WrapPlan {
-            old: WrapSide { width_px: width },
-            new: WrapSide { width_px: width },
+            preimage: WrapSide { width_px: width },
+            postimage: WrapSide { width_px: width },
         };
         let _ = Layout::build(
-            old.as_str().into(),
-            new.as_str().into(),
+            preimage.as_str().into(),
+            postimage.as_str().into(),
             &alignment,
             Some(&fold),
             Some((&plan, &mut cw)),
         );
     }
-    let folded = time_layout_rewrap(&old, &new, &alignment, Some(&fold), width);
-    let expanded = time_layout_rewrap(&old, &new, &alignment, None, width);
+    let folded = time_layout_rewrap(&preimage, &postimage, &alignment, Some(&fold), width);
+    let expanded = time_layout_rewrap(&preimage, &postimage, &alignment, None, width);
     for (name, r) in [
         ("20k wrap synth, folded", &folded),
         ("20k wrap synth, expanded", &expanded),
@@ -498,7 +498,7 @@ fn rewrap_cost_report() {
     );
 
     let small_off = wrap_off_build(&small_old, &small_new, &small_align, Some(&small_fold));
-    let large_off = wrap_off_build(&old, &new, &alignment, Some(&fold));
+    let large_off = wrap_off_build(&preimage, &postimage, &alignment, Some(&fold));
     let ratio = large_off.as_secs_f64() / small_off.as_secs_f64().max(1e-9);
     eprintln!(
         "wrap-off layout build 2k vs 20k (folded): {:.2}ms vs {:.2}ms, ratio {ratio:.2}",

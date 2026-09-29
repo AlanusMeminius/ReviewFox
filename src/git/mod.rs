@@ -714,8 +714,8 @@ fn open_repo(comparison: &Comparison) -> Result<git2::Repository> {
 pub fn side_lines(comparison: &Comparison, side: Side, path: &str) -> Result<Vec<String>> {
     let repo = open_repo(comparison)?;
     let oid = match side {
-        Side::Old => comparison.base_oid,
-        Side::New => Some(comparison.head_oid),
+        Side::Preimage => comparison.base_oid,
+        Side::Postimage => Some(comparison.head_oid),
     };
     let bytes = blob_text_at(&repo, oid, path)?.unwrap_or_default();
     if is_binary(&bytes) {
@@ -771,14 +771,14 @@ pub fn is_binary(data: &[u8]) -> bool {
 pub enum FileDiff {
     Text {
         alignment: Alignment,
-        old_text: Arc<str>,
-        new_text: Arc<str>,
+        preimage_text: Arc<str>,
+        postimage_text: Arc<str>,
     },
     Binary,
     Error(String),
 }
 
-/// Load old/new blobs for a path and compute Alignment under ViewOptions.
+/// Load preimage/postimage blobs for a path and compute Alignment under ViewOptions.
 pub fn file_diff(
     comparison: &Comparison,
     path: &str,
@@ -798,26 +798,26 @@ fn file_diff_inner(
     options: &ViewOptions,
 ) -> Result<FileDiff> {
     let repo = open_repo(comparison)?;
-    let old_bytes = match status {
+    let preimage_bytes = match status {
         PathStatus::Add => Vec::new(),
         _ => blob_text_at(&repo, comparison.base_oid, path)?.unwrap_or_default(),
     };
-    let new_bytes = match status {
+    let postimage_bytes = match status {
         PathStatus::Delete => Vec::new(),
         _ => blob_text_at(&repo, Some(comparison.head_oid), path)?.unwrap_or_default(),
     };
 
-    if is_binary(&old_bytes) || is_binary(&new_bytes) {
+    if is_binary(&preimage_bytes) || is_binary(&postimage_bytes) {
         return Ok(FileDiff::Binary);
     }
 
-    let old_text: Arc<str> = String::from_utf8_lossy(&old_bytes).into();
-    let new_text: Arc<str> = String::from_utf8_lossy(&new_bytes).into();
-    let alignment = compute_alignment(&old_text, &new_text, options);
+    let preimage_text: Arc<str> = String::from_utf8_lossy(&preimage_bytes).into();
+    let postimage_text: Arc<str> = String::from_utf8_lossy(&postimage_bytes).into();
+    let alignment = compute_alignment(&preimage_text, &postimage_text, options);
     Ok(FileDiff::Text {
         alignment,
-        old_text,
-        new_text,
+        preimage_text,
+        postimage_text,
     })
 }
 
@@ -830,61 +830,61 @@ fn alignment_from_diff_ops(ops: &[DiffOp]) -> Alignment {
     for op in ops {
         match *op {
             DiffOp::Equal {
-                old_index,
-                new_index,
+                old_index: preimage_index,
+                new_index: postimage_index,
                 len,
             } => {
                 out.push(AlignmentOp::Equal {
-                    old: LineSpan {
-                        start: old_index as u32 + 1,
+                    preimage: LineSpan {
+                        start: preimage_index as u32 + 1,
                         count: len as u32,
                     },
-                    new: LineSpan {
-                        start: new_index as u32 + 1,
+                    postimage: LineSpan {
+                        start: postimage_index as u32 + 1,
                         count: len as u32,
                     },
                 });
             }
             DiffOp::Delete {
-                old_index,
-                old_len,
-                new_index,
+                old_index: preimage_index,
+                old_len: preimage_len,
+                new_index: postimage_index,
             } => {
                 out.push(AlignmentOp::Delete {
-                    olds: LineSpan {
-                        start: old_index as u32 + 1,
-                        count: old_len as u32,
+                    preimages: LineSpan {
+                        start: preimage_index as u32 + 1,
+                        count: preimage_len as u32,
                     },
-                    at_new: new_index as u32 + 1,
+                    at_postimage: postimage_index as u32 + 1,
                 });
             }
             DiffOp::Insert {
-                old_index,
-                new_index,
-                new_len,
+                old_index: preimage_index,
+                new_index: postimage_index,
+                new_len: postimage_len,
             } => {
                 out.push(AlignmentOp::Insert {
-                    after_old: old_index as u32,
-                    news: LineSpan {
-                        start: new_index as u32 + 1,
-                        count: new_len as u32,
+                    after_preimage: preimage_index as u32,
+                    postimages: LineSpan {
+                        start: postimage_index as u32 + 1,
+                        count: postimage_len as u32,
                     },
                 });
             }
             DiffOp::Replace {
-                old_index,
-                old_len,
-                new_index,
-                new_len,
+                old_index: preimage_index,
+                old_len: preimage_len,
+                new_index: postimage_index,
+                new_len: postimage_len,
             } => {
                 out.push(AlignmentOp::Replace {
-                    olds: LineSpan {
-                        start: old_index as u32 + 1,
-                        count: old_len as u32,
+                    preimages: LineSpan {
+                        start: preimage_index as u32 + 1,
+                        count: preimage_len as u32,
                     },
-                    news: LineSpan {
-                        start: new_index as u32 + 1,
-                        count: new_len as u32,
+                    postimages: LineSpan {
+                        start: postimage_index as u32 + 1,
+                        count: postimage_len as u32,
                     },
                 });
             }
@@ -893,20 +893,20 @@ fn alignment_from_diff_ops(ops: &[DiffOp]) -> Alignment {
     Alignment { ops: out }
 }
 
-pub fn compute_alignment(old_text: &str, new_text: &str, options: &ViewOptions) -> Alignment {
-    let old_lines = split_lines(old_text);
-    let new_lines = split_lines(new_text);
+pub fn compute_alignment(preimage_text: &str, postimage_text: &str, options: &ViewOptions) -> Alignment {
+    let preimage_lines = split_lines(preimage_text);
+    let postimage_lines = split_lines(postimage_text);
 
     if options.ignore_whitespace {
         // Diff on whitespace-stripped keys; indices still map to original lines.
-        let old_keys: Vec<String> = old_lines.iter().map(|l| strip_whitespace(l)).collect();
-        let new_keys: Vec<String> = new_lines.iter().map(|l| strip_whitespace(l)).collect();
-        let old_refs: Vec<&str> = old_keys.iter().map(|s| s.as_str()).collect();
-        let new_refs: Vec<&str> = new_keys.iter().map(|s| s.as_str()).collect();
+        let preimage_keys: Vec<String> = preimage_lines.iter().map(|l| strip_whitespace(l)).collect();
+        let postimage_keys: Vec<String> = postimage_lines.iter().map(|l| strip_whitespace(l)).collect();
+        let old_refs: Vec<&str> = preimage_keys.iter().map(|s| s.as_str()).collect();
+        let new_refs: Vec<&str> = postimage_keys.iter().map(|s| s.as_str()).collect();
         let diff = TextDiff::from_slices(&old_refs, &new_refs);
         alignment_from_diff_ops(diff.ops())
     } else {
-        let diff = TextDiff::from_slices(&old_lines, &new_lines);
+        let diff = TextDiff::from_slices(&preimage_lines, &postimage_lines);
         alignment_from_diff_ops(diff.ops())
     }
 }
@@ -1066,10 +1066,10 @@ mod tests {
 
     #[test]
     fn ignore_whitespace_merges_whitespace_only_change_into_equal() {
-        let old = "keep\n  spaced  \nend\n";
-        let new = "keep\nspaced\nend\n";
+        let preimage = "keep\n  spaced  \nend\n";
+        let postimage = "keep\nspaced\nend\n";
 
-        let with_ws = compute_alignment(old, new, &ViewOptions::default());
+        let with_ws = compute_alignment(preimage, postimage, &ViewOptions::default());
         assert_eq!(
             with_ws.hunks().len(),
             1,
@@ -1089,8 +1089,8 @@ mod tests {
         );
 
         let ignore = compute_alignment(
-            old,
-            new,
+            preimage,
+            postimage,
             &ViewOptions {
                 ignore_whitespace: true,
             },
@@ -1103,8 +1103,8 @@ mod tests {
         assert_eq!(
             ignore.ops,
             vec![AlignmentOp::Equal {
-                old: LineSpan { start: 1, count: 3 },
-                new: LineSpan { start: 1, count: 3 },
+                preimage: LineSpan { start: 1, count: 3 },
+                postimage: LineSpan { start: 1, count: 3 },
             }]
         );
     }
@@ -1241,32 +1241,32 @@ mod tests {
         ) {
             FileDiff::Text {
                 alignment,
-                old_text,
-                new_text,
+                preimage_text,
+                postimage_text,
             } => {
-                assert!(old_text.is_empty());
+                assert!(preimage_text.is_empty());
                 assert_eq!(
-                    &*new_text,
+                    &*postimage_text,
                     "one
 "
                 );
                 assert_eq!(
                     alignment.ops,
                     vec![AlignmentOp::Insert {
-                        after_old: 0,
-                        news: LineSpan { start: 1, count: 1 },
+                        after_preimage: 0,
+                        postimages: LineSpan { start: 1, count: 1 },
                     }]
                 );
             }
             other => panic!("expected text diff, got {other:?}"),
         }
         assert!(
-            side_lines(&bb.comparison, Side::Old, "a.txt")
+            side_lines(&bb.comparison, Side::Preimage, "a.txt")
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            side_lines(&bb.comparison, Side::New, "a.txt").unwrap(),
+            side_lines(&bb.comparison, Side::Postimage, "a.txt").unwrap(),
             vec!["one".to_string()]
         );
 
@@ -1311,11 +1311,11 @@ mod tests {
             &ViewOptions::default(),
         ) {
             FileDiff::Text {
-                old_text, new_text, ..
+                preimage_text, postimage_text, ..
             } => {
-                assert!(old_text.is_empty());
+                assert!(preimage_text.is_empty());
                 assert_eq!(
-                    &*new_text,
+                    &*postimage_text,
                     "new
 "
                 );

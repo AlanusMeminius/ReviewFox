@@ -2,7 +2,7 @@ use gpui::{
     AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, ParentElement, Render, SharedString,
     StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Task, Timer, WeakEntity,
-    Window, WindowControlArea, actions, canvas, div, prelude::*, px, rgb,
+    Window, WindowControlArea, actions, canvas, div, prelude::*, px,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -10,13 +10,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::domain::{
-    Anchor, ChangedPath, Comparison, DiffFontSize, PathStatus, Review, SearchFileText, SearchFiles,
-    SearchMatch, SearchSide, Side, ViewOptions, next_match_index, next_search_side,
+    Anchor, ChangedPath, Comparison, DiffFontSize, LineSpan, PathStatus, Review, SearchFileText,
+    SearchFiles, SearchMatch, SearchSide, Side, ViewOptions, next_match_index, next_search_side,
     prev_match_index, search_file, search_files, toggle_search_files,
 };
 
 use super::appearance::{self, UiTextSize};
-use super::diff::pane::{self, DualPane, FontOp, PaneEvent, SlotBounds, placeholder};
+use super::diff::pane::{self, DualPane, FontOp, PaneComment, PaneEvent, SlotBounds, placeholder};
 use super::file_tree::{self, TreeRow};
 use super::file_tree_rows::{self, RowSurface};
 use super::icon_button::IconButton;
@@ -59,13 +59,42 @@ pub struct DiffSnapshot {
     pub file: FileDiff,
 }
 
+/// An open DraftComment: which LineSpan the bottom dock is writing to, and
+/// whether it is a postimage one or an existing body being edited.
 struct Drafting {
     side: Side,
-    line: u32,
-    body: String,
+    start: u32,
+    count: u32,
+    /// Id of the comment being reopened; `None` while creating one. Editing
+    /// only ever rewrites the body, so the Anchor is not carried here.
+    editing: Option<u64>,
 }
 
-/// The Diff window shell: tree, chrome, search bar, comments, draft bar and
+impl Drafting {
+    /// Inclusive last line of the span.
+    fn end(&self) -> u32 {
+        self.start + self.count.saturating_sub(1)
+    }
+}
+
+/// A LineSpan as the dock and the comments list name it: `postimage L3` for one
+/// line, `postimage L3–5` for a span.
+fn span_label(side: Side, start: u32, count: u32) -> String {
+    if count <= 1 {
+        format!("{} L{start}", side.label())
+    } else {
+        format!("{} L{start}–{}", side.label(), start + count - 1)
+    }
+}
+
+/// Inclusive `(side, start, end)` wash matches this LineSpan.
+fn selection_matches_span(selection: Option<(Side, u32, u32)>, side: Side, span: LineSpan) -> bool {
+    selection.is_some_and(|(sel_side, start, end)| {
+        sel_side == side && start == span.start && end == span.start + span.count.saturating_sub(1)
+    })
+}
+
+/// The Diff window shell: tree, chrome, search bar, comments, draft dock and
 /// Review. The dual pane is its own Entity (`DualPane`), driven by methods
 /// and heard through `PaneEvent`s, so scrolling notifies only the pane.
 pub struct DiffView {
@@ -89,6 +118,8 @@ pub struct DiffView {
     pane_bounds: SlotBounds,
     /// Where the shell measures the floating find bar; painted after DualPane.
     find_bar_bounds: SlotBounds,
+    /// Same, for the bottom draft dock.
+    draft_dock_bounds: SlotBounds,
     /// Last `PaneEvent::HunkIndexChanged`; drives chrome.
     hunk_index: Option<usize>,
     /// Last `PaneEvent::HoverCopy`; shown in chrome.
@@ -103,7 +134,7 @@ pub struct DiffView {
     soft_wrap: bool,
     /// In-file search query; empty = no hits. Mirrored from [`Self::search_field`].
     search_query: String,
-    /// Side factor: Old / New / Both. Default on open: New.
+    /// Side factor: Preimage / Postimage / Both. Default on open: Postimage.
     search_side: SearchSide,
     /// Files factor: current file or all changed paths. Default on open: File.
     search_files: SearchFiles,
@@ -113,11 +144,16 @@ pub struct DiffView {
     search_match_index: Option<usize>,
     /// Pending query recompute (~150ms). Cancelled by Enter / prev / next / factor change.
     search_debounce: Option<Task<()>>,
-    /// Cached old/new texts for All-files find, in tree order.
+    /// Cached preimage/postimage texts for All-files find, in tree order.
     all_search_texts: Option<Vec<(String, Arc<str>, Arc<str>)>>,
     /// Real IME-capable input (same control as Settings); drives `search_query`.
     search_field: Entity<TextField>,
     _search_subscriptions: Vec<Subscription>,
+    /// The bottom dock's body field. Kept for the window's life so the draft
+    /// dock can open on the very first icon click without re-creating it.
+    draft_field: Entity<TextField>,
+    _draft_subscription: Subscription,
+    _draft_observe: Subscription,
     bounds_sub: Option<gpui::Subscription>,
 }
 
@@ -145,17 +181,27 @@ impl DiffView {
     ) -> Self {
         let review = Review::new(snapshot.comparison.clone());
         let pane = cx.new(DualPane::new);
-        let pane_events = cx.subscribe_in(&pane, window, |this, _, event, window, cx| match event {
-            PaneEvent::BeginDraft { side, ln } => this.begin_draft(*side, *ln, window, cx),
-            PaneEvent::HunkIndexChanged(index) => {
-                this.hunk_index = *index;
-                cx.notify();
-            }
-            PaneEvent::HoverCopy(copy) => {
-                this.hover_copy = copy.clone();
-                cx.notify();
-            }
-        });
+        let pane_events =
+            cx.subscribe_in(&pane, window, |this, _, event, window, cx| match event {
+                PaneEvent::OpenDraft { side, start, count } => {
+                    this.begin_draft(*side, *start, *count, window, cx)
+                }
+                PaneEvent::OpenEdit { id } => this.begin_edit(*id, window, cx),
+                PaneEvent::SelectionStarted => {
+                    // New gutter drag already owns the wash — only close the dock.
+                    if this.drafting.is_some() {
+                        this.close_dock(window, cx);
+                    }
+                }
+                PaneEvent::HunkIndexChanged(index) => {
+                    this.hunk_index = *index;
+                    cx.notify();
+                }
+                PaneEvent::HoverCopy(copy) => {
+                    this.hover_copy = copy.clone();
+                    cx.notify();
+                }
+            });
         let search_field = cx.new(|cx| {
             TextField::new("Search this file…", false, cx).with_style(TextFieldStyle::Search)
         });
@@ -169,10 +215,25 @@ impl DiffView {
                 this.search_match_index = None;
                 this.schedule_search_recompute(cx);
             }),
-            cx.subscribe(&search_field, |this, _, event: &TextFieldEvent, cx| match event {
-                TextFieldEvent::Confirm => this.jump_search(1, cx),
-            }),
+            cx.subscribe(
+                &search_field,
+                |this, _, event: &TextFieldEvent, cx| match event {
+                    TextFieldEvent::Confirm => this.jump_search(1, cx),
+                },
+            ),
         ];
+        let draft_field = cx.new(|cx| {
+            TextField::new("Write a comment…", false, cx).with_style(TextFieldStyle::Draft)
+        });
+        let draft_subscription = cx.subscribe_in(
+            &draft_field,
+            window,
+            |this, _, event: &TextFieldEvent, window, cx| match event {
+                TextFieldEvent::Confirm => this.commit_draft(window, cx),
+            },
+        );
+        // Grow/shrink the bottom dock when Shift+Enter adds lines.
+        let draft_observe = cx.observe(&draft_field, |_, _, cx| cx.notify());
         let mut this = Self {
             focus: cx.focus_handle(),
             tree_collapsed: false,
@@ -189,6 +250,7 @@ impl DiffView {
             shell: None,
             pane_bounds: SlotBounds::default(),
             find_bar_bounds: SlotBounds::default(),
+            draft_dock_bounds: SlotBounds::default(),
             hunk_index: None,
             hover_copy: None,
             #[cfg(target_os = "macos")]
@@ -199,7 +261,7 @@ impl DiffView {
             ),
             soft_wrap: crate::settings_store::soft_wrap(&crate::settings_store::load_file()),
             search_query: String::new(),
-            search_side: SearchSide::New,
+            search_side: SearchSide::Postimage,
             search_files: SearchFiles::File,
             searching: false,
             search_match_index: None,
@@ -207,6 +269,9 @@ impl DiffView {
             all_search_texts: None,
             search_field,
             _search_subscriptions: search_subscriptions,
+            draft_field,
+            _draft_subscription: draft_subscription,
+            _draft_observe: draft_observe,
             bounds_sub: None,
         };
         this.with_pane(cx, |pane, cx| {
@@ -225,12 +290,16 @@ impl DiffView {
         self.pane.update(cx, f)
     }
 
-    /// Anchors of the selected path's DraftComments, for the pane's comment index.
-    fn path_anchors(&self) -> Vec<Anchor> {
+    /// The selected path's DraftComments, for the pane's comment index and its
+    /// start-line icons.
+    fn path_comments(&self) -> Vec<PaneComment> {
         match (&self.review, &self.snapshot) {
             (Some(review), Some(snap)) => review
                 .comments_for_path(&snap.selected_path)
-                .map(|c| c.anchor.clone())
+                .map(|c| PaneComment {
+                    id: c.id,
+                    anchor: c.anchor.clone(),
+                })
                 .collect(),
             _ => Vec::new(),
         }
@@ -243,19 +312,19 @@ impl DiffView {
         };
         let file = snap.file.clone();
         let path = snap.selected_path.clone();
-        let comments = self.path_anchors();
+        let comments = self.path_comments();
         self.with_pane(cx, |pane, cx| pane.open(&path, &file, comments, cx));
     }
 
     fn refresh_comments(&mut self, cx: &mut Context<Self>) {
-        let comments = self.path_anchors();
+        let comments = self.path_comments();
         self.with_pane(cx, |pane, cx| pane.set_comments(comments, cx));
     }
 
     fn set_drafting(&mut self, drafting: Option<Drafting>, cx: &mut Context<Self>) {
-        let line = drafting.as_ref().map(|d| (d.side, d.line));
+        let span = drafting.as_ref().map(|d| (d.side, d.start, d.end()));
         self.drafting = drafting;
-        self.with_pane(cx, |pane, cx| pane.set_drafting(line, cx));
+        self.with_pane(cx, |pane, cx| pane.set_drafting(span, cx));
     }
 
     /// Recompute Alignment under the current ViewOptions.
@@ -266,13 +335,13 @@ impl DiffView {
         };
         let FileDiff::Text {
             alignment,
-            old_text,
-            new_text,
+            preimage_text,
+            postimage_text,
         } = &mut snap.file
         else {
             return;
         };
-        *alignment = git::compute_alignment(old_text, new_text, &opts);
+        *alignment = git::compute_alignment(preimage_text, postimage_text, &opts);
     }
 
     fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
@@ -407,10 +476,10 @@ impl DiffView {
                 .map(|p| p.status)
                 .unwrap_or(PathStatus::Modify);
             if let FileDiff::Text {
-                old_text, new_text, ..
+                preimage_text, postimage_text, ..
             } = git::file_diff(&snap.comparison, &path, status, &opts)
             {
-                out.push((path, old_text, new_text));
+                out.push((path, preimage_text, postimage_text));
             }
         }
         self.all_search_texts = Some(out);
@@ -497,7 +566,7 @@ impl DiffView {
 
     fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.searching = true;
-        self.search_side = SearchSide::New;
+        self.search_side = SearchSide::Postimage;
         self.search_files = SearchFiles::File;
         self.set_drafting(None, cx);
         let handle = self.search_field.read(cx).focus_handle(cx);
@@ -514,10 +583,7 @@ impl DiffView {
         }
         let matches = self.current_matches();
         // Stale index after a mid-debounce query change — treat as no selection.
-        if self
-            .search_match_index
-            .is_some_and(|i| i >= matches.len())
-        {
+        if self.search_match_index.is_some_and(|i| i >= matches.len()) {
             self.search_match_index = None;
         }
         let next = if dir < 0 {
@@ -578,12 +644,12 @@ impl DiffView {
         match self.search_files {
             SearchFiles::File => {
                 let Some(FileDiff::Text {
-                    old_text, new_text, ..
+                    preimage_text, postimage_text, ..
                 }) = self.snapshot.as_ref().map(|s| &s.file)
                 else {
                     return Vec::new();
                 };
-                search_file(old_text, new_text, &self.search_query, self.search_side)
+                search_file(preimage_text, postimage_text, &self.search_query, self.search_side)
             }
             SearchFiles::All => {
                 let Some(files) = &self.all_search_texts else {
@@ -591,10 +657,10 @@ impl DiffView {
                 };
                 let inputs: Vec<SearchFileText<'_>> = files
                     .iter()
-                    .map(|(path, old, new)| SearchFileText {
+                    .map(|(path, preimage, postimage)| SearchFileText {
                         path: path.as_str(),
-                        old_text: old.as_ref(),
-                        new_text: new.as_ref(),
+                        preimage_text: preimage.as_ref(),
+                        postimage_text: postimage.as_ref(),
                     })
                     .collect();
                 search_files(&inputs, &self.search_query, self.search_side)
@@ -672,36 +738,165 @@ impl DiffView {
         window_geometry_store::flush();
     }
 
-    fn begin_draft(&mut self, side: Side, line: u32, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_drafting(
-            Some(Drafting {
+    /// Open the bottom dock on a LineSpan with `body` loaded. Find and draft are
+    /// mutually exclusive, so an open find bar is dismissed first. The dock's
+    /// span becomes the selection, so the icon that reopens it stays under the
+    /// pointer after a save. Reveals the span start (expand fold / scroll).
+    fn open_dock(
+        &mut self,
+        drafting: Drafting,
+        body: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if has_search(self) {
+            self.close_search(window, cx);
+        }
+        let (side, start, end) = (drafting.side, drafting.start, drafting.end());
+        self.set_drafting(Some(drafting), cx);
+        self.with_pane(cx, |pane, cx| {
+            pane.select_span(side, start, end, cx);
+            pane.reveal_line(side, start, cx);
+        });
+        self.draft_field
+            .update(cx, |field, cx| field.set_content(body, cx));
+        let handle = self.draft_field.read(cx).focus_handle(cx);
+        window.focus(&handle);
+        cx.notify();
+    }
+
+    /// Empty gutter icon: write a postimage DraftComment on the selected LineSpan.
+    fn begin_draft(
+        &mut self,
+        side: Side,
+        start: u32,
+        count: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_dock(
+            Drafting {
                 side,
-                line,
-                body: String::new(),
-            }),
+                start,
+                count,
+                editing: None,
+            },
+            String::new(),
+            window,
             cx,
         );
+    }
+
+    /// Filled gutter icon or island Edit: reopen an existing DraftComment
+    /// with its body loaded. Its Anchor is what the dock names, so the span is
+    /// the comment's own rather than whatever was selected.
+    fn begin_edit(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((side, span, body)) = self.comment_target(id) else {
+            return;
+        };
+        self.open_dock(
+            Drafting {
+                side,
+                start: span.start,
+                count: span.count,
+                editing: Some(id),
+            },
+            body,
+            window,
+            cx,
+        );
+    }
+
+    /// Where a DraftComment is anchored and what it says. `None` for an unknown
+    /// id or a File anchor, neither of which the line dock can write to.
+    fn comment_target(&self, id: u64) -> Option<(Side, LineSpan, String)> {
+        let c = self.review.as_ref()?.comments.iter().find(|c| c.id == id)?;
+        match &c.anchor {
+            Anchor::Line { side, span, .. } => Some((*side, *span, c.body.clone())),
+            Anchor::File { .. } => None,
+        }
+    }
+
+    /// Close the draft dock without touching the pane selection wash.
+    fn close_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_drafting(None, cx);
+        self.draft_field
+            .update(cx, |field, cx| field.set_content("", cx));
         window.focus(&self.focus);
         cx.notify();
     }
 
-    fn commit_draft(&mut self, cx: &mut Context<Self>) {
+    /// Esc / cancel button: drop the draft and clear the selection wash.
+    fn cancel_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_dock(window, cx);
+        self.with_pane(cx, |pane, cx| pane.clear_selection(cx));
+    }
+
+    /// Island row body: selection wash on that comment's span, dock stays closed.
+    /// If a draft is open, cancel it first (clears wash), then select this row.
+    /// Reveals the span start when off-screen or inside a collapsed Equal.
+    fn select_comment(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drafting.is_some() {
+            self.cancel_draft(window, cx);
+        }
+        let Some((side, span, _)) = self.comment_target(id) else {
+            return;
+        };
+        let end = span.start + span.count.saturating_sub(1);
+        self.with_pane(cx, |pane, cx| {
+            pane.select_span(side, span.start, end, cx);
+            pane.reveal_line(side, span.start, cx);
+        });
+        cx.notify();
+    }
+
+    /// Immediate delete. Closes the dock if it was editing this id; clears the
+    /// wash if it pointed at this comment's span.
+    fn delete_comment(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drafting.as_ref().and_then(|d| d.editing) == Some(id) {
+            self.close_dock(window, cx);
+        }
+        let clear_wash = self.comment_target(id).is_some_and(|(side, span, _)| {
+            selection_matches_span(self.pane.read(cx).selection(), side, span)
+        });
+        if clear_wash {
+            self.with_pane(cx, |pane, cx| pane.clear_selection(cx));
+        }
+        if let Some(review) = &mut self.review {
+            review.delete_comment(id);
+        }
+        self.refresh_comments(cx);
+        cx.notify();
+    }
+
+    /// Enter in the dock: add the span as a DraftComment, or rewrite the body of
+    /// the one being edited. An empty body closes without writing and clears the
+    /// wash (same as cancel) so Enter is never a way to make a comment blank.
+    /// A real save keeps the selection wash so the island row stays selected.
+    fn commit_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(draft) = self.drafting.take() else {
             return;
         };
-        self.set_drafting(None, cx);
-        let body = draft.body.trim().to_string();
+        let body = self.draft_field.read(cx).content().trim().to_string();
         if body.is_empty() {
-            cx.notify();
+            self.cancel_draft(window, cx);
             return;
         }
+        self.close_dock(window, cx);
         let path = self
             .snapshot
             .as_ref()
             .map(|s| s.selected_path.clone())
             .unwrap_or_default();
         if let Some(review) = &mut self.review {
-            review.add_line_comment(path, draft.side, draft.line, body);
+            match draft.editing {
+                Some(id) => {
+                    review.update_comment_body(id, body);
+                }
+                None => {
+                    review.add_line_span_comment(path, draft.side, draft.start, draft.count, body);
+                }
+            }
         }
         self.refresh_comments(cx);
         cx.notify();
@@ -712,14 +907,18 @@ impl DiffView {
         window.remove_window();
     }
 
-    /// Esc: dismiss Find → cancel draft → else close window.
+    /// Esc: Find → cancel draft (clears wash) → clear selection → close window.
     fn dismiss_or_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if has_search(self) {
             self.close_search(window, cx);
             return;
         }
         if self.drafting.is_some() {
-            self.set_drafting(None, cx);
+            self.cancel_draft(window, cx);
+            return;
+        }
+        if self.pane.read(cx).selection().is_some() {
+            self.with_pane(cx, |pane, cx| pane.clear_selection(cx));
             cx.notify();
             return;
         }
@@ -750,41 +949,25 @@ impl DiffView {
             }
             return;
         }
-        if self.drafting.is_none() {
-            match event.keystroke.key.as_str() {
-                "}" => self.jump_file(1, cx),
-                "{" => self.jump_file(-1, cx),
-                "]" if mods.shift => self.jump_file(1, cx),
-                "[" if mods.shift => self.jump_file(-1, cx),
-                "]" => self.jump_hunk(1, cx),
-                "[" => self.jump_hunk(-1, cx),
-                "/" => {
-                    self.open_search(window, cx);
-                }
-                _ => {}
+        if self.drafting.is_some() {
+            // The dock's TextField owns typing (IME included). Enter reaches it
+            // as `Confirm`; Shift+Enter has no binding there, so it lands here.
+            if event.keystroke.key == "enter" && mods.shift {
+                self.draft_field.update(cx, |field, cx| {
+                    field.insert("\n", window, cx);
+                });
             }
             return;
         }
         match event.keystroke.key.as_str() {
-            "enter" => self.commit_draft(cx),
-            "backspace" => {
-                if let Some(d) = &mut self.drafting {
-                    d.body.pop();
-                }
-                cx.notify();
-            }
-            _ => {
-                let mods = &event.keystroke.modifiers;
-                if mods.control || mods.alt || mods.platform || mods.function {
-                    return;
-                }
-                if let Some(ch) = &event.keystroke.key_char {
-                    if let Some(d) = &mut self.drafting {
-                        d.body.push_str(ch);
-                    }
-                    cx.notify();
-                }
-            }
+            "}" => self.jump_file(1, cx),
+            "{" => self.jump_file(-1, cx),
+            "]" if mods.shift => self.jump_file(1, cx),
+            "[" if mods.shift => self.jump_file(-1, cx),
+            "]" => self.jump_hunk(1, cx),
+            "[" => self.jump_hunk(-1, cx),
+            "/" => self.open_search(window, cx),
+            _ => {}
         }
     }
 
@@ -851,7 +1034,8 @@ impl DiffView {
                         ))
                     })
                     // Frosted desk: the content island floats here, inset on all four
-                    // sides so the material reads around it.
+                    // sides so the material reads around it. Comment island sits to
+                    // the right of the diff island when the path has comments.
                     .child(
                         div()
                             .id("diff-stage")
@@ -866,7 +1050,16 @@ impl DiffView {
                             .pt(px(theme::CHANGES_TOP_INSET))
                             .pl(px(theme::CHANGES_INSET))
                             .pr(px(theme::CHANGES_INSET))
-                            .child(render_dual_pane(self, cx))
+                            .child(
+                                div()
+                                    .id("diff-stage-islands")
+                                    .flex_1()
+                                    .min_h(px(0.))
+                                    .flex()
+                                    .gap(px(theme::COMMENT_ISLAND_GAP))
+                                    .child(render_dual_pane(self, cx))
+                                    .child(render_comment_island(self, cx)),
+                            )
                             .child(render_status_bar(self, cx)),
                     ),
             )
@@ -920,6 +1113,15 @@ impl Render for DiffView {
         if find_overlay.is_none() {
             self.find_bar_bounds.set(None);
         }
+        let draft_overlay = self.drafting.is_some().then(|| {
+            pane::overlay_slot(
+                self.draft_dock_bounds.clone(),
+                render_draft_dock(self, window, cx),
+            )
+        });
+        if draft_overlay.is_none() {
+            self.draft_dock_bounds.set(None);
+        }
 
         div()
             .id("diff")
@@ -946,6 +1148,7 @@ impl Render for DiffView {
             .child(AnyView::from(shell).cached(StyleRefinement::default().size_full()))
             .child(pane::slot(&self.pane, self.pane_bounds.clone()))
             .children(find_overlay)
+            .children(draft_overlay)
     }
 }
 
@@ -1287,18 +1490,13 @@ fn has_search(view: &DiffView) -> bool {
 /// Whether anything renders below the pane inside the island. The pane cannot
 /// round its own corners (see the note on the island's bottom inset), so this is
 /// what decides who owns the island's bottom edge.
-fn has_footer(view: &DiffView) -> bool {
-    if view.drafting.is_some() {
-        return true;
-    }
-    let path = view
-        .snapshot
-        .as_ref()
-        .map(|s| s.selected_path.clone())
-        .unwrap_or_default();
-    view.review
-        .as_ref()
-        .is_some_and(|r| r.comments_for_path(&path).next().is_some())
+
+fn draft_line_count(view: &DiffView, cx: &App) -> usize {
+    view.draft_field.read(cx).visual_line_count()
+}
+
+fn draft_dock_h_for(view: &DiffView, cx: &App) -> f32 {
+    theme::draft_dock_height(draft_line_count(view, cx))
 }
 
 fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
@@ -1320,17 +1518,12 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
         // hold it one radius clear of that edge and let the card draw its own corner.
         // Find is an absolute overlay (not in flex flow) so open/close never changes
         // island flow height; when open, body top pad clears the capsule instead.
-        .when(!find_open, |island| {
-            island.pt(px(theme::CHANGES_RADIUS))
-        })
-        .when(!has_footer(view), |island| {
-            island.pb(px(theme::CHANGES_RADIUS))
-        })
+        .when(!find_open, |island| island.pt(px(theme::CHANGES_RADIUS)))
+        .pb(px(theme::CHANGES_RADIUS))
         .child(render_body(view, find_open, cx))
         // Measure only — chrome paints after DualPane (see DiffView::render).
         .child(render_find_measure(view))
-        .child(render_comments(view, cx))
-        .child(render_draft_bar(view, appearance::code_font(cx), cx))
+        .child(render_draft_measure(view, cx))
 }
 
 /// Invisible slot where the floating find bar will be painted above DualPane.
@@ -1345,10 +1538,7 @@ fn render_find_measure(view: &DiffView) -> impl IntoElement {
         .left(px(theme::FIND_BAR_INSET))
         .right(px(theme::FIND_BAR_INSET))
         .h(px(theme::FIND_BAR_HEIGHT))
-        .child(
-            canvas(move |bounds, _, _| slot.set(Some(bounds)), |_, _, _, _| {})
-                .size_full(),
-        )
+        .child(canvas(move |bounds, _, _| slot.set(Some(bounds)), |_, _, _, _| {}).size_full())
         .into_any_element()
 }
 
@@ -1492,18 +1682,18 @@ fn render_side_segment(side: SearchSide, cx: &mut Context<DiffView>) -> impl Int
     search_seg_track()
         .id("search-side")
         .child(search_seg_btn(
-            "search-side-old",
-            "Old",
-            side == SearchSide::Old,
+            "search-side-preimage",
+            "Preimage",
+            side == SearchSide::Preimage,
             cx,
-            cx.listener(|this, _, _, cx| this.set_search_side(SearchSide::Old, cx)),
+            cx.listener(|this, _, _, cx| this.set_search_side(SearchSide::Preimage, cx)),
         ))
         .child(search_seg_btn(
-            "search-side-new",
-            "New",
-            side == SearchSide::New,
+            "search-side-postimage",
+            "Postimage",
+            side == SearchSide::Postimage,
             cx,
-            cx.listener(|this, _, _, cx| this.set_search_side(SearchSide::New, cx)),
+            cx.listener(|this, _, _, cx| this.set_search_side(SearchSide::Postimage, cx)),
         ))
         .child(search_seg_btn(
             "search-side-both",
@@ -1539,12 +1729,17 @@ fn render_files_segment(files: SearchFiles, cx: &mut Context<DiffView>) -> impl 
 /// When find is open, a leading spacer clears the floating capsule so the
 /// measured slot (and DualPane) starts below the bar. Top lines stay reachable
 /// without putting the find chrome in flex flow (no island height jitter).
+///
+/// Draft dock matches find's chrome path: island-absolute measure +
+/// `overlay_slot` after DualPane. No bottom flex clearance — opening it must
+/// not resize DualPane (that was the jitter). The dock floats over the code.
 fn render_body(view: &DiffView, find_open: bool, cx: &mut Context<DiffView>) -> impl IntoElement {
     match view.snapshot.as_ref().map(|s| &s.file) {
         Some(FileDiff::Text { .. }) => {
             let slot = view.pane_bounds.clone();
             div()
                 .id("diff-pane-slot")
+                .relative()
                 .flex_1()
                 .min_h(px(0.))
                 .flex()
@@ -1558,15 +1753,11 @@ fn render_body(view: &DiffView, find_open: bool, cx: &mut Context<DiffView>) -> 
                     )
                 })
                 .child(
-                    div()
-                        .relative()
-                        .flex_1()
-                        .min_h(px(0.))
-                        .child(
-                            canvas(move |bounds, _, _| slot.set(Some(bounds)), |_, _, _, _| {})
-                                .absolute()
-                                .size_full(),
-                        ),
+                    div().relative().flex_1().min_h(px(0.)).child(
+                        canvas(move |bounds, _, _| slot.set(Some(bounds)), |_, _, _, _| {})
+                            .absolute()
+                            .size_full(),
+                    ),
                 )
                 .into_any_element()
         }
@@ -1576,7 +1767,10 @@ fn render_body(view: &DiffView, find_open: bool, cx: &mut Context<DiffView>) -> 
     }
 }
 
-fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
+/// Right-hand comment island: only when the selected path has DraftComments.
+/// Row body selects the span (wash + selected styling); Edit / gutter icons open
+/// the dock; Delete removes immediately.
+fn render_comment_island(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     let mono = appearance::code_font(cx);
     let path = view
         .snapshot
@@ -1593,51 +1787,135 @@ fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElem
         return div().into_any_element();
     }
 
+    let n = comments.len();
+    let selection = view.pane.read(cx).selection();
     let (scroll, sb) = scrollbar::vertical("diff-comments-sb", cx);
+
     div()
+        .id("diff-comment-island")
         .flex_none()
-        .max_h(px(160.))
-        .border_t_1()
-        .border_color(theme::line())
-        .bg(rgb(0xfafbfd))
-        // Last child unless a draft bar follows: match the island radius so the
-        // card's bottom corners read round.
-        .when(view.drafting.is_none(), |strip| {
-            strip.rounded_b(px(theme::CHANGES_RADIUS))
-        })
-        .child(scrollbar::overlay_max(
-            px(160.),
+        .w(px(theme::COMMENT_ISLAND_WIDTH))
+        .h_full()
+        .min_h(px(0.))
+        .flex()
+        .flex_col()
+        .bg(theme::white())
+        .rounded(px(theme::CHANGES_RADIUS))
+        .overflow_hidden()
+        .child(
+            div()
+                .flex_none()
+                .px(px(12.))
+                .pt(px(10.))
+                .pb(px(8.))
+                .flex()
+                .items_baseline()
+                .gap_2()
+                .child(
+                    div()
+                        .ui_text_size(11., cx)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme::faint())
+                        .child("COMMENTS"),
+                )
+                .child(
+                    div()
+                        .ui_text_size(11., cx)
+                        .text_color(theme::muted())
+                        .child(format!("{n}")),
+                ),
+        )
+        .child(scrollbar::overlay_flex(
             div()
                 .id("diff-comments-scroll")
-                .w_full()
-                .max_h(px(160.))
-                .px_3()
-                .py_2()
+                .size_full()
+                .pt_1()
+                .pb_1()
                 .track_scroll(&scroll)
                 .overflow_y_scroll()
                 .children(comments.into_iter().map(|c| {
                     let label = match &c.anchor {
-                        crate::domain::Anchor::Line { side, span, .. } => {
-                            format!("{} L{} · ", side.label(), span.start)
+                        Anchor::Line { side, span, .. } => {
+                            span_label(*side, span.start, span.count)
                         }
-                        crate::domain::Anchor::File { .. } => "file · ".into(),
+                        Anchor::File { .. } => "file".into(),
+                    };
+                    let id = c.id;
+                    let selected = match &c.anchor {
+                        Anchor::Line { side, span, .. } => {
+                            selection_matches_span(selection, *side, *span)
+                        }
+                        Anchor::File { .. } => false,
                     };
                     div()
                         .id(("cmt", c.id as usize))
-                        .ui_text_size(12., cx)
+                        .mx_1()
+                        .my_0p5()
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .cursor_pointer()
+                        .when(selected, |row| row.bg(theme::range()))
+                        .hover(move |row| {
+                            if selected {
+                                row.bg(theme::range())
+                            } else {
+                                row.bg(theme::hover())
+                            }
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.select_comment(id, window, cx)
+                        }))
                         .child(
                             div()
+                                .w_full()
                                 .flex()
+                                .items_center()
                                 .gap_1()
                                 .child(
                                     div()
+                                        .flex_1()
+                                        .min_w(px(0.))
                                         .font_family(mono.clone())
-                                        // Own size: the UI text around it scales, Code Font chrome does not.
                                         .text_xs()
-                                        .text_color(theme::faint())
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(theme::accent())
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
                                         .child(label),
                                 )
-                                .child(div().text_color(theme::text()).child(c.body)),
+                                .child(
+                                    IconButton::new(
+                                        ("cmt-edit", id as usize),
+                                        "pencil.svg",
+                                        "Edit DraftComment",
+                                    )
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.begin_edit(id, window, cx);
+                                    })),
+                                )
+                                .child(
+                                    IconButton::new(
+                                        ("cmt-del", id as usize),
+                                        "trash.svg",
+                                        "Delete DraftComment",
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.delete_comment(id, window, cx);
+                                        },
+                                    )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .mt(px(4.))
+                                .ui_text_size(12., cx)
+                                .text_color(theme::text())
+                                .child(c.body),
                         )
                 })),
             sb,
@@ -1645,37 +1923,108 @@ fn render_comments(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElem
         .into_any_element()
 }
 
-fn render_draft_bar(view: &DiffView, mono: SharedString, cx: &App) -> impl IntoElement {
+/// Invisible slot where the bottom draft dock will be painted above DualPane.
+/// Bottom-anchored mirror of [`render_find_measure`].
+fn render_draft_measure(view: &DiffView, cx: &App) -> impl IntoElement {
+    if view.drafting.is_none() {
+        return div().into_any_element();
+    }
+    let slot = view.draft_dock_bounds.clone();
+    let h = draft_dock_h_for(view, cx);
+    div()
+        .absolute()
+        .bottom(px(theme::FIND_BAR_INSET))
+        .left(px(theme::FIND_BAR_INSET))
+        .right(px(theme::FIND_BAR_INSET))
+        .h(px(h))
+        .child(canvas(move |bounds, _, _| slot.set(Some(bounds)), |_, _, _, _| {}).size_full())
+        .into_any_element()
+}
+
+/// The bottom dock: find-bar chrome (inset / radius / shadow-only / translucent
+/// white) with a meta row over the DraftComment body field.
+fn render_draft_dock(
+    view: &DiffView,
+    window: &Window,
+    cx: &mut Context<DiffView>,
+) -> impl IntoElement {
     let Some(draft) = &view.drafting else {
         return div().into_any_element();
     };
-    let hint = format!(
-        "DraftComment · {} L{} — type, Enter to save, Esc to cancel",
-        draft.side.label(),
-        draft.line
-    );
+    let label = span_label(draft.side, draft.start, draft.count);
+    let focused = view
+        .draft_field
+        .read(cx)
+        .focus_handle(cx)
+        .is_focused(window);
+    let mono = appearance::code_font(cx);
+
+    // Occlude so DualPane under the float does not take the click (that was
+    // starting a selection and cancelling the draft). Find avoids this because
+    // its clearance keeps DualPane out from under the bar; draft floats over.
     div()
-        .flex_none()
-        .border_t_1()
-        .border_color(theme::accent())
-        .bg(theme::range())
-        // Always the island's last child; match the card radius.
-        .rounded_b(px(theme::CHANGES_RADIUS))
-        .px_3()
-        .py_2()
+        .size_full()
+        .flex()
+        .flex_col()
+        .gap(px(theme::DRAFT_DOCK_GAP))
+        .p(px(theme::FIND_BAR_PAD))
+        .rounded(px(theme::FIND_BAR_RADIUS))
+        .bg(theme::find_bar_bg())
+        .shadow(theme::find_bar_shadow())
+        .occlude()
         .child(
             div()
-                .ui_text_size(12., cx)
-                .text_color(theme::muted())
-                .child(hint),
+                .flex_none()
+                .h(px(theme::DRAFT_META_HEIGHT))
+                .flex()
+                .items_center()
+                .gap_2()
+                .pl(px(6.))
+                .child(
+                    div()
+                        .ui_text_size(11., cx)
+                        .text_color(theme::muted())
+                        .child(if draft.editing.is_some() {
+                            "Edit DraftComment ·"
+                        } else {
+                            "DraftComment ·"
+                        }),
+                )
+                .child(
+                    div()
+                        .font_family(mono)
+                        .text_xs()
+                        .text_color(theme::text())
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .ui_text_size(11., cx)
+                        .text_color(theme::faint())
+                        .child("Enter to save · Shift-Enter for a newline · Esc to cancel"),
+                )
+                .child(
+                    IconButton::new("draft-cancel", "close.svg", "Cancel DraftComment")
+                        .shortcut("Esc")
+                        .on_click(cx.listener(|this, _, window, cx| this.cancel_draft(window, cx))),
+                ),
         )
         .child(
             div()
-                .mt_1()
-                .font_family(mono)
-                .text_sm()
-                .text_color(theme::text())
-                .child(format!("{}▌", draft.body)),
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .items_start()
+                .rounded(px(theme::FIND_FIELD_RADIUS))
+                .border_1()
+                .border_color(if focused {
+                    theme::border_focused()
+                } else {
+                    theme::line()
+                })
+                .child(view.draft_field.clone()),
         )
         .into_any_element()
 }
@@ -1889,4 +2238,38 @@ fn traffic_lights_space() -> Option<Div> {
 #[cfg(not(target_os = "macos"))]
 fn traffic_lights_space() -> Option<Div> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LineSpan, Side, selection_matches_span, span_label};
+
+    #[test]
+    fn span_label_names_one_line_and_a_range() {
+        assert_eq!(span_label(Side::Postimage, 3, 1), "postimage L3");
+        assert_eq!(span_label(Side::Preimage, 3, 3), "preimage L3–5");
+        // A zero count can only come from a bad write; still not a range.
+        assert_eq!(span_label(Side::Postimage, 7, 0), "postimage L7");
+    }
+
+    #[test]
+    fn selection_matches_span_by_side_and_inclusive_end() {
+        let span = LineSpan { start: 3, count: 3 };
+        assert!(selection_matches_span(
+            Some((Side::Postimage, 3, 5)),
+            Side::Postimage,
+            span
+        ));
+        assert!(!selection_matches_span(
+            Some((Side::Preimage, 3, 5)),
+            Side::Postimage,
+            span
+        ));
+        assert!(!selection_matches_span(
+            Some((Side::Postimage, 3, 4)),
+            Side::Postimage,
+            span
+        ));
+        assert!(!selection_matches_span(None, Side::Postimage, span));
+    }
 }

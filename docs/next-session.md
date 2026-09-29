@@ -25,7 +25,7 @@
 - **Review / DraftComment disk persistence** — still parked (comments remain in-memory only)
 - UnresolvedAnchor / SuggestedAnchor / hunk-owned anchors
 - ViewOptions UI toggle
-- Proper text input (draft bar is keystroke-based)
+- ~~Proper text input (draft bar is keystroke-based)~~ → settled 2026-09-29: drag-select + gutter icon + bottom dock with a real TextField (`.scratch/diff-multiline-comment/`)
 - Real branch switcher / commit filter
 - True diagonal gap hatch (flat `gap_bg` + `╱` stand-in)
 - Bundle IBM Plex fonts if OS lacks them
@@ -50,7 +50,7 @@ Shared understanding confirmed 2026-09-26; **Phase A aligned 2026-09-26**. Not o
 
 ## Next candidates (when ready)
 
-- Draft text input polish (Diff draft bar is still keystroke-only)
+- Multi-line comment editing in the draft dock (Shift+Enter stores a newline, but the field shows one line)
 - UnresolvedAnchor when Comparison changes with open comments
 - Review / DraftComment disk persistence (parked)
 - **Syntax highlighting** — spec + issues in `.scratch/code-highlighting/` (ADR-0010); start at 01

@@ -18,34 +18,34 @@ pub struct WrapSide {
 /// Inputs for one wrap pass; cached per (Layout, width, font) in the pane (05).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WrapPlan {
-    pub old: WrapSide,
-    pub new: WrapSide,
+    pub preimage: WrapSide,
+    pub postimage: WrapSide,
 }
 
 /// Stored break data when [`super::layout::Layout::build`] is given a wrap plan.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppliedWrap {
     pub plan: WrapPlan,
-    pub old_breaks: HashMap<u32, WrapBreaks>,
-    pub new_breaks: HashMap<u32, WrapBreaks>,
+    pub preimage_breaks: HashMap<u32, WrapBreaks>,
+    pub postimage_breaks: HashMap<u32, WrapBreaks>,
 }
 
 impl AppliedWrap {
     pub fn breaks(&self, side: crate::domain::Side, ln: u32) -> Option<&WrapBreaks> {
         match side {
-            crate::domain::Side::Old => self.old_breaks.get(&ln),
-            crate::domain::Side::New => self.new_breaks.get(&ln),
+            crate::domain::Side::Preimage => self.preimage_breaks.get(&ln),
+            crate::domain::Side::Postimage => self.postimage_breaks.get(&ln),
         }
     }
 }
 
 pub(crate) struct WrapCtx<'a> {
     pub plan: WrapPlan,
-    pub old_w: f32,
-    pub new_w: f32,
+    pub preimage_w: f32,
+    pub postimage_w: f32,
     pub cw: &'a mut dyn FnMut(char) -> f32,
-    pub old_breaks: HashMap<u32, WrapBreaks>,
-    pub new_breaks: HashMap<u32, WrapBreaks>,
+    pub preimage_breaks: HashMap<u32, WrapBreaks>,
+    pub postimage_breaks: HashMap<u32, WrapBreaks>,
 }
 
 fn display_line<'a>(line: &'a str) -> Cow<'a, str> {
@@ -122,71 +122,71 @@ impl<'a> WrapCtx<'a> {
         which: crate::domain::Side,
     ) -> u32 {
         let (width, store) = match which {
-            crate::domain::Side::Old => (self.old_w, &mut self.old_breaks),
-            crate::domain::Side::New => (self.new_w, &mut self.new_breaks),
+            crate::domain::Side::Preimage => (self.preimage_w, &mut self.preimage_breaks),
+            crate::domain::Side::Postimage => (self.postimage_w, &mut self.postimage_breaks),
         };
         let n = line_visual_rows(side_text, &bytes, width, ln, store, self.cw, None);
         push_wrapped_rows(side, ln, kind, bytes, block, n, 0);
         n
     }
 
-    /// One Equal pair: `max(old_n, new_n)` rows on both sides; shorter side padded.
+    /// One Equal pair: `max(preimage_n, postimage_n)` rows on both sides; shorter side padded.
     pub fn push_equal_pair(
         &mut self,
-        old: &mut SideLayout,
-        new: &mut SideLayout,
-        old_text: &str,
-        new_text: &str,
-        old_bytes: Range<usize>,
-        new_bytes: Range<usize>,
+        preimage: &mut SideLayout,
+        postimage: &mut SideLayout,
+        preimage_text: &str,
+        postimage_text: &str,
+        preimage_bytes: Range<usize>,
+        postimage_bytes: Range<usize>,
         o_ln: u32,
         n_ln: u32,
         kind: LineKind,
     ) -> u32 {
-        let shared_breaks = if self.old_w == self.new_w
-            && old_text[old_bytes.clone()] == new_text[new_bytes.clone()]
+        let shared_breaks = if self.preimage_w == self.postimage_w
+            && preimage_text[preimage_bytes.clone()] == postimage_text[postimage_bytes.clone()]
         {
-            let display = display_line(&old_text[old_bytes.clone()]);
-            Some(wrap_breaks_for_line(display.as_ref(), self.old_w, self.cw))
+            let display = display_line(&preimage_text[preimage_bytes.clone()]);
+            Some(wrap_breaks_for_line(display.as_ref(), self.preimage_w, self.cw))
         } else {
             None
         };
-        let old_n = line_visual_rows(
-            old_text,
-            &old_bytes,
-            self.old_w,
+        let preimage_n = line_visual_rows(
+            preimage_text,
+            &preimage_bytes,
+            self.preimage_w,
             o_ln,
-            &mut self.old_breaks,
+            &mut self.preimage_breaks,
             self.cw,
             shared_breaks.as_ref(),
         );
-        let new_n = line_visual_rows(
-            new_text,
-            &new_bytes,
-            self.new_w,
+        let postimage_n = line_visual_rows(
+            postimage_text,
+            &postimage_bytes,
+            self.postimage_w,
             n_ln,
-            &mut self.new_breaks,
+            &mut self.postimage_breaks,
             self.cw,
             shared_breaks.as_ref(),
         );
-        let pair = old_n.max(new_n);
+        let pair = preimage_n.max(postimage_n);
         push_wrapped_rows(
-            old,
+            preimage,
             o_ln,
             kind,
-            old_bytes.clone(),
+            preimage_bytes.clone(),
             None,
-            old_n,
-            pair - old_n,
+            preimage_n,
+            pair - preimage_n,
         );
         push_wrapped_rows(
-            new,
+            postimage,
             n_ln,
             kind,
-            new_bytes.clone(),
+            postimage_bytes.clone(),
             None,
-            new_n,
-            pair - new_n,
+            postimage_n,
+            pair - postimage_n,
         );
         pair
     }

@@ -25,7 +25,7 @@ Split by change frequency. Lower-frequency data never sits on the per-frame path
 
 | Layer | File | Inputs | Outputs | Rebuilt when |
 |---|---|---|---|---|
-| **Layout** (pure) | `src/ui/diff/layout.rs` | `Arc<str>` old/new text, `Alignment`, `FoldState`, optional soft wrap (per-side width + char width fn) | Per-side visual rows (a logical line may span several when wrapped; Equal pairs padded to the same count) (line rows and omit separators modeled separately, not a `RowKind`), bridges, knots, hunk lands, seam and comment row indices, lazy per-Replace word marks. Line text is a byte range into the shared text. | Alignment / fold / ignore-whitespace change; with wrap on, also wrap width / font change |
+| **Layout** (pure) | `src/ui/diff/layout.rs` | `Arc<str>` preimage/postimage text, `Alignment`, `FoldState`, optional soft wrap (per-side width + char width fn) | Per-side visual rows (a logical line may span several when wrapped; Equal pairs padded to the same count) (line rows and omit separators modeled separately, not a `RowKind`), bridges, knots, hunk lands, seam and comment row indices, lazy per-Replace word marks. Line text is a byte range into the shared text. | Alignment / fold / ignore-whitespace change; with wrap on, also wrap width / font change |
 | **Viewport** (pure) | `src/ui/diff/viewport.rs` | Layout, `scroll_s`, `view_h`, `row_h`, device scale (the per-side `x_offset` is applied at paint; `route_wheel` / `max_x` / `clamp_x` are free fns here) | `s_range`, per-side top (device-pixel snapped), visible row ranges, pixel bridges / gaps / omit links, hit testing `hit(side, y)` / `bridge_at(y)` | Every frame (cheap, visible-only) |
 | **Render** | `src/ui/diff/element.rs`, `pane.rs` | Layout, Viewport, `Decorations` | Paint only | — |
 
@@ -33,7 +33,7 @@ Layout and Viewport do not depend on GPUI and are unit-tested. `interp`, `s_from
 
 ### 3.1 Decorations
 
-Drafting line, commented lines, search hits, hovered bridge. Passed to the element separately so changing them never invalidates Layout or shaped-text cache.
+Drafting LineSpan, drag selection, commented lines (plus each comment's start line and id, for the gutter's filled bubbles), search hits, hovered bridge. Passed to the element separately so changing them never invalidates Layout or shaped-text cache.
 
 ### 3.2 Word marks
 
@@ -51,9 +51,9 @@ Computed lazily per Replace block the first time it becomes visible, memoized on
 ## 5. Entities and data flow
 
 ```
-DiffView (shell: tree, chrome, search bar, draft bar, Review)
+DiffView (shell: tree, chrome, find bar, draft dock, comments, Review)
   │  methods: select_file, jump_hunk, expand_all, set_font, set_view_options…
-  │  events ◄─ BeginDraft{side, ln}, HunkIndexChanged, HoverCopy
+  │  events ◄─ OpenDraft{side, start, count}, OpenEdit{id}, SelectionStarted, HunkIndexChanged, HoverCopy
   ▼
 DualPane (Entity) ── owns FileDiffState { alignment, fold, layout, scroll_s, x_offsets, shape cache }
   │  render → DualPaneElement(layout, decorations)
@@ -65,7 +65,7 @@ DualPaneElement (one Element: old pane | gutter | new pane)
 ```
 
 - Scroll notifies `DualPane` only; the tree, chrome and comments do not re-render.
-- GPUI re-renders every ancestor of a notified view, so `DualPane` is not nested in the shell. `DiffView` renders a cached `DiffShell` view (tree, chrome, search, comments, draft bar) that leaves a slot, and mounts the cached `DualPane` over that slot (`pane::slot`). A pane frame re-renders only `DiffView`'s thin root and the pane; a shell change reuses the pane.
+- GPUI re-renders every ancestor of a notified view, so `DualPane` is not nested in the shell. `DiffView` renders a cached `DiffShell` view (tree, chrome, search, comments) that leaves a slot, and mounts the cached `DualPane` over that slot (`pane::slot`). A pane frame re-renders only `DiffView`'s thin root and the pane; a shell change reuses the pane.
 - `git::FileDiff::Text` carries text + `Alignment` only (no `display`, no `hunk_count`). `DisplayRows`, `ScrollKnot`, `Bridge`, `RowKind` move out of `domain` into `ui/diff/layout.rs`; `domain` keeps Alignment, Hunk, FoldState, Search, DraftComment.
 
 ## 6. Caches and invalidation
