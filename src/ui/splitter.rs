@@ -132,6 +132,27 @@ pub fn clamp_mr_detail_height(requested: f32, available: f32) -> f32 {
     requested.clamp(MIN_MR_DETAIL_HEIGHT, maximum)
 }
 
+/// A collapsible pane snaps shut below this width; there is no state between 0 and it.
+pub const COLLAPSE_THRESHOLD: f32 = 160.;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Collapse {
+    Hidden,
+    Width(f32),
+}
+
+/// Collapsible pane beside a sibling that keeps `floor` of `available`. No max:
+/// the pane takes what it asks for, shrinks when the sibling would drop below
+/// its floor, and hides once it would be under `threshold`.
+pub fn resolve_collapsible(requested: f32, available: f32, floor: f32, threshold: f32) -> Collapse {
+    let width = requested.min(available - floor);
+    if width < threshold {
+        Collapse::Hidden
+    } else {
+        Collapse::Width(width)
+    }
+}
+
 /// Map pointer → raw pane size in window space (handlers re-clamp with sibling widths).
 /// Vertical is clamped here (no sibling). Not `window.bounds()` — that is screen-global.
 pub fn size_at_pointer(axis: Axis, position: Point<Pixels>, viewport: Size<Pixels>) -> f32 {
@@ -277,6 +298,23 @@ pub fn handle(
     el
 }
 
+/// A collapsed trailing pane's handle, parked in the parent's right
+/// [`theme::CHANGES_INSET`] so the pane can be dragged back out. The parent must be
+/// `relative` and inset by exactly that much; the capsule centres on its height.
+pub fn parked_handle(
+    id: &'static str,
+    on_resize: ResizeHandler,
+    resize_state: Rc<ResizeState>,
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .right(px(-theme::CHANGES_INSET))
+        .w(px(theme::CHANGES_INSET))
+        .child(handle(id, Axis::HorizontalTrailing, on_resize, resize_state, true))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,6 +406,90 @@ mod tests {
         assert_eq!(default_mr_detail_height(800.), 400.);
         assert_eq!(default_mr_detail_height(200.), 100.);
         assert_eq!(default_mr_detail_height(100.), 72.);
+    }
+
+    #[test]
+    fn collapsible_follows_request_above_threshold() {
+        assert_eq!(
+            resolve_collapsible(300., 1200., MIN_DIFF_CONTENT_WIDTH, COLLAPSE_THRESHOLD),
+            Collapse::Width(300.)
+        );
+        assert_eq!(
+            resolve_collapsible(160., 1200., MIN_DIFF_CONTENT_WIDTH, COLLAPSE_THRESHOLD),
+            Collapse::Width(160.)
+        );
+    }
+
+    #[test]
+    fn collapsible_hides_below_threshold() {
+        assert_eq!(
+            resolve_collapsible(159., 1200., MIN_DIFF_CONTENT_WIDTH, COLLAPSE_THRESHOLD),
+            Collapse::Hidden
+        );
+        assert_eq!(
+            resolve_collapsible(0., 1200., MIN_DIFF_CONTENT_WIDTH, COLLAPSE_THRESHOLD),
+            Collapse::Hidden
+        );
+    }
+
+    #[test]
+    fn collapsible_width_stops_at_the_diff_floor() {
+        // 1200 − 400 floor leaves at most 800; no other maximum.
+        assert_eq!(
+            resolve_collapsible(1000., 1200., MIN_DIFF_CONTENT_WIDTH, COLLAPSE_THRESHOLD),
+            Collapse::Width(800.)
+        );
+        assert_eq!(
+            resolve_collapsible(700., 1200., MIN_DIFF_CONTENT_WIDTH, COLLAPSE_THRESHOLD),
+            Collapse::Width(700.)
+        );
+    }
+
+    #[test]
+    fn narrow_room_shrinks_collapsible_then_hides_it() {
+        // 268 wanted, 400 + 200 room: shrinks to 200 first.
+        assert_eq!(
+            resolve_collapsible(268., 600., MIN_DIFF_CONTENT_WIDTH, COLLAPSE_THRESHOLD),
+            Collapse::Width(200.)
+        );
+        // 400 + 160 room: still at the threshold.
+        assert_eq!(
+            resolve_collapsible(268., 560., MIN_DIFF_CONTENT_WIDTH, COLLAPSE_THRESHOLD),
+            Collapse::Width(160.)
+        );
+        // Below 400 + 160: yields entirely.
+        assert_eq!(
+            resolve_collapsible(268., 559., MIN_DIFF_CONTENT_WIDTH, COLLAPSE_THRESHOLD),
+            Collapse::Hidden
+        );
+        assert_eq!(
+            resolve_collapsible(268., 300., MIN_DIFF_CONTENT_WIDTH, COLLAPSE_THRESHOLD),
+            Collapse::Hidden
+        );
+    }
+
+    #[test]
+    fn force_show_drops_the_floor() {
+        // 300 room cannot fit 400 + 160; a zero floor keeps the last width.
+        assert_eq!(
+            resolve_collapsible(268., 300., 0., COLLAPSE_THRESHOLD),
+            Collapse::Width(268.)
+        );
+        assert_eq!(
+            resolve_collapsible(268., 200., 0., COLLAPSE_THRESHOLD),
+            Collapse::Width(200.)
+        );
+    }
+
+    #[test]
+    fn drag_out_from_collapsed_reappears_only_past_threshold() {
+        let at = |pointer| {
+            resolve_collapsible(pointer, 1200., MIN_DIFF_CONTENT_WIDTH, COLLAPSE_THRESHOLD)
+        };
+        assert_eq!(at(40.), Collapse::Hidden);
+        assert_eq!(at(159.), Collapse::Hidden);
+        assert_eq!(at(161.), Collapse::Width(161.));
+        assert_eq!(at(240.), Collapse::Width(240.));
     }
 
     #[test]

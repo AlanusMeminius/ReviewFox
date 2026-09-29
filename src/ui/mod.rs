@@ -58,6 +58,7 @@ macro_rules! icon_assets {
 
 const ICON_ASSETS: &[(&str, &[u8])] = icon_assets![
     "sidebar_title.svg",
+    "sidebar_right.svg",
     "diff_title.svg",
     "branch.svg",
     "folder.svg",

@@ -49,10 +49,8 @@ pub const CHANGES_SHADOW_GAP: f32 = CHANGES_INSET;
 /// Corner radius of floating capsules.
 pub const CHANGES_RADIUS: f32 = 12.;
 
-/// Right-hand Diff comment island (on-demand when the path has DraftComments).
+/// Default width of the right-hand Diff comment island.
 pub const COMMENT_ISLAND_WIDTH: f32 = 268.;
-/// Gap between the diff island and the comment island on the stage.
-pub const COMMENT_ISLAND_GAP: f32 = 10.;
 /// Flex `gap_2` used in chrome rows (traffic lights / toggles / pills).
 pub const CHROME_GAP: f32 = 8.;
 

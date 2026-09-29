@@ -1,8 +1,9 @@
 use gpui::{
-    AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Task, Timer, WeakEntity,
-    Window, WindowControlArea, actions, canvas, div, prelude::*, px,
+    Animation, AnimationExt, AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity,
+    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
+    Subscription, Task, Timer, WeakEntity, Window, WindowControlArea, actions, canvas, div,
+    ease_out_quint, prelude::*, px,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -102,6 +103,17 @@ pub struct DiffView {
     tree_collapsed: bool,
     tree_width: f32,
     tree_resize_state: Rc<ResizeState>,
+    /// The toggle's preference; the narrow-window yield never rewrites it.
+    comments_visible: bool,
+    /// Last width the user gave the comment island.
+    comment_width: f32,
+    /// Shown by the toggle while the window yields it: the diff floor is dropped
+    /// until the island fits again.
+    comments_forced: bool,
+    /// Bumped per animated show/hide so the drawer animation restarts; `None`
+    /// while nothing should animate (window open, drag-out).
+    comment_anim: Option<usize>,
+    comment_resize_state: Rc<ResizeState>,
     pub snapshot: Option<DiffSnapshot>,
     review: Option<Review>,
     drafting: Option<Drafting>,
@@ -239,6 +251,11 @@ impl DiffView {
             tree_collapsed: false,
             tree_width: f32::from(theme::DIFF_TREE_WIDTH),
             tree_resize_state: Rc::new(ResizeState::default()),
+            comments_visible: true,
+            comment_width: theme::COMMENT_ISLAND_WIDTH,
+            comments_forced: false,
+            comment_anim: None,
+            comment_resize_state: Rc::new(ResizeState::default()),
             snapshot: Some(snapshot),
             review: Some(review),
             drafting: None,
@@ -683,6 +700,101 @@ impl DiffView {
         })
     }
 
+    /// Stage width the diff and comment islands share, less the gap between them.
+    fn comment_room(&self, window: &Window) -> f32 {
+        let tree = if self.tree_collapsed {
+            0.
+        } else {
+            self.tree_width + splitter::RAIL_HANDLE_WIDTH
+        };
+        f32::from(window.viewport_size().width)
+            - tree
+            - theme::CHANGES_INSET * 2.
+            - theme::CHANGES_SHADOW_GAP
+    }
+
+    fn comment_layout(&self, room: f32) -> splitter::Collapse {
+        if self.comments_visible {
+            self.comment_fit(room)
+        } else {
+            splitter::Collapse::Hidden
+        }
+    }
+
+    /// The island's layout were it shown.
+    fn comment_fit(&self, room: f32) -> splitter::Collapse {
+        let floor = if self.comments_forced {
+            0.
+        } else {
+            splitter::MIN_DIFF_CONTENT_WIDTH
+        };
+        splitter::resolve_collapsible(
+            self.comment_width,
+            room,
+            floor,
+            splitter::COLLAPSE_THRESHOLD,
+        )
+    }
+
+    fn animate_comments(&mut self) {
+        self.comment_anim = Some(self.comment_anim.map_or(0, |n| n + 1));
+    }
+
+    fn toggle_comments(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let room = self.comment_room(window);
+        if self.comment_layout(room) == splitter::Collapse::Hidden {
+            self.comments_visible = true;
+            self.comments_forced = splitter::resolve_collapsible(
+                self.comment_width,
+                room,
+                splitter::MIN_DIFF_CONTENT_WIDTH,
+                splitter::COLLAPSE_THRESHOLD,
+            ) == splitter::Collapse::Hidden;
+        } else {
+            self.comments_visible = false;
+            self.comments_forced = false;
+        }
+        self.animate_comments();
+        cx.notify();
+    }
+
+    fn comment_resize_handler(&self, cx: &Context<Self>) -> splitter::ResizeHandler {
+        let view = cx.entity().downgrade();
+        Rc::new(move |requested, window, cx: &mut App| {
+            view.update(cx, |this, cx| {
+                let room = this.comment_room(window);
+                let shown = this.comment_layout(room) != splitter::Collapse::Hidden;
+                // HorizontalTrailing reports distance to viewport right; the pointer
+                // rides the middle of the gap, and the stage is inset on the right.
+                let requested =
+                    requested - theme::CHANGES_INSET - theme::CHANGES_SHADOW_GAP / 2.;
+                this.comments_forced = false;
+                match splitter::resolve_collapsible(
+                    requested,
+                    room,
+                    splitter::MIN_DIFF_CONTENT_WIDTH,
+                    splitter::COLLAPSE_THRESHOLD,
+                ) {
+                    splitter::Collapse::Width(width) => {
+                        if !shown {
+                            this.comment_anim = None;
+                        }
+                        this.comments_visible = true;
+                        this.comment_width = width;
+                    }
+                    splitter::Collapse::Hidden => {
+                        if shown {
+                            this.animate_comments();
+                        }
+                        this.comments_visible = false;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+    }
+
     fn sync_collapsed_dirs(&mut self) {
         let next = self
             .snapshot
@@ -1006,6 +1118,12 @@ impl DiffView {
             px(self.tree_width)
         };
         let show_tree_split = !self.tree_collapsed;
+        let room = self.comment_room(window);
+        if self.comments_forced && room - splitter::MIN_DIFF_CONTENT_WIDTH >= self.comment_width
+        {
+            self.comments_forced = false;
+        }
+        let comment_layout = self.comment_layout(room);
 
         div()
             .id("diff-shell")
@@ -1035,7 +1153,7 @@ impl DiffView {
                     })
                     // Frosted desk: the content island floats here, inset on all four
                     // sides so the material reads around it. Comment island sits to
-                    // the right of the diff island when the path has comments.
+                    // the right of the diff island while it is shown.
                     .child(
                         div()
                             .id("diff-stage")
@@ -1053,12 +1171,19 @@ impl DiffView {
                             .child(
                                 div()
                                     .id("diff-stage-islands")
+                                    .relative()
                                     .flex_1()
                                     .min_h(px(0.))
                                     .flex()
-                                    .gap(px(theme::COMMENT_ISLAND_GAP))
                                     .child(render_dual_pane(self, cx))
-                                    .child(render_comment_island(self, cx)),
+                                    .children(render_comment_drawer(self, room, comment_layout, cx))
+                                    .when(comment_layout == splitter::Collapse::Hidden, |d| {
+                                        d.child(splitter::parked_handle(
+                                            "diff-comment-parked-handle",
+                                            self.comment_resize_handler(cx),
+                                            self.comment_resize_state.clone(),
+                                        ))
+                                    }),
                             )
                             .child(render_status_bar(self, cx)),
                     ),
@@ -1381,6 +1506,7 @@ fn render_titlebar(
                         .window_control_area(WindowControlArea::Drag)
                         .occlude(),
                 )
+                .child(comments_toggle_button(view, window, cx))
                 .child(
                     // Doubles as the trailing inset when no caption buttons follow.
                     div()
@@ -1767,10 +1893,77 @@ fn render_body(view: &DiffView, find_open: bool, cx: &mut Context<DiffView>) -> 
     }
 }
 
-/// Right-hand comment island: only when the selected path has DraftComments.
-/// Row body selects the span (wash + selected styling); Edit / gutter icons open
-/// the dock; Delete removes immediately.
-fn render_comment_island(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
+/// Gap handle + comment island as a drawer: its width runs 0 ↔ gap + island while
+/// the content keeps its width and is clipped, so the diff re-lays out each frame.
+fn render_comment_drawer(
+    view: &DiffView,
+    room: f32,
+    layout: splitter::Collapse,
+    cx: &mut Context<DiffView>,
+) -> Option<AnyElement> {
+    let (width, shown) = match (layout, view.comment_fit(room)) {
+        (splitter::Collapse::Width(width), _) => (width, true),
+        (splitter::Collapse::Hidden, splitter::Collapse::Width(width)) => (width, false),
+        (splitter::Collapse::Hidden, splitter::Collapse::Hidden) => {
+            (view.comment_width.min(room.max(0.)), false)
+        }
+    };
+    let full = theme::CHANGES_SHADOW_GAP + width;
+    let gap = if shown {
+        splitter::handle(
+            "diff-comment-resize-handle",
+            Axis::HorizontalTrailing,
+            view.comment_resize_handler(cx),
+            view.comment_resize_state.clone(),
+            true,
+        )
+        .into_any_element()
+    } else {
+        // Sliding shut: the parked handle owns the drag, so this strip must not.
+        div()
+            .flex_none()
+            .w(px(theme::CHANGES_SHADOW_GAP))
+            .into_any_element()
+    };
+    // Pin the full-width content to the right edge so the clip reveals the island
+    // from the window side (a drawer) instead of cutting off its outer edge.
+    let drawer = div()
+        .flex_none()
+        .relative()
+        .h_full()
+        .overflow_hidden()
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .w(px(full))
+                .h_full()
+                .flex()
+                .child(gap)
+                .child(render_comment_island(view, width, cx)),
+        );
+    match view.comment_anim {
+        Some(generation) => Some(
+            drawer
+                .with_animation(
+                    ("diff-comment-drawer", generation),
+                    Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+                    move |this, t| this.w(px(full * if shown { t } else { 1. - t })),
+                )
+                .into_any_element(),
+        ),
+        None => shown.then(|| drawer.w(px(full)).into_any_element()),
+    }
+}
+
+/// Right-hand comment island. Row body selects the span (wash + selected
+/// styling); Edit / gutter icons open the dock; Delete removes immediately.
+fn render_comment_island(
+    view: &DiffView,
+    width: f32,
+    cx: &mut Context<DiffView>,
+) -> impl IntoElement {
     let mono = appearance::code_font(cx);
     let path = view
         .snapshot
@@ -1783,10 +1976,6 @@ fn render_comment_island(view: &DiffView, cx: &mut Context<DiffView>) -> impl In
         .map(|r| r.comments_for_path(&path).cloned().collect())
         .unwrap_or_default();
 
-    if comments.is_empty() {
-        return div().into_any_element();
-    }
-
     let n = comments.len();
     let selection = view.pane.read(cx).selection();
     let (scroll, sb) = scrollbar::vertical("diff-comments-sb", cx);
@@ -1794,7 +1983,7 @@ fn render_comment_island(view: &DiffView, cx: &mut Context<DiffView>) -> impl In
     div()
         .id("diff-comment-island")
         .flex_none()
-        .w(px(theme::COMMENT_ISLAND_WIDTH))
+        .w(px(width))
         .h_full()
         .min_h(px(0.))
         .flex()
@@ -1818,109 +2007,132 @@ fn render_comment_island(view: &DiffView, cx: &mut Context<DiffView>) -> impl In
                         .text_color(theme::faint())
                         .child("COMMENTS"),
                 )
-                .child(
-                    div()
-                        .ui_text_size(11., cx)
-                        .text_color(theme::muted())
-                        .child(format!("{n}")),
-                ),
+                .when(n > 0, |header| {
+                    header.child(
+                        div()
+                            .ui_text_size(11., cx)
+                            .text_color(theme::muted())
+                            .child(format!("{n}")),
+                    )
+                }),
         )
-        .child(scrollbar::overlay_flex(
-            div()
-                .id("diff-comments-scroll")
-                .size_full()
-                .pt_1()
-                .pb_1()
-                .track_scroll(&scroll)
-                .overflow_y_scroll()
-                .children(comments.into_iter().map(|c| {
-                    let label = match &c.anchor {
-                        Anchor::Line { side, span, .. } => {
-                            span_label(*side, span.start, span.count)
-                        }
-                        Anchor::File { .. } => "file".into(),
-                    };
-                    let id = c.id;
-                    let selected = match &c.anchor {
-                        Anchor::Line { side, span, .. } => {
-                            selection_matches_span(selection, *side, *span)
-                        }
-                        Anchor::File { .. } => false,
-                    };
-                    div()
-                        .id(("cmt", c.id as usize))
-                        .mx_1()
-                        .my_0p5()
-                        .px_3()
-                        .py_2()
-                        .rounded_lg()
-                        .cursor_pointer()
-                        .when(selected, |row| row.bg(theme::range()))
-                        .hover(move |row| {
-                            if selected {
-                                row.bg(theme::range())
-                            } else {
-                                row.bg(theme::hover())
+        .child(if n == 0 {
+            render_no_comments(cx).into_any_element()
+        } else {
+            scrollbar::overlay_flex(
+                div()
+                    .id("diff-comments-scroll")
+                    .size_full()
+                    .pt_1()
+                    .pb_1()
+                    .track_scroll(&scroll)
+                    .overflow_y_scroll()
+                    .children(comments.into_iter().map(|c| {
+                        let label = match &c.anchor {
+                            Anchor::Line { side, span, .. } => {
+                                span_label(*side, span.start, span.count)
                             }
-                        })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.select_comment(id, window, cx)
-                        }))
-                        .child(
-                            div()
-                                .w_full()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w(px(0.))
-                                        .font_family(mono.clone())
-                                        .text_xs()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(theme::accent())
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .whitespace_nowrap()
-                                        .child(label),
-                                )
-                                .child(
-                                    IconButton::new(
-                                        ("cmt-edit", id as usize),
-                                        "pencil.svg",
-                                        "Edit DraftComment",
+                            Anchor::File { .. } => "file".into(),
+                        };
+                        let id = c.id;
+                        let selected = match &c.anchor {
+                            Anchor::Line { side, span, .. } => {
+                                selection_matches_span(selection, *side, *span)
+                            }
+                            Anchor::File { .. } => false,
+                        };
+                        div()
+                            .id(("cmt", c.id as usize))
+                            .mx_1()
+                            .my_0p5()
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .cursor_pointer()
+                            .when(selected, |row| row.bg(theme::range()))
+                            .hover(move |row| {
+                                if selected {
+                                    row.bg(theme::range())
+                                } else {
+                                    row.bg(theme::hover())
+                                }
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_comment(id, window, cx)
+                            }))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .font_family(mono.clone())
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(theme::accent())
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(label),
                                     )
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.begin_edit(id, window, cx);
-                                    })),
-                                )
-                                .child(
-                                    IconButton::new(
-                                        ("cmt-del", id as usize),
-                                        "trash.svg",
-                                        "Delete DraftComment",
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, _, window, cx| {
+                                    .child(
+                                        IconButton::new(
+                                            ("cmt-edit", id as usize),
+                                            "pencil.svg",
+                                            "Edit DraftComment",
+                                        )
+                                        .on_click(cx.listener(move |this, _, window, cx| {
                                             cx.stop_propagation();
-                                            this.delete_comment(id, window, cx);
-                                        },
-                                    )),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .mt(px(4.))
-                                .ui_text_size(12., cx)
-                                .text_color(theme::text())
-                                .child(c.body),
-                        )
-                })),
-            sb,
-        ))
+                                            this.begin_edit(id, window, cx);
+                                        })),
+                                    )
+                                    .child(
+                                        IconButton::new(
+                                            ("cmt-del", id as usize),
+                                            "trash.svg",
+                                            "Delete DraftComment",
+                                        )
+                                        .on_click(cx.listener(
+                                            move |this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.delete_comment(id, window, cx);
+                                            },
+                                        )),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(4.))
+                                    .ui_text_size(12., cx)
+                                    .text_color(theme::text())
+                                    .child(c.body),
+                            )
+                    })),
+                sb,
+            )
+            .into_any_element()
+        })
         .into_any_element()
+}
+
+fn render_no_comments(cx: &App) -> impl IntoElement {
+    div()
+        .px(px(12.))
+        .pt(px(4.))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .text_color(theme::muted())
+        .child(div().ui_text_size(12., cx).child("No comments"))
+        .child(
+            div()
+                .ui_text_size(11., cx)
+                .child("Select lines, then click the gutter icon"),
+        )
 }
 
 /// Invisible slot where the bottom draft dock will be painted above DualPane.
@@ -2223,6 +2435,24 @@ fn toggle_button(
             this.tree_collapsed = !this.tree_collapsed;
             cx.notify();
         }))
+}
+
+/// Pressed while the island is actually on screen, so a narrow-window yield
+/// reads as off.
+fn comments_toggle_button(
+    view: &DiffView,
+    window: &Window,
+    cx: &mut Context<DiffView>,
+) -> impl IntoElement {
+    let shown = view.comment_layout(view.comment_room(window)) != splitter::Collapse::Hidden;
+    let label = if shown {
+        "Hide Comments"
+    } else {
+        "Show Comments"
+    };
+    IconButton::new("diff-comments-toggle", "sidebar_right.svg", label)
+        .pressed(shown)
+        .on_click(cx.listener(|this, _, window, cx| this.toggle_comments(window, cx)))
 }
 
 #[cfg(target_os = "macos")]
