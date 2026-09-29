@@ -54,7 +54,7 @@ Settled 2026-09-29. A toggle in the Fold / ViewOptions capsule, persisted in set
 - Line number on the first visual row only; continuation rows show none and no wrap marker.
 - An Equal pair whose sides wrap to different row counts takes the larger count on both sides, the shorter side padded with blank rows (no hatch), so paired lines stay on one row and Equal never changes the §3.1 gap. Insert, Delete and Replace use each side's own row count.
 - Toggling wrap, resizing and font size changes keep the viewport-anchor line in place (its first visual row when the anchor is on a continuation row); the other side is recomputed per §3.1.
-- Everything on a continuation row belongs to its logical line: clicking starts a draft on that line, the comment bar spans all its rows, bridges and hatch span every visual row of the Hunk. Search hits and word marks crossing a break are drawn as one piece per row; a match jump puts the hit's visual row at the viewport **center** (Hunk jumps keep the §3.1 one-third anchor).
+- Everything on a continuation row belongs to its logical line: dragging selects that line, the comment bar spans all its rows, bridges and hatch span every visual row of the Hunk. Search hits and word marks crossing a break are drawn as one piece per row; a match jump puts the hit's visual row at the viewport **center** (Hunk jumps keep the §3.1 one-third anchor).
 - While wrap is on, horizontal offset is 0 and horizontal scrollbars are hidden.
 
 #### 3.1.2 Horizontal scroll

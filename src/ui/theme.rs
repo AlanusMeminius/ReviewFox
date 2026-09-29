@@ -120,6 +120,21 @@ pub const FIND_BAR_HEIGHT: f32 = FIND_FIELD_HEIGHT + 2. * FIND_BAR_PAD;
 /// Body top pad when find is open: clears the capsule so line 1 stays reachable.
 pub const FIND_CONTENT_PAD: f32 = FIND_BAR_INSET + FIND_BAR_HEIGHT;
 
+// The bottom draft dock wears the find bar's chrome (inset / radius / pad /
+// shadow / translucent fill); only its height differs, because it stacks a
+// meta row over a taller body field.
+
+/// Meta row above the draft field: `DraftComment · new L3–5` plus the key hints.
+pub const DRAFT_META_HEIGHT: f32 = 22.;
+/// Gap between the dock's meta row and its field.
+pub const DRAFT_DOCK_GAP: f32 = 6.;
+/// Draft body field — taller than [`FIND_FIELD_HEIGHT`]: comments are prose.
+pub const DRAFT_FIELD_HEIGHT: f32 = 52.;
+pub const DRAFT_DOCK_HEIGHT: f32 =
+    DRAFT_META_HEIGHT + DRAFT_DOCK_GAP + DRAFT_FIELD_HEIGHT + 2. * FIND_BAR_PAD;
+/// Body bottom pad while drafting; mirror of [`FIND_CONTENT_PAD`].
+pub const DRAFT_CONTENT_PAD: f32 = FIND_BAR_INSET + DRAFT_DOCK_HEIGHT;
+
 #[cfg(target_os = "macos")]
 pub const TRAFFIC_LIGHT_TOP_INSET: f32 = 11.;
 #[cfg(target_os = "macos")]
@@ -238,6 +253,14 @@ pub fn sidebar_row_hover() -> Rgba {
 }
 pub fn range() -> Rgba {
     rgb(0xf1f5ff)
+}
+/// Wash over the code of a drag-selected line span; translucent so the line
+/// kind tint (add / del / mod) still reads through it.
+pub fn selection_wash() -> Rgba {
+    Rgba {
+        a: 0.18,
+        ..accent()
+    }
 }
 pub fn accent() -> Rgba {
     rgb(0x2457d6)

@@ -33,7 +33,7 @@ Layout and Viewport do not depend on GPUI and are unit-tested. `interp`, `s_from
 
 ### 3.1 Decorations
 
-Drafting line, commented lines, search hits, hovered bridge. Passed to the element separately so changing them never invalidates Layout or shaped-text cache.
+Drafting LineSpan, drag selection, commented lines (plus each comment's start line and id, for the gutter's filled bubbles), search hits, hovered bridge. Passed to the element separately so changing them never invalidates Layout or shaped-text cache.
 
 ### 3.2 Word marks
 
@@ -51,9 +51,9 @@ Computed lazily per Replace block the first time it becomes visible, memoized on
 ## 5. Entities and data flow
 
 ```
-DiffView (shell: tree, chrome, search bar, draft bar, Review)
+DiffView (shell: tree, chrome, find bar, draft dock, comments, Review)
   │  methods: select_file, jump_hunk, expand_all, set_font, set_view_options…
-  │  events ◄─ BeginDraft{side, ln}, HunkIndexChanged, HoverCopy
+  │  events ◄─ OpenDraft{side, start, count}, OpenEdit{id}, SelectionStarted, HunkIndexChanged, HoverCopy
   ▼
 DualPane (Entity) ── owns FileDiffState { alignment, fold, layout, scroll_s, x_offsets, shape cache }
   │  render → DualPaneElement(layout, decorations)
@@ -65,7 +65,7 @@ DualPaneElement (one Element: old pane | gutter | new pane)
 ```
 
 - Scroll notifies `DualPane` only; the tree, chrome and comments do not re-render.
-- GPUI re-renders every ancestor of a notified view, so `DualPane` is not nested in the shell. `DiffView` renders a cached `DiffShell` view (tree, chrome, search, comments, draft bar) that leaves a slot, and mounts the cached `DualPane` over that slot (`pane::slot`). A pane frame re-renders only `DiffView`'s thin root and the pane; a shell change reuses the pane.
+- GPUI re-renders every ancestor of a notified view, so `DualPane` is not nested in the shell. `DiffView` renders a cached `DiffShell` view (tree, chrome, search, comments) that leaves a slot, and mounts the cached `DualPane` over that slot (`pane::slot`). A pane frame re-renders only `DiffView`'s thin root and the pane; a shell change reuses the pane.
 - `git::FileDiff::Text` carries text + `Alignment` only (no `display`, no `hunk_count`). `DisplayRows`, `ScrollKnot`, `Bridge`, `RowKind` move out of `domain` into `ui/diff/layout.rs`; `domain` keeps Alignment, Hunk, FoldState, Search, DraftComment.
 
 ## 6. Caches and invalidation

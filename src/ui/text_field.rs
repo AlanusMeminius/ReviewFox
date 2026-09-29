@@ -41,7 +41,9 @@ pub enum TextFieldEvent {
 /// Visual variant. `Default` is the original full-width field; `Settings`
 /// follows Zed's settings input (min 256px wide, focused border); `Number` is
 /// the bare centered value inside a `NumberField`, which draws the frame;
-/// `Search` is the frameless full-width query bar atop a picker popover.
+/// `Search` is the frameless full-width query bar atop a picker popover;
+/// `Draft` is the frameless body field inside the Diff draft dock, which draws
+/// its own frame and is taller than one line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TextFieldStyle {
     #[default]
@@ -49,6 +51,7 @@ pub enum TextFieldStyle {
     Settings,
     Number,
     Search,
+    Draft,
 }
 
 pub struct TextField {
@@ -107,6 +110,12 @@ impl TextField {
         self.selection_reversed = false;
         self.marked_range = None;
         cx.notify();
+    }
+
+    /// Insert `text` at the caret, replacing any selection — what typing does,
+    /// for owners that need to place characters a key binding cannot produce.
+    pub fn insert(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_text_in_range(None, text, window, cx);
     }
 
     fn display_text(&self, focused: bool) -> SharedString {
@@ -767,6 +776,15 @@ impl Render for TextField {
                         .h(px(theme::FIND_FIELD_HEIGHT))
                         .line_height(px(theme::FIND_FIELD_HEIGHT))
                         .px_2(),
+                    // The dock owns the frame; the caret sits on the field's
+                    // first line rather than centred in its taller box.
+                    TextFieldStyle::Draft => field
+                        .w_full()
+                        .h_full()
+                        .items_start()
+                        .line_height(px(22.))
+                        .px_2()
+                        .py_1(),
                 }
             })
             .ui_text_size(13., cx)

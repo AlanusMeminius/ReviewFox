@@ -35,9 +35,60 @@ use std::path::Path;
 /// What the shell (DiffView) hears from the pane. Hunk index and hover copy
 /// are emitted only when they change.
 pub enum PaneEvent {
-    BeginDraft { side: Side, ln: u32 },
+    /// Empty gutter icon clicked: open the draft dock on this LineSpan.
+    OpenDraft {
+        side: Side,
+        start: u32,
+        count: u32,
+    },
+    /// Filled gutter icon clicked: reopen this DraftComment's body in the dock.
+    OpenEdit {
+        id: u64,
+    },
+    /// A code-column drag began a new selection, so any open DraftComment is
+    /// no longer the user's target.
+    SelectionStarted,
     HunkIndexChanged(Option<usize>),
     HoverCopy(Option<String>),
+}
+
+/// One mouse move, in element coordinates, as the pane reads it.
+pub(super) struct PointerMove {
+    /// Vertical scrollbar track hover, per side.
+    pub hovered: [bool; 2],
+    /// Horizontal scrollbar track hover, per side.
+    pub h_hovered: [bool; 2],
+    /// Pane y, only while the pointer is over the center gutter.
+    pub gutter_y: Option<f32>,
+    /// Pane y, wherever the pointer is; a selection drag reads only this.
+    pub pane_y: f32,
+    /// Pointer y inside each side's vertical track.
+    pub track_y: [f32; 2],
+    /// Pointer x inside each side's horizontal track.
+    pub h_track_x: [f32; 2],
+}
+
+/// Contiguous, same-side, line-granular selection from a code-column drag.
+/// `start..=end` in 1-based line numbers of `side`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LineSelection {
+    side: Side,
+    start: u32,
+    end: u32,
+}
+
+impl LineSelection {
+    fn span(self) -> (Side, u32, u32) {
+        (self.side, self.start, self.end)
+    }
+}
+
+/// A DraftComment as the pane needs it: the Anchor drives the row index and the
+/// start-line icons, the id is what a click on a filled icon reopens.
+#[derive(Clone, Debug)]
+pub struct PaneComment {
+    pub id: u64,
+    pub anchor: Anchor,
 }
 
 struct PaneFile {
@@ -60,10 +111,14 @@ pub struct DualPane {
     highlights: [Option<Arc<[Span]>>; 2],
     /// Shaped text per (side, visual row), visible ± one screen.
     shapes: ShapeCache,
-    /// Anchors of the selected path's DraftComments (comment index).
-    comments: Vec<Anchor>,
-    /// Line being drafted, highlighted in its pane.
-    drafting: Option<(Side, u32)>,
+    /// The selected path's DraftComments (comment row index + icon slots).
+    comments: Vec<PaneComment>,
+    /// LineSpan being drafted, highlighted in its pane.
+    drafting: Option<(Side, u32, u32)>,
+    /// Current drag selection; the draft target while the dock is open.
+    selection: Option<LineSelection>,
+    /// Live drag: the side and the line the press landed on.
+    sel_drag: Option<(Side, u32)>,
     /// Shared scroll parameter, in pixels, and the only vertical scroll
     /// source. See docs/dual-pane-diff.md §3.1. Kept inside
     /// `viewport::s_range` from the first measured frame on.
@@ -148,6 +203,8 @@ impl DualPane {
             shapes: ShapeCache::default(),
             comments: Vec::new(),
             drafting: None,
+            selection: None,
+            sel_drag: None,
             scroll_s: 0.,
             x_offsets: [0.; 2],
             sync_horizontal: true,
@@ -225,7 +282,7 @@ impl DualPane {
         &mut self,
         path: &str,
         file: &FileDiff,
-        comments: Vec<Anchor>,
+        comments: Vec<PaneComment>,
         cx: &mut Context<Self>,
     ) {
         self.open_generation = self.open_generation.wrapping_add(1);
@@ -290,6 +347,9 @@ impl DualPane {
             }
         }
         self.comments = comments;
+        // A selection belongs to the file it was dragged in.
+        self.selection = None;
+        self.sel_drag = None;
         self.fold = FoldState::collapsed();
         self.set_hunk_index(None, cx);
         self.hunk_s = Some(0.);
@@ -314,18 +374,61 @@ impl DualPane {
         cx.notify();
     }
 
-    pub fn set_comments(&mut self, comments: Vec<Anchor>, cx: &mut Context<Self>) {
+    pub fn set_comments(&mut self, comments: Vec<PaneComment>, cx: &mut Context<Self>) {
         self.comments = comments;
         if let Some(layout) = self.layout.as_mut() {
-            layout.set_comments(self.comments.iter());
+            layout.set_comments(self.comments.iter().map(|c| &c.anchor));
         }
         cx.notify();
     }
 
-    pub fn set_drafting(&mut self, drafting: Option<(Side, u32)>, cx: &mut Context<Self>) {
+    /// Start line and id of every line-anchored DraftComment, in comment order:
+    /// one filled icon each, always visible.
+    fn comment_starts(&self) -> Vec<(Side, u32, u64)> {
+        self.comments
+            .iter()
+            .filter_map(|c| match &c.anchor {
+                Anchor::Line { side, span, .. } => Some((*side, span.start, c.id)),
+                Anchor::File { .. } => None,
+            })
+            .collect()
+    }
+
+    pub fn set_drafting(&mut self, drafting: Option<(Side, u32, u32)>, cx: &mut Context<Self>) {
         if self.drafting != drafting {
             self.drafting = drafting;
             cx.notify();
+        }
+    }
+
+    /// Point the selection at a LineSpan the shell chose (reopening a
+    /// DraftComment makes its span the draft target, so the wash and the icon
+    /// follow the dock).
+    pub fn select_span(&mut self, side: Side, start: u32, end: u32, cx: &mut Context<Self>) {
+        let next = Some(LineSelection { side, start, end });
+        self.sel_drag = None;
+        if self.selection != next {
+            self.selection = next;
+            cx.notify();
+        }
+    }
+
+    /// Icon click. A filled icon names the DraftComment that starts on its line,
+    /// so it reopens that body; an empty one only paints on a selection's start
+    /// line, so there always is a selection to hand over as the new span.
+    pub(super) fn click_comment_icon(&mut self, mark: element::IconMark, cx: &mut Context<Self>) {
+        match mark {
+            element::IconMark::Filled(id) => cx.emit(PaneEvent::OpenEdit { id }),
+            element::IconMark::Empty => {
+                let Some(sel) = self.selection else {
+                    return;
+                };
+                cx.emit(PaneEvent::OpenDraft {
+                    side: sel.side,
+                    start: sel.start,
+                    count: span_count(sel.start, sel.end),
+                });
+            }
         }
     }
 
@@ -397,7 +500,7 @@ impl DualPane {
             None
         };
         let mut layout = Layout::build(old_text, new_text, &alignment, Some(&self.fold), wrap);
-        layout.set_comments(self.comments.iter());
+        layout.set_comments(self.comments.iter().map(|c| &c.anchor));
         debug_assert!(!soft || !can_wrap || layout.wrap.is_some());
         if t.is_some() {
             trace::layout(
@@ -432,7 +535,13 @@ impl DualPane {
         match self.pending_land.take() {
             Some(PendingLand::Match { side, ln, byte }) => {
                 if let Some(s) = viewport::s_for_match_byte(
-                    layout, side, ln, byte, self.view_h, row_h, self.scroll_s,
+                    layout,
+                    side,
+                    ln,
+                    byte,
+                    self.view_h,
+                    row_h,
+                    self.scroll_s,
                 ) {
                     self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
                     self.hunk_s = Some(self.scroll_s / row_h);
@@ -683,13 +792,7 @@ impl DualPane {
         cx.notify();
     }
 
-    pub fn jump_match(
-        &mut self,
-        side: Side,
-        ln: u32,
-        byte: Option<usize>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn jump_match(&mut self, side: Side, ln: u32, byte: Option<usize>, cx: &mut Context<Self>) {
         let Some(file) = self.file.as_ref() else {
             return;
         };
@@ -704,9 +807,8 @@ impl DualPane {
         };
         let row_h = self.row_h();
         let line_text = layout.side(plan.target.side).line_text(plan.target.ln);
-        let byte = byte.or_else(|| {
-            line_text.and_then(|text| first_match_byte(text, &self.search_query))
-        });
+        let byte =
+            byte.or_else(|| line_text.and_then(|text| first_match_byte(text, &self.search_query)));
         let defer = self.soft_wrap && (self.wrap_layout_dirty || layout.wrap.is_none());
         if defer {
             self.pending_land = Some(match byte {
@@ -1006,13 +1108,36 @@ impl DualPane {
         }
     }
 
-    pub(super) fn press_row(&mut self, side: Side, y: f32) {
-        self.press = self.row_index_at(side, y).map(|row| (side, row));
+    /// Logical line `side` shows at pane y `y`, skipping blank padding rows.
+    fn line_at(&self, side: Side, y: f32) -> Option<u32> {
+        match self.viewport()?.hit(side, y)? {
+            Row::Line(l) if !l.is_equal_padding() => Some(l.ln),
+            _ => None,
+        }
     }
 
-    /// Left release. Ends a thumb drag, or completes a click on the pressed
-    /// row: a line begins a draft, an omission separator expands its span.
+    /// Left press in `side`'s code column. On a line it starts a selection drag
+    /// (replacing any selection, including one on the other side); on an
+    /// omission separator it only arms the click that expands it.
+    pub(super) fn press_row(&mut self, side: Side, y: f32, cx: &mut Context<Self>) {
+        self.press = self.row_index_at(side, y).map(|row| (side, row));
+        let Some(ln) = self.line_at(side, y) else {
+            return;
+        };
+        self.sel_drag = Some((side, ln));
+        self.selection = Some(LineSelection {
+            side,
+            start: ln,
+            end: ln,
+        });
+        cx.emit(PaneEvent::SelectionStarted);
+        cx.notify();
+    }
+
+    /// Left release. Ends a thumb or selection drag, or completes a click on
+    /// the pressed omission separator by expanding its span.
     pub(super) fn release(&mut self, side: Option<Side>, y: f32, cx: &mut Context<Self>) {
+        self.sel_drag = None;
         if self.bars.drag.take().is_some() || self.bars.h_drag.take().is_some() {
             if !self.bars.hovered.iter().any(|&h| h) && !self.bars.h_hovered.iter().any(|&h| h) {
                 self.arm_bar_hide(cx);
@@ -1026,34 +1151,39 @@ impl DualPane {
         if pressed.0 != side {
             return;
         }
-        enum Click {
-            Line(u32),
-            Omit(usize),
-        }
-        let click = self.viewport().and_then(|vp| match vp.hit(side, y)? {
-            Row::Line(l) if l.row == pressed.1 => Some(Click::Line(l.ln)),
-            Row::Omit(o) if o.row == pressed.1 => Some(Click::Omit(o.id)),
+        let omit = self.viewport().and_then(|vp| match vp.hit(side, y)? {
+            Row::Omit(o) if o.row == pressed.1 => Some(o.id),
             _ => None,
         });
-        match click {
-            Some(Click::Line(ln)) => cx.emit(PaneEvent::BeginDraft { side, ln }),
-            Some(Click::Omit(id)) => self.expand_omit(id, cx),
-            None => {}
+        if let Some(id) = omit {
+            self.expand_omit(id, cx);
         }
     }
 
-    /// Track hover per side, an active thumb drag (`track_y` is the pointer in
-    /// each track), and gutter hover copy (`gutter_y` is pane y over the gutter).
-    pub(super) fn mouse_moved(
-        &mut self,
-        hovered: [bool; 2],
-        h_hovered: [bool; 2],
-        gutter_y: Option<f32>,
-        track_y: [f32; 2],
-        h_track_x: [f32; 2],
-        cx: &mut Context<Self>,
-    ) {
+    /// Track hover per side, an active thumb or selection drag, and gutter
+    /// hover copy.
+    pub(super) fn mouse_moved(&mut self, m: PointerMove, cx: &mut Context<Self>) {
+        let PointerMove {
+            hovered,
+            h_hovered,
+            gutter_y,
+            pane_y,
+            track_y,
+            h_track_x,
+        } = m;
         let mut dirty = false;
+        // A drag keeps its own side and reads only y, so leaving the column
+        // sideways (or over the gutter) still extends the selection.
+        if let Some((side, anchor)) = self.sel_drag
+            && let Some(ln) = self.line_at(side, pane_y)
+        {
+            let (start, end) = selection_span(anchor, ln);
+            let next = Some(LineSelection { side, start, end });
+            if self.selection != next {
+                self.selection = next;
+                dirty = true;
+            }
+        }
         if self.bars.hovered != hovered {
             self.bars.hovered = hovered;
             if hovered.iter().any(|&h| h) {
@@ -1115,6 +1245,7 @@ impl DualPane {
             self.pane_w[side_ix(side)] = f32::from(geom.pane(side).size.width);
         }
         self.sync_wrap_layout(self.pane_w, window, cx);
+        let comment_starts = self.comment_starts();
         let layout = self.layout.as_ref()?;
         let t_vp = trace::start();
         let vp = Viewport::new(layout, self.scroll_s, self.view_h, row_h).snapped(self.scale);
@@ -1132,6 +1263,8 @@ impl DualPane {
                 scale: self.scale,
                 decorations: Decorations {
                     drafting: self.drafting,
+                    selection: self.selection.map(LineSelection::span),
+                    comment_starts,
                     search_query: (!self.search_query.is_empty())
                         .then(|| Arc::from(self.search_query.as_str())),
                     search_side: self.search_side,
@@ -1186,6 +1319,12 @@ impl DualPane {
         let (tracks, h_track_boxes) = insert_scrollbar_hitboxes(&geom, v_tracks, h_tracks, window);
         frame.tracks = tracks;
         frame.h_tracks = h_track_boxes;
+        // Inserted after the element's own hitbox, so the icons win the press.
+        frame.icon_hitboxes = frame
+            .icons
+            .iter()
+            .map(|icon| window.insert_hitbox(icon.slot, gpui::HitboxBehavior::Normal))
+            .collect();
         for side in [Side::Old, Side::New] {
             if let Some(g) = self.h_thumb_geom(side) {
                 frame.set_h_thumb(side, g, &self.bars);
@@ -1508,9 +1647,36 @@ fn should_apply_highlight(open_generation: u64, result_generation: u64) -> bool 
     open_generation == result_generation
 }
 
+/// Inclusive line span of a drag from `anchor` to the line under the pointer,
+/// low end first — a drag upwards selects the same span as one downwards.
+fn selection_span(anchor: u32, ln: u32) -> (u32, u32) {
+    (anchor.min(ln), anchor.max(ln))
+}
+
+/// `LineSpan::count` for an inclusive `start..=end` selection.
+fn span_count(start: u32, end: u32) -> u32 {
+    end.saturating_sub(start) + 1
+}
+
 #[cfg(test)]
 mod tests {
-    use super::should_apply_highlight;
+    use super::{selection_span, should_apply_highlight, span_count};
+
+    #[test]
+    fn drag_normalizes_to_low_end_first() {
+        assert_eq!(selection_span(3, 7), (3, 7));
+        assert_eq!(selection_span(7, 3), (3, 7), "upward drag is the same span");
+        assert_eq!(selection_span(5, 5), (5, 5));
+    }
+
+    #[test]
+    fn span_count_covers_both_ends() {
+        assert_eq!(span_count(5, 5), 1, "single line is count 1");
+        assert_eq!(span_count(3, 5), 3);
+        assert_eq!(span_count(1, 120), 120);
+        // Never zero, even if an inverted span ever reached here.
+        assert_eq!(span_count(9, 4), 1);
+    }
 
     #[test]
     fn soft_wrap_deferred_rebuild_satisfies_layout_invariant() {

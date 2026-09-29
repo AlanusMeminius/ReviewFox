@@ -17,7 +17,7 @@ use gpui::{
 };
 
 use super::layout::{Layout, LineKind, Row};
-use super::pane::DualPane;
+use super::pane::{DualPane, PointerMove};
 use super::tabs::TabExpansion;
 use super::trace::{self, FrameStats};
 use super::viewport::{Viewport, route_wheel, snap};
@@ -35,6 +35,11 @@ const LN_DIGIT_PX: f32 = 8.;
 /// Line-number inset from the code side of its column.
 const LN_PAD: f32 = 4.;
 const BRIDGE_COL: f32 = 24.;
+/// Comment-icon slot beside each line-number column, on the bridge side of it
+/// (`old` = number then icon, `new` = icon then number), per the prototype.
+const ICON_COL: f32 = 18.;
+/// Bubble glyph drawn centred in an [`ICON_COL`] slot.
+const ICON_GLYPH: f32 = 12.;
 /// Code text inset from the pane's inner edge.
 pub(super) const TEXT_PAD: f32 = 12.;
 /// Left bar on a commented line; the text moves right by the same amount.
@@ -56,9 +61,24 @@ pub struct ActiveSearchMatch {
     pub bytes: std::ops::Range<usize>,
 }
 
+/// Which bubble an icon slot carries, and what a click on it means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum IconMark {
+    /// Outline bubble on the selection's start line: click creates a comment.
+    Empty,
+    /// Solid bubble on an existing DraftComment's start line: click reopens it.
+    Filled(u64),
+}
+
 /// State that changes without touching Layout or the shaped-line cache.
 pub(super) struct Decorations {
-    pub drafting: Option<(Side, u32)>,
+    /// Side and inclusive line span of the open DraftComment, if any.
+    pub drafting: Option<(Side, u32, u32)>,
+    /// Side and inclusive line span of the drag selection, if any.
+    pub selection: Option<(Side, u32, u32)>,
+    /// Start line and id of every DraftComment on the path, in comment order:
+    /// where the filled bubbles go.
+    pub comment_starts: Vec<(Side, u32, u64)>,
     /// Case-insensitive query for in-file search highlights on visible rows.
     pub search_query: Option<Arc<str>>,
     /// Side factor: only highlight occurrences on these sides.
@@ -139,7 +159,7 @@ impl Geom {
         let x1 = snap(f32::from(bounds.right()), scale);
         let y0 = snap(f32::from(bounds.top()), scale);
         let y1 = snap(f32::from(bounds.bottom()), scale);
-        let gutter_w = ln_w * 2. + BRIDGE_COL;
+        let gutter_w = ln_w * 2. + ICON_COL * 2. + BRIDGE_COL;
         let pane_w = snap(((x1 - x0 - gutter_w) / 2.).max(0.), scale);
         let rect = |a: f32, b: f32| {
             Bounds::from_corners(point(px(a), px(y0)), point(px(b.max(a)), px(y1)))
@@ -164,6 +184,55 @@ impl Geom {
             Side::Old => self.old,
             Side::New => self.new,
         }
+    }
+
+    /// Width the gutter holds flat on each edge before the bridge curve starts:
+    /// the line-number column plus its icon slot.
+    pub fn flat_w(&self) -> f32 {
+        self.ln_w + ICON_COL
+    }
+
+    /// Line-number column of `side`, as window `(left, right)`.
+    fn ln_col(&self, side: Side) -> (f32, f32) {
+        match side {
+            Side::Old => {
+                let l = f32::from(self.gutter.left());
+                (l, l + self.ln_w)
+            }
+            Side::New => {
+                let r = f32::from(self.gutter.right());
+                (r - self.ln_w, r)
+            }
+        }
+    }
+
+    /// Line numbers plus icon slot — the band that carries the row's kind tint.
+    fn gutter_band(&self, side: Side) -> (f32, f32) {
+        match side {
+            Side::Old => {
+                let l = f32::from(self.gutter.left());
+                (l, l + self.flat_w())
+            }
+            Side::New => {
+                let r = f32::from(self.gutter.right());
+                (r - self.flat_w(), r)
+            }
+        }
+    }
+
+    /// Icon slot of `side` over the row band `y0..y1`.
+    fn icon_slot(&self, side: Side, y0: f32, y1: f32) -> Bounds<Pixels> {
+        let (a, b) = match side {
+            Side::Old => {
+                let x = f32::from(self.gutter.left()) + self.ln_w;
+                (x, x + ICON_COL)
+            }
+            Side::New => {
+                let x = f32::from(self.gutter.right()) - self.flat_w();
+                (x, x + ICON_COL)
+            }
+        };
+        Bounds::from_corners(point(px(a), px(y0)), point(px(b), px(y1)))
     }
 
     /// Scrollbar track: old on the outer left, new on the outer right (ADR-0003).
@@ -247,6 +316,8 @@ struct RowPaint {
     kind_bg: Rgba,
     bg: Rgba,
     commented: bool,
+    /// Inside the drag selection: the code column takes a translucent wash.
+    selected: bool,
     text: Option<ShapedLine>,
     /// Extra x before shaped text (continuation indent when wrapped).
     text_leading: f32,
@@ -266,6 +337,8 @@ struct SideFrame {
     /// column draws those too).
     seams: Vec<(f32, bool)>,
     empty_seam: Option<f32>,
+    /// Visible icon slots on this side, as row bands.
+    icons: Vec<IconPlace>,
     thumb: Option<Thumb>,
     h_thumb: Option<Thumb>,
     /// Widest shaped text among this frame's rows.
@@ -273,6 +346,22 @@ struct SideFrame {
     /// Horizontal scroll of the code text, device-pixel snapped. Set after
     /// the frame is built, once `widest` has fed the clamp.
     x_offset: f32,
+}
+
+/// An icon slot before its side is turned into gutter x, as a row band.
+struct IconPlace {
+    y0: f32,
+    y1: f32,
+    mark: IconMark,
+    /// The draft dock is open on this line, so the bubble reads active.
+    open: bool,
+}
+
+/// A placed icon slot: what to paint, and the rect a click must hit.
+pub(super) struct IconSlot {
+    pub(super) slot: Bounds<Pixels>,
+    pub(super) mark: IconMark,
+    open: bool,
 }
 
 struct Thumb {
@@ -302,6 +391,10 @@ pub struct Frame {
     pub(super) code: [Hitbox; 2],
     pub(super) tracks: [Option<Hitbox>; 2],
     pub(super) h_tracks: [Option<Hitbox>; 2],
+    /// Comment icons on this frame's visible rows, in paint order.
+    pub(super) icons: Vec<IconSlot>,
+    /// One per [`Self::icons`], same order; filled by the pane's prepaint.
+    pub(super) icon_hitboxes: Vec<Hitbox>,
     sides: [SideFrame; 2],
     bridges: Vec<WinBridge>,
     /// Omission separator joins: (old y, new y), window.
@@ -357,9 +450,11 @@ pub(super) fn build_frame(
         keep[side_ix(side)] = visible.start.saturating_sub(screen)..visible.end + screen;
         let side_top = vp.top(side);
         let y_of = |r: usize| snap(top + r as f32 * row_h - side_top, scale);
-        let drafting = decorations
-            .drafting
-            .and_then(|(s, ln)| (s == side).then_some(ln));
+        let span_on_side = |span: Option<(Side, u32, u32)>| {
+            span.and_then(|(s, start, end)| (s == side).then_some(start..=end))
+        };
+        let drafting = span_on_side(decorations.drafting);
+        let selection = span_on_side(decorations.selection);
         let search_query = decorations.search_query.as_deref();
         let search_side = decorations.search_side;
         let active_match = decorations.active_match.as_ref();
@@ -371,6 +466,7 @@ pub(super) fn build_frame(
         };
         let mut out = Vec::with_capacity(visible.len());
         let mut widest = 0f32;
+        let mut icons = Vec::new();
         for i in visible {
             let Some(row) = rows.row(i) else { continue };
             let shape = shapes.rows.entry((side, i as u32)).or_insert_with(|| {
@@ -380,6 +476,31 @@ pub(super) fn build_frame(
                 stats.shape += trace::since(t);
                 shape
             });
+            // Selection is line-granular, so it needs no shaped text; the
+            // icon rides the start line's first visual row.
+            let selected_here = match row {
+                Row::Line(l) if !l.is_equal_padding() => {
+                    let sel = selection.as_ref().filter(|s| s.contains(&l.ln));
+                    if l.shows_line_number() {
+                        let mark = icon_mark_for(
+                            &decorations.comment_starts,
+                            side,
+                            l.ln,
+                            sel.is_some_and(|s| *s.start() == l.ln),
+                        );
+                        if let Some(mark) = mark {
+                            icons.push(IconPlace {
+                                y0: y_of(i),
+                                y1: y_of(i + 1),
+                                mark,
+                                open: drafting.as_ref().is_some_and(|d| *d.start() == l.ln),
+                            });
+                        }
+                    }
+                    sel.is_some()
+                }
+                _ => false,
+            };
             let (kind, commented, drafting_here, marks, search, show_label, leading) = match row {
                 Row::Line(l) => {
                     let marks = match (layout.mark_runs(side, l), &shape.text, &shape.tabs) {
@@ -432,7 +553,7 @@ pub(super) fn build_frame(
                     (
                         Some(l.kind),
                         !pad && rows.has_comment(l.ln),
-                        !pad && drafting == Some(l.ln),
+                        !pad && drafting.as_ref().is_some_and(|d| d.contains(&l.ln)),
                         marks,
                         search,
                         l.shows_line_number(),
@@ -455,6 +576,7 @@ pub(super) fn build_frame(
                     kind_bg
                 },
                 commented,
+                selected: selected_here,
                 text: shape.text.clone(),
                 text_leading: leading,
                 marks,
@@ -492,6 +614,7 @@ pub(super) fn build_frame(
             empty_seam: rows
                 .is_empty()
                 .then(|| snap(top + vp.empty_seam(side), scale)),
+            icons,
             thumb,
             h_thumb: None,
             widest,
@@ -529,6 +652,19 @@ pub(super) fn build_frame(
     let hitbox = window.insert_hitbox(geom.bounds, HitboxBehavior::Normal);
     let code = [Side::Old, Side::New]
         .map(|side| window.insert_hitbox(geom.pane(side), HitboxBehavior::Normal));
+    let icons = [Side::Old, Side::New]
+        .into_iter()
+        .flat_map(|side| {
+            sides[side_ix(side)]
+                .icons
+                .iter()
+                .map(move |place| IconSlot {
+                    slot: geom.icon_slot(side, place.y0, place.y1),
+                    mark: place.mark,
+                    open: place.open,
+                })
+        })
+        .collect();
     stats.build = trace::since(t_build);
     Frame {
         geom,
@@ -538,6 +674,8 @@ pub(super) fn build_frame(
         code,
         tracks: [None, None],
         h_tracks: [None, None],
+        icons,
+        icon_hitboxes: Vec::new(),
         sides,
         bridges,
         waves,
@@ -763,6 +901,31 @@ fn run_spans(runs: &[(usize, usize)], text: &ShapedLine) -> Vec<(f32, f32)> {
         .collect()
 }
 
+/// Which DraftComment the filled bubble on `(side, ln)` belongs to. Overlapping
+/// comments are allowed, so two can start on the same line; `starts` is in
+/// comment order, and taking the first match keeps the choice stable across
+/// frames (it is also the oldest comment, since ids ascend).
+fn comment_start_id(starts: &[(Side, u32, u64)], side: Side, ln: u32) -> Option<u64> {
+    starts
+        .iter()
+        .find(|&&(s, start, _)| s == side && start == ln)
+        .map(|&(_, _, id)| id)
+}
+
+/// The one bubble `(side, ln)` can show. A line has a single slot, so a comment
+/// starting there takes it: reopening an existing comment must stay reachable
+/// even when a new selection starts on the same line.
+fn icon_mark_for(
+    starts: &[(Side, u32, u64)],
+    side: Side,
+    ln: u32,
+    selection_starts_here: bool,
+) -> Option<IconMark> {
+    comment_start_id(starts, side, ln)
+        .map(IconMark::Filled)
+        .or(selection_starts_here.then_some(IconMark::Empty))
+}
+
 fn side_ix(side: Side) -> usize {
     match side {
         Side::Old => 0,
@@ -866,6 +1029,12 @@ impl Frame {
                 // Row backgrounds span the pane and do not scroll; text and
                 // word marks move by the side's `x_offset`.
                 window.paint_quad(fill(hline(x0, x1, row.y0, row.y1 - row.y0), row.bg));
+                if row.selected {
+                    window.paint_quad(fill(
+                        hline(x0, x1, row.y0, row.y1 - row.y0),
+                        theme::selection_wash(),
+                    ));
+                }
                 let mut text_x = x0 + TEXT_PAD - frame.x_offset + row.text_leading;
                 if row.commented {
                     text_x += COMMENT_BAR;
@@ -886,9 +1055,7 @@ impl Frame {
                         window.paint_quad(
                             fill(ring_rect, rgb(SEARCH_HIT_CUR_RING)).corner_radii(px(2. + ring)),
                         );
-                        window.paint_quad(
-                            fill(rect, rgb(SEARCH_HIT_CUR_BG)).corner_radii(px(2.)),
-                        );
+                        window.paint_quad(fill(rect, rgb(SEARCH_HIT_CUR_BG)).corner_radii(px(2.)));
                     } else {
                         window.paint_quad(fill(rect, rgb(SEARCH_HIT_BG)).corner_radii(px(2.)));
                     }
@@ -931,14 +1098,11 @@ impl Frame {
 
     fn paint_gutter(&self, window: &mut Window, cx: &mut App) {
         let g = self.geom.gutter;
-        let ln_w = self.geom.ln_w;
         window.paint_quad(fill(g, theme::white()));
-        let cols = [
-            (f32::from(g.left()), f32::from(g.left()) + ln_w),
-            (f32::from(g.right()) - ln_w, f32::from(g.right())),
-        ];
         for side in [Side::Old, Side::New] {
-            let (c0, c1) = cols[side_ix(side)];
+            // The kind tint runs under the icon slot as well, so the bridge
+            // leaves a flat edge past both.
+            let (c0, c1) = self.geom.gutter_band(side);
             let frame = &self.sides[side_ix(side)];
             for row in &frame.rows {
                 window.paint_quad(fill(hline(c0, c1, row.y0, row.y1 - row.y0), row.kind_bg));
@@ -949,10 +1113,10 @@ impl Frame {
                 }
             }
         }
-        paint_bridges(window, &self.bridges, ln_w);
+        paint_bridges(window, &self.bridges, self.geom.flat_w());
         let row_h = px(self.row_h);
         for side in [Side::Old, Side::New] {
-            let (c0, c1) = cols[side_ix(side)];
+            let (c0, c1) = self.geom.ln_col(side);
             for row in &self.sides[side_ix(side)].rows {
                 if !row.show_label {
                     continue;
@@ -969,10 +1133,83 @@ impl Frame {
                     .ok();
             }
         }
+        for icon in &self.icons {
+            paint_comment_icon(window, icon);
+        }
     }
 }
 
-fn paint_bridges(window: &mut Window, placed: &[WinBridge], ln_w: f32) {
+/// A comment bubble in its icon slot — the prototype's `ICON_EMPTY` outline or
+/// `ICON_FILLED` solid, scaled from their 16-unit viewBox into an [`ICON_GLYPH`]
+/// box centred in the slot. An existing comment reads accent like its
+/// [`COMMENT_BAR`]; `open` adds the range tint while the dock is on this line.
+fn paint_comment_icon(window: &mut Window, icon: &IconSlot) {
+    let slot = icon.slot;
+    let unit = ICON_GLYPH / 16.;
+    let x0 = f32::from(slot.left()) + (f32::from(slot.size.width) - ICON_GLYPH) / 2.;
+    let y0 = f32::from(slot.top()) + (f32::from(slot.size.height) - ICON_GLYPH) / 2.;
+    let at = |x: f32, y: f32| point(px(x0 + x * unit), px(y0 + y * unit));
+    if icon.open {
+        window.paint_quad(fill(slot, theme::range()).corner_radii(px(4.)));
+    }
+    match icon.mark {
+        IconMark::Empty => {
+            let mut stroke = PathBuilder::stroke(px((1.5 * unit).max(1.)));
+            stroke.move_to(at(3.5, 3.5));
+            for (x, y) in [
+                (12.5, 3.5),
+                (12.5, 10.7),
+                (8.2, 10.7),
+                (5.5, 13.),
+                (5.5, 10.7),
+                (3.5, 10.7),
+                (3.5, 3.5),
+            ] {
+                stroke.line_to(at(x, y));
+            }
+            if let Ok(path) = stroke.build() {
+                window.paint_path(
+                    path,
+                    if icon.open {
+                        theme::accent()
+                    } else {
+                        theme::muted()
+                    },
+                );
+            }
+        }
+        IconMark::Filled(_) => {
+            let mut bubble = PathBuilder::fill();
+            bubble.move_to(at(3., 3.));
+            for (x, y) in [
+                (13., 3.),
+                (13., 10.5),
+                (8.1, 10.5),
+                (5., 13.2),
+                (5., 10.5),
+                (3., 10.5),
+            ] {
+                bubble.line_to(at(x, y));
+            }
+            bubble.close();
+            if let Ok(path) = bubble.build() {
+                window.paint_path(path, theme::accent());
+            }
+            // Two text rules knocked out of the bubble, so a filled icon reads
+            // as a written comment rather than a solid blob.
+            for (x1, y) in [(10.8, 6.2), (9., 8.2)] {
+                let mut stroke = PathBuilder::stroke(px((1.2 * unit).max(0.75)));
+                stroke.move_to(at(5.2, y));
+                stroke.line_to(at(x1, y));
+                if let Ok(path) = stroke.build() {
+                    window.paint_path(path, theme::white());
+                }
+            }
+        }
+    }
+}
+
+fn paint_bridges(window: &mut Window, placed: &[WinBridge], flat_w: f32) {
     for bridge in placed {
         let parallel =
             (bridge.y_l0 - bridge.y_r0).abs() < 1. && (bridge.y_l1 - bridge.y_r1).abs() < 1.;
@@ -983,7 +1220,7 @@ fn paint_bridges(window: &mut Window, placed: &[WinBridge], ln_w: f32) {
             path.line_to(point(px(bridge.x_r), px(bridge.y_r1)));
             path.line_to(point(px(bridge.x_l), px(bridge.y_l1)));
         } else {
-            pinch_bezier(&mut path, bridge, ln_w);
+            pinch_bezier(&mut path, bridge, flat_w);
         }
         path.close();
         if let Ok(path) = path.build() {
@@ -993,12 +1230,13 @@ fn paint_bridges(window: &mut Window, placed: &[WinBridge], ln_w: f32) {
 }
 
 /// Full row on the long side, cubic Bézier through the center gutter, then a 2px
-/// hairline across the short side's line-number column so it meets the code hairline.
-fn pinch_bezier(path: &mut PathBuilder, bridge: &WinBridge, ln_w: f32) {
+/// hairline across the short side's line-number and icon columns (`flat_w`) so
+/// it meets the code hairline.
+fn pinch_bezier(path: &mut PathBuilder, bridge: &WinBridge, flat_w: f32) {
     let x_l = bridge.x_l;
     let x_r = bridge.x_r;
-    let mid_l = x_l + ln_w;
-    let mid_r = x_r - ln_w;
+    let mid_l = x_l + flat_w;
+    let mid_r = x_r - flat_w;
     let mw = (mid_r - mid_l).max(8.);
     match bridge.kind {
         LineKind::Delete => {
@@ -1082,7 +1320,8 @@ fn paint_omit_waves(window: &mut Window, geom: Geom, folds: &[(f32, f32)]) {
         for &(y_l, y_r) in folds {
             // Bend only in the gap between the line-number columns. A slope
             // across the digits cuts through them when the folds are far apart.
-            let path = joined_wave(x0, x1, y_l, gutter_l + geom.ln_w, gutter_r - geom.ln_w, y_r);
+            let flat = geom.flat_w();
+            let path = joined_wave(x0, x1, y_l, gutter_l + flat, gutter_r - flat, y_r);
             if let Ok(path) = path.build() {
                 window.paint_path(path, rgb(0xb5b5b5));
             }
@@ -1261,7 +1500,10 @@ impl Element for DualPaneElement {
         let t = trace::start();
         frame.paint(window, cx);
         for code in &frame.code {
-            window.set_cursor_style(CursorStyle::PointingHand, code);
+            window.set_cursor_style(CursorStyle::IBeam, code);
+        }
+        for icon in &frame.icon_hitboxes {
+            window.set_cursor_style(CursorStyle::PointingHand, icon);
         }
         for track in frame.tracks.iter().chain(frame.h_tracks.iter()).flatten() {
             window.set_cursor_style(CursorStyle::Arrow, track);
@@ -1333,11 +1575,24 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
     let down_code = code.clone();
     let down_tracks = tracks.clone();
     let down_h_tracks = h_tracks.clone();
+    let down_icons: Vec<(Hitbox, IconMark)> = frame
+        .icon_hitboxes
+        .iter()
+        .cloned()
+        .zip(frame.icons.iter().map(|icon| icon.mark))
+        .collect();
     window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
         if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
             return;
         }
         let y = f32::from(event.position.y) - geom.top();
+        if let Some(&(_, mark)) = down_icons
+            .iter()
+            .find(|(hitbox, _)| hitbox.is_hovered(window))
+        {
+            entity.update(cx, |pane, cx| pane.click_comment_icon(mark, cx));
+            return;
+        }
         for side in [Side::Old, Side::New] {
             let ix = side_ix(side);
             if down_tracks[ix]
@@ -1362,7 +1617,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                     if pane.h_bar_shown(side) {
                         pane.press_h_track(side, local, cx);
                     } else {
-                        pane.press_row(side, y);
+                        pane.press_row(side, y, cx);
                     }
                 });
                 return;
@@ -1370,7 +1625,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
         }
         for side in [Side::Old, Side::New] {
             if down_code[side_ix(side)].is_hovered(window) {
-                entity.update(cx, |pane, _| pane.press_row(side, y));
+                entity.update(cx, |pane, cx| pane.press_row(side, y, cx));
                 return;
             }
         }
@@ -1411,11 +1666,14 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
             [Side::Old, Side::New].map(|side| f32::from(pos.x - geom.h_track(side).left()));
         entity.update(cx, |pane, cx| {
             pane.mouse_moved(
-                hovered,
-                h_hovered,
-                in_gutter.then_some(y),
-                track_y,
-                h_track_x,
+                PointerMove {
+                    hovered,
+                    h_hovered,
+                    gutter_y: in_gutter.then_some(y),
+                    pane_y: y,
+                    track_y,
+                    h_track_x,
+                },
                 cx,
             )
         });
@@ -1446,6 +1704,49 @@ mod tests {
     #[test]
     fn no_thumb_without_travel() {
         assert!(thumb_for(300., 0., 0.).is_none());
+    }
+
+    #[test]
+    fn filled_icon_belongs_to_the_comment_starting_on_the_line() {
+        // Two comments on `new`, one on `old`; the middle one spans 8..=10.
+        let starts = [(Side::New, 3, 1), (Side::New, 8, 2), (Side::Old, 3, 3)];
+        assert_eq!(comment_start_id(&starts, Side::New, 3), Some(1));
+        assert_eq!(comment_start_id(&starts, Side::Old, 3), Some(3));
+        assert_eq!(comment_start_id(&starts, Side::New, 8), Some(2));
+        // Inside a span but not its start: no icon, only the COMMENT_BAR.
+        assert_eq!(comment_start_id(&starts, Side::New, 9), None);
+        assert_eq!(comment_start_id(&starts, Side::Old, 8), None);
+        assert_eq!(comment_start_id(&[], Side::New, 3), None);
+    }
+
+    #[test]
+    fn overlapping_starts_pick_the_first_comment() {
+        let starts = [(Side::New, 4, 7), (Side::New, 4, 9)];
+        assert_eq!(comment_start_id(&starts, Side::New, 4), Some(7));
+    }
+
+    #[test]
+    fn one_slot_per_line_goes_to_the_comment_over_the_selection() {
+        let starts = [(Side::New, 5, 1)];
+        // Selection start with nothing on it: the offer to create one.
+        assert_eq!(
+            icon_mark_for(&starts, Side::New, 9, true),
+            Some(IconMark::Empty)
+        );
+        // A comment's start line keeps its filled bubble, selection or not.
+        assert_eq!(
+            icon_mark_for(&starts, Side::New, 5, false),
+            Some(IconMark::Filled(1))
+        );
+        assert_eq!(
+            icon_mark_for(&starts, Side::New, 5, true),
+            Some(IconMark::Filled(1)),
+            "filled wins the slot when the selection starts on a comment's start"
+        );
+        // Neither: an ordinary line has no icon at all.
+        assert_eq!(icon_mark_for(&starts, Side::New, 9, false), None);
+        // Same line number on the other side is a different place.
+        assert_eq!(icon_mark_for(&starts, Side::Old, 5, false), None);
     }
 
     #[test]

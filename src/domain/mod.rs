@@ -662,11 +662,12 @@ impl Review {
         }
     }
 
-    pub fn add_line_comment(
+    pub fn add_line_span_comment(
         &mut self,
         path: impl Into<String>,
         side: Side,
-        line: u32,
+        start: u32,
+        count: u32,
         body: impl Into<String>,
     ) -> &DraftComment {
         let id = self.next_id;
@@ -677,14 +678,35 @@ impl Review {
             anchor: Anchor::Line {
                 path: path.into(),
                 side,
-                span: LineSpan {
-                    start: line,
-                    count: 1,
-                },
+                span: LineSpan { start, count },
                 hunk: None,
             },
         });
         self.comments.last().unwrap()
+    }
+
+    /// Single-line DraftComment; thin wrapper over [`Self::add_line_span_comment`].
+    #[allow(dead_code)] // Kept by spec; the Diff draft dock always writes a span.
+    pub fn add_line_comment(
+        &mut self,
+        path: impl Into<String>,
+        side: Side,
+        line: u32,
+        body: impl Into<String>,
+    ) -> &DraftComment {
+        self.add_line_span_comment(path, side, line, 1, body)
+    }
+
+    /// Replace the body of a DraftComment by id. Returns `false` if no comment
+    /// with that id exists (no-op). Does not change the Anchor.
+    pub fn update_comment_body(&mut self, id: u64, body: impl Into<String>) -> bool {
+        match self.comments.iter_mut().find(|c| c.id == id) {
+            Some(c) => {
+                c.body = body.into();
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn comments_for_path<'a>(
@@ -887,6 +909,64 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn review_adds_line_span_comment() {
+        let mut review = Review::new(fake_comparison());
+        let c = review.add_line_span_comment("src/a.rs", Side::Old, 3, 2, "span nits");
+        assert_eq!(c.id, 1);
+        assert_eq!(c.body, "span nits");
+        assert_eq!(
+            c.anchor,
+            Anchor::Line {
+                path: "src/a.rs".into(),
+                side: Side::Old,
+                span: LineSpan { start: 3, count: 2 },
+                hunk: None,
+            }
+        );
+        assert_eq!(
+            c.anchor.lines(),
+            Some((Side::Old, 3..5)),
+            "span round-trips through Anchor::lines"
+        );
+    }
+
+    #[test]
+    fn review_add_line_comment_is_count_one_span() {
+        let mut review = Review::new(fake_comparison());
+        let via_wrapper = review.add_line_comment("b.rs", Side::New, 9, "one").id;
+        let mut review2 = Review::new(fake_comparison());
+        let via_span = review2
+            .add_line_span_comment("b.rs", Side::New, 9, 1, "one")
+            .id;
+        assert_eq!(
+            review.comments[0].anchor, review2.comments[0].anchor,
+            "wrapper matches explicit count:1"
+        );
+        assert_eq!(via_wrapper, 1);
+        assert_eq!(via_span, 1);
+    }
+
+    #[test]
+    fn review_updates_comment_body_by_id() {
+        let mut review = Review::new(fake_comparison());
+        let id = review
+            .add_line_span_comment("a.rs", Side::New, 1, 3, "first")
+            .id;
+        let anchor_before = review.comments[0].anchor.clone();
+        assert!(review.update_comment_body(id, "second"));
+        assert_eq!(review.comments[0].body, "second");
+        assert_eq!(review.comments[0].anchor, anchor_before);
+    }
+
+    #[test]
+    fn review_update_comment_body_unknown_id_is_noop() {
+        let mut review = Review::new(fake_comparison());
+        review.add_line_comment("a.rs", Side::New, 1, "x");
+        assert!(!review.update_comment_body(99, "nope"));
+        assert_eq!(review.comments[0].body, "x");
     }
 
     #[test]
@@ -1153,14 +1233,10 @@ mod tests {
         let new = "needle top\nother\n";
         let hits = search_file(old, new, "needle", SearchSide::Both);
         assert_eq!(
-            hits
-                .iter()
+            hits.iter()
                 .map(|m| (m.side, m.ln, m.bytes.start))
                 .collect::<Vec<_>>(),
-            vec![
-                (Side::Old, 2, 2),
-                (Side::New, 1, 0),
-            ]
+            vec![(Side::Old, 2, 2), (Side::New, 1, 0),]
         );
     }
 
@@ -1180,14 +1256,10 @@ mod tests {
         ];
         let hits = search_files(&files, "needle", SearchSide::Both);
         assert_eq!(
-            hits
-                .iter()
+            hits.iter()
                 .map(|m| (m.path.as_deref(), m.side, m.ln))
                 .collect::<Vec<_>>(),
-            vec![
-                (Some("b.rs"), Side::New, 1),
-                (Some("a.rs"), Side::Old, 1),
-            ]
+            vec![(Some("b.rs"), Side::New, 1), (Some("a.rs"), Side::Old, 1),]
         );
     }
 
