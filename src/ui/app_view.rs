@@ -1017,6 +1017,19 @@ impl AppView {
             };
 
             this.update(cx, |this, cx| {
+                // A folder that is already a Workspace is choosing that Workspace (ADR-0012).
+                // `remember_current` would write Branch and clear the selected MR label.
+                if let Ok(canonical) = std::fs::canonicalize(&root) {
+                    if this
+                        .store
+                        .workspaces
+                        .iter()
+                        .any(|entry| entry.path == canonical)
+                    {
+                        this.select_repo(canonical, cx);
+                        return;
+                    }
+                }
                 match BranchBrowser::open(&root) {
                     Ok(bb) => {
                         this.state = MainState::Ready(bb);
@@ -1024,7 +1037,14 @@ impl AppView {
                         this.empty_mr = false;
                         this.pending_kind_restore = false;
                         this.mr_picker = None;
-                        this.remember_current();
+                        this.branch_picker = None;
+                        if let MainState::Ready(loaded) = &this.state {
+                            workspace_store::remember(
+                                loaded.comparison.repository.path(),
+                                &loaded.branch,
+                            );
+                            this.refresh_store();
+                        }
                     }
                     Err(e) => {
                         this.state = MainState::Error(e.0);
