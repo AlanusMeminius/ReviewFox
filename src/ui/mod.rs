@@ -5,6 +5,8 @@ mod appearance;
 mod diff;
 mod diff_window;
 mod entry_chrome;
+mod file_icons;
+mod file_icons_generated;
 mod file_tree;
 mod file_tree_rows;
 mod gitlab_connection;
@@ -48,8 +50,11 @@ actions!(app, [Quit, OpenSettings]);
 
 struct Assets;
 
-/// Icons are Lucide (ISC, lucide.dev), 24 viewBox, stroke 2. GPUI draws each as a
-/// mask tinted by `text_color`, so the stroke colour in the file doesn't matter.
+/// Chrome icons are Lucide (ISC, lucide.dev), 24 viewBox, stroke 2. GPUI draws each
+/// as a mask tinted by `text_color`, so the stroke colour in the file doesn't matter.
+/// File-type icons under `assets/material/` are Material Icon Theme (MIT,
+/// github.com/material-extensions/vscode-material-icon-theme); see
+/// `LICENSE-THIRD-PARTY.md`. They are painted with `img()`, keeping native fills.
 macro_rules! icon_assets {
     ($($name:literal),* $(,)?) => {
         &[$(($name, include_bytes!(concat!("../../assets/", $name)) as &[u8])),*]
@@ -93,6 +98,9 @@ const ICON_ASSETS: &[(&str, &[u8])] = icon_assets![
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        if path.starts_with("material/") {
+            return Ok(file_icons::material_asset(path).map(Cow::Borrowed));
+        }
         Ok(ICON_ASSETS
             .iter()
             .find(|(name, _)| *name == path)
