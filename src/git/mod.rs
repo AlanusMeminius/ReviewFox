@@ -7,6 +7,7 @@ use crate::domain::{
 use crate::workspace_store::{self, WorkspaceEntry};
 use similar::{DiffOp, TextDiff};
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -197,9 +198,22 @@ impl BranchBrowser {
         apply_range_fold(&repo, self)
     }
 
+    /// Select every loaded commit and fold Comparison. `Ok(false)` = already all selected.
+    pub fn select_all_commits(&mut self) -> Result<bool> {
+        if self.commits.is_empty() {
+            return Err(err("no commits"));
+        }
+        if self.in_range.iter().all(|&v| v) {
+            return Ok(false);
+        }
+        self.in_range = vec![true; self.commits.len()];
+        let repo = open_repo(&self.comparison)?;
+        apply_range_fold(&repo, self)?;
+        Ok(true)
+    }
+
     /// Reload ChangedPaths for an explicit OID pair (MR Entry / forced Comparison).
     /// `base_oid: None` = empty tree.
-    #[allow(dead_code)] // Exercised in unit tests; no UI caller yet.
     pub fn set_comparison_oids(&mut self, base_oid: Option<Oid>, head_oid: Oid) -> Result<()> {
         self.comparison.base_oid = base_oid;
         self.comparison.head_oid = head_oid;
@@ -208,19 +222,46 @@ impl BranchBrowser {
         Ok(())
     }
 
-    /// Replace the commit list with MR commits (newest-first). Selects the newest
-    /// row and folds Comparison like Branch Browser (`C^..C`); Diff identity follows
-    /// commit selection, not forge `diff_refs`.
-    pub fn apply_mr_commits(&mut self, commits: Vec<CommitInfo>) -> Result<()> {
+    /// Replace the commit list with MR commits (newest-first), highlight all rows, and
+    /// set Comparison to forge `diff_refs` (`base_sha`/`head_sha`).
+    pub fn apply_mr_commits(
+        &mut self,
+        commits: Vec<CommitInfo>,
+        base_sha: &str,
+        head_sha: &str,
+    ) -> Result<()> {
         if commits.is_empty() {
             return Err(err("merge request has no commits"));
         }
+        let base_oid = parse_oid(base_sha)?;
+        let head_oid = parse_oid(head_sha)?;
         self.commits = commits;
-        self.in_range = vec![false; self.commits.len()];
-        self.in_range[0] = true;
-        let repo = open_repo(&self.comparison)?;
-        apply_range_fold(&repo, self)
+        self.in_range = vec![true; self.commits.len()];
+        self.set_comparison_oids(Some(base_oid), head_oid)
     }
+
+    /// Restore MR Comparison to `diff_refs` and highlight all loaded rows.
+    /// `Ok(false)` = already on that pair with full highlight.
+    pub fn restore_mr_diff_refs(&mut self, base_sha: &str, head_sha: &str) -> Result<bool> {
+        let base_oid = parse_oid(base_sha)?;
+        let head_oid = parse_oid(head_sha)?;
+        let same = self.comparison.base_oid == Some(base_oid)
+            && self.comparison.head_oid == head_oid
+            && self.in_range.iter().all(|&v| v);
+        if same {
+            return Ok(false);
+        }
+        if self.commits.is_empty() {
+            return Err(err("no commits"));
+        }
+        self.in_range = vec![true; self.commits.len()];
+        self.set_comparison_oids(Some(base_oid), head_oid)?;
+        Ok(true)
+    }
+}
+
+fn parse_oid(sha: &str) -> Result<Oid> {
+    Oid::from_str(sha.trim()).map_err(err)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1112,18 +1153,60 @@ mod tests {
     }
 
     #[test]
-    fn apply_mr_commits_selects_newest_only() {
+    fn apply_mr_commits_uses_diff_refs_and_highlights_all() {
         let dir = temp_repo();
         let mut bb = BranchBrowser::open(&dir).expect("open");
         let commits = bb.commits.clone();
         let head = commits[0].oid;
-        let parent = commits[1].oid;
-        bb.apply_mr_commits(commits).expect("apply mr commits");
-        assert!(bb.in_range[0]);
-        assert!(!bb.in_range[1]);
-        assert!(!bb.in_range[2]);
+        let base = commits[2].oid;
+        bb.apply_mr_commits(commits, &base.to_string(), &head.to_string())
+            .expect("apply mr commits");
+        assert!(bb.in_range.iter().all(|&v| v));
         assert_eq!(bb.comparison.head_oid, head);
-        assert_eq!(bb.comparison.base_oid, Some(parent));
+        assert_eq!(bb.comparison.base_oid, Some(base));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn select_all_commits_folds_full_loaded_list() {
+        let dir = temp_repo();
+        let mut bb = BranchBrowser::open(&dir).expect("open");
+        assert!(bb.in_range[0]);
+        assert!(!bb.in_range.iter().all(|&v| v));
+        assert!(bb.select_all_commits().expect("select all"));
+        assert!(bb.in_range.iter().all(|&v| v));
+        assert_eq!(bb.comparison.head_oid, bb.commits[0].oid);
+        assert_eq!(bb.comparison.base_oid, None);
+        assert!(!bb.select_all_commits().expect("idempotent"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_mr_diff_refs_after_subset_fold() {
+        let dir = temp_repo();
+        let mut bb = BranchBrowser::open(&dir).expect("open");
+        let commits = bb.commits.clone();
+        let head = commits[0].oid;
+        let base = commits[2].oid;
+        bb.apply_mr_commits(commits, &base.to_string(), &head.to_string())
+            .expect("apply mr");
+        bb.select_commit(0, false).expect("narrow");
+        assert!(!bb.in_range.iter().all(|&v| v));
+        assert_ne!(bb.comparison.base_oid, Some(base));
+
+        assert!(
+            bb.restore_mr_diff_refs(&base.to_string(), &head.to_string())
+                .expect("restore")
+        );
+        assert!(bb.in_range.iter().all(|&v| v));
+        assert_eq!(bb.comparison.base_oid, Some(base));
+        assert_eq!(bb.comparison.head_oid, head);
+        assert!(
+            !bb.restore_mr_diff_refs(&base.to_string(), &head.to_string())
+                .expect("idempotent")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

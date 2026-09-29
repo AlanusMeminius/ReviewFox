@@ -828,33 +828,72 @@ impl AppView {
             }
             return;
         }
-        let Some(picker) = &mut self.branch_picker else {
-            return;
-        };
-        match event.keystroke.key.as_str() {
-            "escape" => self.branch_picker = None,
-            "backspace" => {
-                picker.query.pop();
-                picker.refresh();
-                picker.selected = 0;
-            }
-            "up" => picker.selected = picker.selected.saturating_sub(1),
-            "down" => {
-                picker.selected = (picker.selected + 1).min(picker.matches.len().saturating_sub(1))
-            }
-            "enter" => {
-                if let Some(branch) = picker.matches.get(picker.selected) {
-                    let name = branch.name.clone();
-                    self.open_branch(&name, cx);
-                }
-            }
-            _ => {
-                if event.keystroke.key.len() == 1 && !event.keystroke.modifiers.platform {
-                    picker.query.push_str(&event.keystroke.key);
+        if let Some(picker) = &mut self.branch_picker {
+            match event.keystroke.key.as_str() {
+                "escape" => self.branch_picker = None,
+                "backspace" => {
+                    picker.query.pop();
                     picker.refresh();
                     picker.selected = 0;
                 }
+                "up" => picker.selected = picker.selected.saturating_sub(1),
+                "down" => {
+                    picker.selected =
+                        (picker.selected + 1).min(picker.matches.len().saturating_sub(1))
+                }
+                "enter" => {
+                    if let Some(branch) = picker.matches.get(picker.selected) {
+                        let name = branch.name.clone();
+                        self.open_branch(&name, cx);
+                    }
+                }
+                _ => {
+                    if event.keystroke.key.len() == 1 && !event.keystroke.modifiers.platform {
+                        picker.query.push_str(&event.keystroke.key);
+                        picker.refresh();
+                        picker.selected = 0;
+                    }
+                }
             }
+            cx.notify();
+            return;
+        }
+        let mods = &event.keystroke.modifiers;
+        if event.keystroke.key.as_str() == "a"
+            && mods.secondary()
+            && !mods.alt
+            && !mods.shift
+        {
+            self.handle_commits_select_all(cx);
+        }
+    }
+
+    /// Cmd/Ctrl+A: Branch → select all loaded + fold; MR Ready → restore `diff_refs`.
+    fn handle_commits_select_all(&mut self, cx: &mut Context<Self>) {
+        let result = match (&mut self.state, self.mr_entry.as_ref()) {
+            (MainState::Ready(bb), Some(entry)) => {
+                if bb.commits.is_empty() {
+                    return;
+                }
+                match &entry.detail {
+                    MrDetailState::Ready(detail) => bb.restore_mr_diff_refs(
+                        &detail.diff_refs.base_sha,
+                        &detail.diff_refs.head_sha,
+                    ),
+                    MrDetailState::Loading | MrDetailState::Failed(_) => return,
+                }
+            }
+            (MainState::Ready(bb), None) => {
+                if bb.commits.is_empty() {
+                    return;
+                }
+                bb.select_all_commits()
+            }
+            (MainState::Empty | MainState::Error(_), _) => return,
+        };
+        match result {
+            Ok(_) => {}
+            Err(e) => self.state = MainState::Error(e.0),
         }
         cx.notify();
     }
@@ -2049,9 +2088,11 @@ fn finish_mr_activate(
                 target_branch: ready.detail.target_branch.clone(),
             };
             entry.project = Some(ready.project);
+            let base_sha = ready.detail.diff_refs.base_sha.clone();
+            let head_sha = ready.detail.diff_refs.head_sha.clone();
             entry.detail = MrDetailState::Ready(ready.detail);
             if let MainState::Ready(bb) = &mut view.state {
-                if let Err(e) = bb.apply_mr_commits(ready.commit_infos) {
+                if let Err(e) = bb.apply_mr_commits(ready.commit_infos, &base_sha, &head_sha) {
                     entry.detail = MrDetailState::Failed(ErrorNote::plain(e.0));
                 }
             }
@@ -2574,7 +2615,17 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let can_open = view.can_open_diff();
     let rows = file_tree::flatten(&paths, &view.collapsed_dirs);
     let head_meta = match &view.state {
-        MainState::Ready(loaded) => head_commit_meta(loaded),
+        MainState::Ready(loaded) => {
+            let mr_diff = view.mr_entry.as_ref().and_then(|e| match &e.detail {
+                MrDetailState::Ready(d) => {
+                    let base = d.diff_refs.base_sha.parse::<Oid>().ok()?;
+                    let head = d.diff_refs.head_sha.parse::<Oid>().ok()?;
+                    Some((base, head))
+                }
+                MrDetailState::Loading | MrDetailState::Failed(_) => None,
+            });
+            head_commit_meta(loaded, mr_diff)
+        }
         MainState::Empty | MainState::Error(_) => None,
     };
     let inset = px(theme::CHANGES_INSET);
@@ -2693,14 +2744,26 @@ struct HeadMeta {
     range_label: Option<String>,
 }
 
-fn head_commit_meta(loaded: &BranchBrowser) -> Option<HeadMeta> {
+fn head_commit_meta(
+    loaded: &BranchBrowser,
+    mr_diff: Option<(Oid, Oid)>,
+) -> Option<HeadMeta> {
     let commit = loaded
         .commits
         .iter()
         .find(|c| c.oid == loaded.comparison.head_oid)
         .cloned()?;
     let selected = loaded.in_range.iter().filter(|&&b| b).count();
-    let range_label = (selected > 1).then(|| loaded.comparison.label());
+    let on_mr_full = mr_diff.is_some_and(|(base, head)| {
+        loaded.comparison.base_oid == Some(base) && loaded.comparison.head_oid == head
+    });
+    let range_label = if on_mr_full {
+        None
+    } else if mr_diff.is_some() || selected > 1 {
+        Some(loaded.comparison.label())
+    } else {
+        None
+    };
     Some(HeadMeta {
         commit,
         range_label,
