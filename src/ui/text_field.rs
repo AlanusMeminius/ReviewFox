@@ -371,6 +371,7 @@ impl EntityInputHandler for TextField {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = clamp_range(range, self.content.len());
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
@@ -393,6 +394,7 @@ impl EntityInputHandler for TextField {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = clamp_range(range, self.content.len());
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
@@ -402,11 +404,14 @@ impl EntityInputHandler for TextField {
         } else {
             self.marked_range = None;
         }
+        // `new_selected_range` is relative to the inserted text; both ends offset
+        // by `range.start` (not `range.end` — that skews the caret during IME).
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.selected_range = clamp_range(self.selected_range.clone(), self.content.len());
 
         cx.notify();
     }
@@ -441,21 +446,37 @@ impl EntityInputHandler for TextField {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
 
-        assert_eq!(last_layout.text, self.display_text(true));
+        // Stale layout vs content (e.g. mid-IME before the next paint) — do not
+        // assert; macOS calls this from nounwind ObjC and a panic aborts.
+        if last_layout.text != self.display_text(true) {
+            return None;
+        }
         let utf8_index = last_layout.index_for_x(line_point.x)?;
         Some(self.offset_to_utf16(utf8_index))
     }
+}
+
+/// Clamp a byte range into `0..len`, ensuring `start <= end`.
+fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
+    let start = range.start.min(len);
+    let end = range.end.min(len).max(start);
+    start..end
 }
 
 struct TextElement {
     input: Entity<TextField>,
 }
 
+/// Caret / selection inset from the field's top and bottom edges.
+const CARET_INSET: f32 = 3.;
+
 struct PrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
     scroll_x: Pixels,
+    /// Downward shift so glyph ink centres in the ascent+descent line box.
+    ink_nudge: Pixels,
 }
 
 impl IntoElement for TextElement {
@@ -523,13 +544,15 @@ impl Element for TextElement {
             strikethrough: None,
         };
         let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+            let mark_start = marked_range.start.min(display_text.len());
+            let mark_end = marked_range.end.min(display_text.len()).max(mark_start);
             vec![
                 TextRun {
-                    len: marked_range.start,
+                    len: mark_start,
                     ..run.clone()
                 },
                 TextRun {
-                    len: marked_range.end - marked_range.start,
+                    len: mark_end - mark_start,
                     underline: Some(UnderlineStyle {
                         color: Some(run.color),
                         thickness: px(1.0),
@@ -538,7 +561,7 @@ impl Element for TextElement {
                     ..run.clone()
                 },
                 TextRun {
-                    len: display_text.len() - marked_range.end,
+                    len: display_text.len() - mark_end,
                     ..run
                 },
             ]
@@ -552,7 +575,8 @@ impl Element for TextElement {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window
             .text_system()
-            .shape_line(display_text, font_size, &runs, None);
+            .shape_line(display_text.clone(), font_size, &runs, None);
+        let ink_nudge = ink_nudge_for_line(&line, &display_text, font_size, cx);
 
         // Scroll just enough to keep the cursor (2px wide) in view.
         let cursor_width = px(2.);
@@ -578,14 +602,16 @@ impl Element for TextElement {
             }
         }
         let left = bounds.left() - scroll_x;
+        let chrome_top = bounds.top() + px(CARET_INSET);
+        let chrome_bottom = bounds.bottom() - px(CARET_INSET);
         let cursor_pos = cursor_x;
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(left + cursor_pos, bounds.top()),
-                        size(cursor_width, bounds.bottom() - bounds.top()),
+                        point(left + cursor_pos, chrome_top),
+                        size(cursor_width, chrome_bottom - chrome_top),
                     ),
                     gpui::blue(),
                 )),
@@ -594,8 +620,8 @@ impl Element for TextElement {
             (
                 Some(fill(
                     Bounds::from_corners(
-                        point(left + line.x_for_index(selected_range.start), bounds.top()),
-                        point(left + line.x_for_index(selected_range.end), bounds.bottom()),
+                        point(left + line.x_for_index(selected_range.start), chrome_top),
+                        point(left + line.x_for_index(selected_range.end), chrome_bottom),
                     ),
                     rgba(0x3311ff30),
                 )),
@@ -607,6 +633,7 @@ impl Element for TextElement {
             cursor,
             selection,
             scroll_x,
+            ink_nudge,
         }
     }
 
@@ -627,18 +654,20 @@ impl Element for TextElement {
             cx,
         );
         let scroll_x = prepaint.scroll_x;
-        // Where the unscrolled line starts; widened so it still covers the
-        // visible area. Mouse and IME math measure from its left edge.
-        let line_bounds = Bounds::new(
+        let ink_nudge = prepaint.ink_nudge;
+        // Hit-testing / IME use the un-nudged box; paint origin is shifted so
+        // ink centres in the ascent+descent line box.
+        let hit_bounds = Bounds::new(
             point(bounds.left() - scroll_x, bounds.top()),
             size(bounds.size.width + scroll_x, bounds.size.height),
         );
+        let paint_origin = point(hit_bounds.origin.x, hit_bounds.origin.y + ink_nudge);
         let line = prepaint.line.take().unwrap();
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if let Some(selection) = prepaint.selection.take() {
                 window.paint_quad(selection)
             }
-            line.paint(line_bounds.origin, window.line_height(), window, cx)
+            line.paint(paint_origin, window.line_height(), window, cx)
                 .unwrap();
 
             if focus_handle.is_focused(window)
@@ -650,10 +679,43 @@ impl Element for TextElement {
 
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(line);
-            input.last_bounds = Some(line_bounds);
+            input.last_bounds = Some(hit_bounds);
             input.scroll_x = scroll_x;
         });
     }
+}
+
+/// Optical y shift from the shaped line's metrics and a probe glyph's ink box.
+fn ink_nudge_for_line(
+    line: &ShapedLine,
+    display_text: &str,
+    font_size: Pixels,
+    cx: &App,
+) -> Pixels {
+    let text = cx.text_system();
+    let ascent: f32 = line.ascent.into();
+    let descent: f32 = line.descent.into();
+    let (ink_above, ink_below) = match display_text
+        .char_indices()
+        .find(|(_, ch)| !ch.is_whitespace())
+    {
+        Some((ix, ch)) => {
+            let font_id = line
+                .font_id_for_index(ix)
+                .unwrap_or_else(|| text.resolve_font(&gpui::font(appearance::ui_font(cx))));
+            match text.typographic_bounds(font_id, font_size, ch) {
+                Ok(bounds) => appearance::ink_extents_from_bounds(bounds),
+                Err(_) => (text.cap_height(font_id, font_size).into(), 0.),
+            }
+        }
+        None => {
+            let font_id = text.resolve_font(&gpui::font(appearance::ui_font(cx)));
+            (text.cap_height(font_id, font_size).into(), 0.)
+        }
+    };
+    px(appearance::ink_center_nudge(
+        ascent, descent, ink_above, ink_below,
+    ))
 }
 
 impl Render for TextField {
@@ -686,6 +748,7 @@ impl Render for TextField {
                 let framed = |field: gpui::Div| {
                     field
                         .h(px(32.))
+                        .line_height(px(32.))
                         .px_2()
                         .bg(theme::white())
                         .border_1()
@@ -697,8 +760,13 @@ impl Render for TextField {
                     TextFieldStyle::Settings => framed(field)
                         .min_w(px(256.))
                         .focus(|field| field.border_color(theme::border_focused())),
-                    TextFieldStyle::Number => field.size_full().px_1(),
-                    TextFieldStyle::Search => field.w_full().h(px(32.)).px_2(),
+                    // NumberField outer is h(28)+p(2) → 24px content.
+                    TextFieldStyle::Number => field.size_full().line_height(px(24.)).px_1(),
+                    TextFieldStyle::Search => field
+                        .w_full()
+                        .h(px(theme::FIND_FIELD_HEIGHT))
+                        .line_height(px(theme::FIND_FIELD_HEIGHT))
+                        .px_2(),
                 }
             })
             .ui_text_size(13., cx)

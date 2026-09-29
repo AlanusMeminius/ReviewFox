@@ -202,11 +202,21 @@ pub fn ui_text(cx: &App, design: f32) -> Pixels {
     px(ui_text_px(design, cx.global::<Appearance>().ui_font_size))
 }
 
-/// Downward shift that centres caps and figures in their line box, so they
-/// line up with geometrically centred icons: gpui centres ascent + descent,
-/// but caps and figures only span baseline..cap height.
+/// Downward shift that centres glyph ink in its line box: gpui centres
+/// ascent + descent, but ink only spans `ink_below` below the baseline to
+/// `ink_above` above it (both distances ≥ 0).
+pub(crate) fn ink_center_nudge(
+    ascent: f32,
+    descent: f32,
+    ink_above: f32,
+    ink_below: f32,
+) -> f32 {
+    (ink_above - ink_below + descent.abs() - ascent) / 2.
+}
+
+/// [`ink_center_nudge`] for Latin caps / figures (`ink` = baseline..cap height).
 fn cap_center_nudge(ascent: f32, descent: f32, cap_height: f32) -> f32 {
-    (cap_height + descent.abs() - ascent) / 2.
+    ink_center_nudge(ascent, descent, cap_height, 0.)
 }
 
 /// [`cap_center_nudge`] at `size` for `family`, from the metrics of the face
@@ -219,6 +229,14 @@ pub fn cap_nudge(cx: &App, family: SharedString, size: Pixels) -> Pixels {
         text.descent(id, size).into(),
         text.cap_height(id, size).into(),
     ))
+}
+
+/// Ink above / below the baseline from a glyph's typographic box (font y-up,
+/// baseline at 0). Used with [`ink_center_nudge`].
+pub(crate) fn ink_extents_from_bounds(bounds: gpui::Bounds<Pixels>) -> (f32, f32) {
+    let bottom: f32 = bounds.origin.y.into();
+    let top: f32 = (bounds.origin.y + bounds.size.height).into();
+    (top.max(0.), (-bottom).max(0.))
 }
 
 /// Sizes UI Font text through [`ui_text`]. Every UI text size goes through
@@ -311,6 +329,35 @@ mod tests {
         // IBM Plex Sans (1000 upm): tall ascent, so caps sit low.
         let plex = cap_center_nudge(12.3, 3.3, 8.376);
         assert!((plex + 0.31).abs() < 0.01, "{plex}");
+    }
+
+    #[test]
+    fn ink_center_nudge_shifts_cjk_like_ink_down_when_descent_is_unused() {
+        // Em-like ink fills most of ascent; unused descent leaves optical mass high.
+        // (10 - 0.5 + 3 - 11) / 2 = 0.75
+        let nudge = ink_center_nudge(11., 3., 10., 0.5);
+        assert!((nudge - 0.75).abs() < 0.01, "{nudge}");
+        assert!(nudge > 0., "should shift down");
+    }
+
+    #[test]
+    fn ink_extents_from_bounds_split_at_baseline() {
+        // Cap-like: entirely above baseline.
+        assert_eq!(
+            ink_extents_from_bounds(gpui::Bounds {
+                origin: gpui::point(px(0.), px(0.)),
+                size: gpui::size(px(8.), px(9.)),
+            }),
+            (9., 0.)
+        );
+        // Descender: straddles baseline (font y-up).
+        assert_eq!(
+            ink_extents_from_bounds(gpui::Bounds {
+                origin: gpui::point(px(0.), px(-3.)),
+                size: gpui::size(px(6.), px(10.)),
+            }),
+            (7., 3.)
+        );
     }
 
     #[test]

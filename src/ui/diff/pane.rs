@@ -1315,6 +1315,87 @@ impl Element for PaneSlot {
     }
 }
 
+/// Like [`slot`], but for a one-shot chrome element that must paint **after**
+/// the DualPane (e.g. the floating find bar, so its drop shadow sits on code).
+pub struct OverlaySlot {
+    bounds: SlotBounds,
+    child: AnyElement,
+}
+
+pub fn overlay_slot(bounds: SlotBounds, child: impl IntoElement) -> OverlaySlot {
+    OverlaySlot {
+        bounds,
+        child: child.into_any_element(),
+    }
+}
+
+impl IntoElement for OverlaySlot {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for OverlaySlot {
+    type RequestLayoutState = ();
+    type PrepaintState = bool;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let style = Style {
+            position: Position::Absolute,
+            ..Style::default()
+        };
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let Some(bounds) = self.bounds.get() else {
+            return false;
+        };
+        self.child.layout_as_root(bounds.size.into(), window, cx);
+        self.child.prepaint_at(bounds.origin, window, cx);
+        true
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        mounted: &mut bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if *mounted {
+            self.child.paint(window, cx);
+        }
+    }
+}
+
 pub enum FontOp {
     Inc,
     Dec,

@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ReviewFox — find capsule prototype (throwaway)</title>
+  <!--
+    PROTOTYPE — throwaway. Not production.
+    Question: Diff 搜索栏做成圆角胶囊悬浮在编辑器上方（出现不抖布局），
+    同时有搜索栏时内容区能滚到顶（scroll-padding），控件含输入 / 搜索 /
+    当前索引·数量 / 上下跳转 / 关闭。
+    VERDICT (2026-09-29): B accepted (user confirmed).
+      — full-bleed inset dock over the dual pane
+      — shadow-only edge (no border); radius 8px
+      — input: clear fill + gray rounded stroke + focus ring
+      — controls: input | 搜索 | n/N | ↑↓ | close (far right)
+      — open/close does not change pane flow height; find-open adds
+        sheet padding-top + scroll-padding-top so top lines stay reachable
+      A/C parked for comparison only.
+    open prototype/find-capsule.html?variant=B
+  -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --text: #172033;
+      --muted: #596579;
+      --faint: #98a2b3;
+      --line: #dfe3ea;
+      --surface: #ffffff;
+      --sidebar: #f4f5f7;
+      --hover: #e9ebef;
+      --accent: #2457d6;
+      --add-bg: #cfe9cf;
+      --del-bg: #d8dce1;
+      --mod-bg: #d4e4fa;
+      --hit: #ffe08a;
+      --hit-cur: #ffc53d;
+      --chrome: 36px;
+      --capsule-h: 36px;
+      --find-pad: 44px; /* scroll-padding when find open — clears capsule */
+      --shadow: 0 8px 24px rgba(23, 32, 51, 0.14), 0 2px 6px rgba(23, 32, 51, 0.08);
+      --radius: 8px;
+      --field-radius: 6px;
+      --field-border: #c5cad3;
+      --focus-ring: 0 0 0 2px rgba(36, 87, 214, 0.22);
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: "IBM Plex Sans", sans-serif;
+      color: var(--text);
+      background: #c5ccd6;
+      overflow: hidden;
+    }
+    button, input { font: inherit; }
+    .proto-root {
+      height: 100%; padding: 16px 16px 72px;
+      display: flex; align-items: stretch; justify-content: center;
+    }
+    .desk { max-width: 1080px; width: 100%; height: 100%; min-width: 0; }
+
+    .win {
+      height: 100%;
+      background: var(--surface);
+      border: 1px solid #b4bcc8;
+      border-radius: 10px;
+      box-shadow: 0 16px 36px rgba(23, 32, 51, 0.16);
+      display: flex; overflow: hidden; min-width: 0;
+    }
+    .side {
+      width: 168px; flex-shrink: 0;
+      background: var(--sidebar);
+      border-right: 1px solid var(--line);
+      display: flex; flex-direction: column; min-width: 0;
+    }
+    .side-chrome {
+      height: var(--chrome); flex-shrink: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 10px; font-size: 12px; color: var(--muted);
+      border-bottom: 1px solid var(--line);
+    }
+    .side-body { flex: 1; overflow: auto; padding: 8px; }
+    .leaf {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 8px; border-radius: 8px;
+      font-size: 12px; cursor: default;
+    }
+    .leaf.active { background: #e8eefc; color: var(--accent); }
+    .badge {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px; font-weight: 500; width: 14px; text-align: center;
+    }
+    .badge.M { color: #b45309; }
+    .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    .file-chrome {
+      height: var(--chrome); flex-shrink: 0;
+      display: flex; align-items: center; gap: 10px;
+      padding: 0 12px; font-size: 12px; color: var(--muted);
+      border-bottom: 1px solid var(--line);
+    }
+    .file-chrome strong { color: var(--text); font-weight: 500; }
+    .file-chrome .spacer { flex: 1; }
+    .tool-btn {
+      height: 26px; padding: 0 10px; border: 0; border-radius: 999px;
+      background: #eef0f4; color: var(--text); cursor: pointer;
+      font-size: 12px; font-weight: 500;
+    }
+    .tool-btn:hover { background: #e4e7ed; }
+    .tool-btn[aria-pressed="true"] {
+      background: var(--accent); color: #fff;
+    }
+
+    /* Stage: dual pane; find floats OVER this — never in flow */
+    .stage {
+      flex: 1; min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr);
+      position: relative;
+      background: var(--surface);
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 12.5px; line-height: 20px;
+    }
+    .pane {
+      min-width: 0; min-height: 0;
+      overflow: auto;
+      position: relative;
+      /* Key demo: when find is open, top lines can scroll into the clear band */
+      scroll-padding-top: 0;
+    }
+    .stage.find-open .pane { scroll-padding-top: var(--find-pad); }
+    .sheet { padding-bottom: 48px; }
+    .stage.find-open .sheet { padding-top: var(--find-pad); }
+    .row {
+      display: grid;
+      grid-template-columns: 40px minmax(0, 1fr);
+      height: 20px; white-space: pre;
+    }
+    .ln {
+      color: #9a9a9a; font-size: 11px; user-select: none;
+      text-align: right; padding-right: 8px;
+    }
+    .code { padding-right: 10px; overflow: hidden; }
+    .row.del { background: var(--del-bg); }
+    .row.add { background: var(--add-bg); }
+    .row.mod { background: var(--mod-bg); }
+    .row.hit mark { background: var(--hit); color: inherit; border-radius: 2px; }
+    .row.cur mark { background: var(--hit-cur); box-shadow: 0 0 0 1px #e6a800; }
+    .gutter { background: #f7f8fa; border-left: 1px solid #eee; border-right: 1px solid #eee; }
+
+    /* —— Shared find control bits —— */
+    .find-input {
+      border: 0; outline: none; background: transparent;
+      color: var(--text); min-width: 0; flex: 1;
+      font-family: "IBM Plex Mono", monospace; font-size: 12.5px;
+      padding: 0 2px;
+    }
+    .find-input::placeholder { color: var(--faint); }
+    .find-btn, .nav-btn {
+      border: 0; cursor: pointer; flex-shrink: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: transparent; color: var(--muted);
+    }
+    .find-btn:hover, .nav-btn:hover { color: var(--text); background: var(--hover); }
+    .find-btn:disabled, .nav-btn:disabled { opacity: 0.35; cursor: default; }
+    .find-btn:disabled:hover, .nav-btn:disabled:hover { background: transparent; color: var(--muted); }
+    .count {
+      font-size: 12px; color: var(--muted); flex-shrink: 0;
+      font-variant-numeric: tabular-nums; white-space: nowrap;
+    }
+    .count.empty { color: var(--faint); }
+    .sep { width: 1px; height: 18px; background: var(--line); flex-shrink: 0; }
+
+    /* ========== A: centered compact capsule ========== */
+    .find-A {
+      position: absolute; z-index: 5;
+      top: 10px; left: 50%; transform: translateX(-50%);
+      height: var(--capsule-h);
+      max-width: min(420px, calc(100% - 24px));
+      width: 420px;
+      display: flex; align-items: center; gap: 4px;
+      padding: 0 6px 0 12px;
+      background: var(--surface);
+      border-radius: 999px;
+      box-shadow: var(--shadow);
+      border: 1px solid rgba(180, 188, 200, 0.7);
+    }
+    .find-A .find-btn.primary {
+      height: 26px; padding: 0 12px; border-radius: 999px;
+      background: var(--accent); color: #fff; font-size: 12px; font-weight: 500;
+    }
+    .find-A .find-btn.primary:hover { background: #1d4bb8; color: #fff; }
+    .find-A .nav-btn {
+      width: 26px; height: 26px; border-radius: 999px;
+    }
+
+    /* ========== B: full-bleed inset dock (accepted) ========== */
+    .find-B {
+      position: absolute; z-index: 5;
+      top: 8px; left: 10px; right: 10px;
+      height: var(--capsule-h);
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 6px 0 10px;
+      background: rgba(255, 255, 255, 0.96);
+      backdrop-filter: blur(8px);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      border: 0; /* shadow-only edge */
+    }
+    .find-B .field {
+      flex: 1; min-width: 0; height: 28px;
+      display: flex; align-items: center;
+      padding: 0 10px;
+      border-radius: var(--field-radius);
+      background: transparent;
+      border: 1px solid var(--field-border);
+    }
+    .find-B .field:focus-within {
+      border-color: var(--accent);
+      box-shadow: var(--focus-ring);
+    }
+    .find-B .find-btn.primary {
+      height: 28px; padding: 0 14px; border-radius: var(--field-radius);
+      background: var(--accent); color: #fff; font-size: 12px; font-weight: 500;
+    }
+    .find-B .find-btn.primary:hover { background: #1d4bb8; color: #fff; }
+    .find-B .nav-cluster {
+      display: flex; align-items: center; gap: 2px;
+      height: 28px; padding: 2px;
+      background: #f4f5f7; border-radius: var(--field-radius);
+    }
+    .find-B .nav-btn {
+      width: 24px; height: 24px; border-radius: 4px;
+    }
+    .find-B .meta {
+      display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+    }
+    .find-B .close-btn {
+      width: 28px; height: 28px; border: 0; border-radius: var(--field-radius);
+      background: transparent; color: var(--muted); cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .find-B .close-btn:hover { color: var(--text); background: var(--hover); }
+
+    /* ========== C: top-right compact cluster ========== */
+    .find-C {
+      position: absolute; z-index: 5;
+      top: 8px; right: 10px;
+      height: var(--capsule-h);
+      display: flex; align-items: stretch;
+      background: var(--surface);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      border: 1px solid rgba(180, 188, 200, 0.7);
+      overflow: hidden;
+    }
+    .find-C .field {
+      width: 200px; display: flex; align-items: center;
+      padding: 0 10px; border-right: 1px solid var(--line);
+    }
+    .find-C .find-btn.primary {
+      width: 36px; border-radius: 0;
+      border-right: 1px solid var(--line);
+      color: var(--accent);
+    }
+    .find-C .find-btn.primary:hover { background: #eef2fb; }
+    .find-C .find-btn.primary svg { width: 16px; height: 16px; }
+    .find-C .meta {
+      display: flex; align-items: center; gap: 2px;
+      padding: 0 4px 0 8px;
+    }
+    .find-C .nav-btn {
+      width: 28px; height: 100%; border-radius: 0;
+    }
+
+    .hint-row {
+      position: absolute; z-index: 4;
+      left: 12px; bottom: 10px;
+      font-size: 11px; color: var(--faint);
+      pointer-events: none;
+      background: rgba(255,255,255,0.85);
+      padding: 2px 8px; border-radius: 6px;
+    }
+
+    .state-dump {
+      position: fixed; right: 12px; top: 12px; z-index: 40;
+      width: 280px; max-height: 36vh; overflow: auto;
+      background: #0f172a; color: #e2e8f0;
+      font-family: "IBM Plex Mono", monospace; font-size: 10px;
+      padding: 10px; border-radius: 8px; opacity: 0.92; white-space: pre-wrap;
+    }
+    .switcher {
+      position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+      z-index: 9999;
+      display: flex; align-items: center; gap: 10px;
+      background: #111827; color: #f9fafb;
+      border-radius: 999px; padding: 8px 12px;
+      box-shadow: 0 8px 28px rgba(0,0,0,.35);
+      font-size: 13px; user-select: none;
+    }
+    .switcher button {
+      width: 28px; height: 28px; border: 0; border-radius: 999px;
+      background: #374151; color: #fff; cursor: pointer;
+      display: grid; place-items: center;
+    }
+    .switcher button:hover { background: #4b5563; }
+    .switcher .label { min-width: 220px; text-align: center; }
+    .switcher .sub { color: #9ca3af; font-size: 11px; margin-top: 1px; }
+  </style>
+</head>
+<body>
+  <div class="proto-root">
+    <div class="desk" id="desk"></div>
+  </div>
+  <pre class="state-dump" id="stateDump"></pre>
+  <div class="switcher" id="switcher">
+    <button type="button" id="prevVar" aria-label="Previous variant">←</button>
+    <div class="label">
+      <div id="varLabel">A</div>
+      <div class="sub">B 已选定 · ← → 仍可对比 A/C · Esc 关闭</div>
+    </div>
+    <button type="button" id="nextVar" aria-label="Next variant">→</button>
+  </div>
+
+  <script>
+    /**
+     * Three variants of Diff in-file find, switchable via ?variant=.
+     * Shared constraint: floating capsule (no layout jitter) + scroll-padding
+     * so covered top lines remain reachable.
+     */
+    const VARIANTS = [
+      { key: "A", name: "Centered compact (parked)" },
+      { key: "B", name: "Full-bleed inset dock ★" },
+      { key: "C", name: "Top-right cluster (parked)" },
+    ];
+
+    const OLD_LINES = [
+      "#pragma once",
+      '#include "MechanicsError.hpp"',
+      "#include <optional>",
+      "#include <string>",
+      "#include <vector>",
+      "namespace Nuwa {",
+      "class StressBridge {",
+      "public:",
+      "  explicit StressBridge();",
+      "  void bind(const Mesh& mesh);",
+      "  int timeoutMs = 10;",
+      "  void step_1();",
+      "  void step_2();",
+      "  void step_3();",
+      "  std::optional<MechanicsError> takeFailure();",
+      "  void step_4();",
+      "  void alpha();",
+      "  void beta();",
+      "  void gamma();",
+      "protected:",
+      "  double timeS = 0;",
+      "  int ticks = 0;",
+      "  void note();",
+      "  void poll();",
+      "  void tail_0();",
+      "  void tail_1();",
+      "  void tail_2();",
+      "};",
+      "} // namespace Nuwa",
+    ];
+    const NEW_LINES = [
+      "#pragma once",
+      '#include "MechanicsError.hpp"',
+      "#include <optional>",
+      "#include <string>",
+      "#include <vector>",
+      "#include <memory>",
+      "namespace Nuwa {",
+      "class StressBridge {",
+      "public:",
+      "  explicit StressBridge();",
+      "  void bind(const Mesh& mesh);",
+      "  int timeoutMs = 40;",
+      "  void step_1();",
+      "  void step_2();",
+      "  void step_3();",
+      "  std::optional<MechanicsError> takeFailure();",
+      "  void step_4();",
+      "  void alpha();",
+      "  void beta();",
+      "  void gamma();",
+      "  void searchReady();",
+      "protected:",
+      "  double timeS = 0;",
+      "  int ticks = 0;",
+      "  void note();",
+      "  void poll();",
+      "  void tail_0();",
+      "  void tail_1();",
+      "  void tail_2();",
+      "};",
+      "} // namespace Nuwa",
+    ];
+
+    const state = {
+      variant: "B",
+      findOpen: true,
+      query: "void",
+      draft: "void",
+      matches: [],
+      index: 0, // 0-based into matches; -1 when none
+    };
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+      );
+    }
+
+    function getVariant() {
+      const v = new URLSearchParams(location.search).get("variant") || state.variant;
+      return VARIANTS.some((x) => x.key === v) ? v : "B";
+    }
+
+    function setVariant(key) {
+      state.variant = key;
+      const url = new URL(location.href);
+      url.searchParams.set("variant", key);
+      history.replaceState(null, "", url);
+      render();
+    }
+
+    function cycle(dir) {
+      const i = VARIANTS.findIndex((x) => x.key === getVariant());
+      setVariant(VARIANTS[(i + dir + VARIANTS.length) % VARIANTS.length].key);
+    }
+
+    function runSearch() {
+      const q = state.draft.trim();
+      state.query = q;
+      state.matches = [];
+      if (!q) {
+        state.index = -1;
+        render();
+        return;
+      }
+      const lower = q.toLowerCase();
+      OLD_LINES.forEach((text, i) => {
+        if (text.toLowerCase().includes(lower)) {
+          state.matches.push({ side: "old", ln: i + 1, text });
+        }
+      });
+      NEW_LINES.forEach((text, i) => {
+        if (text.toLowerCase().includes(lower)) {
+          state.matches.push({ side: "new", ln: i + 1, text });
+        }
+      });
+      state.index = state.matches.length ? 0 : -1;
+      render();
+      if (state.index >= 0) scrollToCurrent();
+    }
+
+    function jump(dir) {
+      if (!state.matches.length) return;
+      const n = state.matches.length;
+      state.index = (state.index + dir + n) % n;
+      render();
+      scrollToCurrent();
+    }
+
+    function scrollToCurrent() {
+      const m = state.matches[state.index];
+      if (!m) return;
+      const pane = document.getElementById(m.side === "old" ? "paneL" : "paneR");
+      const row = pane && pane.querySelector(`[data-side="${m.side}"][data-ln="${m.ln}"]`);
+      if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+
+    function markLine(text, q, isCur) {
+      if (!q) return esc(text);
+      const i = text.toLowerCase().indexOf(q.toLowerCase());
+      if (i < 0) return esc(text);
+      const a = esc(text.slice(0, i));
+      const b = esc(text.slice(i, i + q.length));
+      const c = esc(text.slice(i + q.length));
+      return `${a}<mark>${b}</mark>${c}`;
+    }
+
+    function renderRows(side, lines) {
+      const q = state.query;
+      const cur = state.index >= 0 ? state.matches[state.index] : null;
+      return lines
+        .map((text, i) => {
+          const ln = i + 1;
+          const isHit = q && text.toLowerCase().includes(q.toLowerCase());
+          const isCur = cur && cur.side === side && cur.ln === ln;
+          let kind = "";
+          if (side === "old" && (ln === 11 || text.includes("timeoutMs = 10"))) kind = "del";
+          if (side === "new" && (text.includes("timeoutMs = 40") || text.includes("searchReady") || text.includes("memory"))) kind = "add";
+          if (side === "new" && text.includes("timeoutMs")) kind = "mod";
+          if (side === "old" && text.includes("timeoutMs")) kind = "mod";
+          const cls = ["row", kind, isHit ? "hit" : "", isCur ? "cur" : ""].filter(Boolean).join(" ");
+          return `<div class="${cls}" data-side="${side}" data-ln="${ln}">
+            <span class="ln">${ln}</span>
+            <span class="code">${markLine(text, q, isCur)}</span>
+          </div>`;
+        })
+        .join("");
+    }
+
+    function countLabel() {
+      if (!state.query) return { text: "—", empty: true };
+      if (!state.matches.length) return { text: "0/0", empty: true };
+      return { text: `${state.index + 1}/${state.matches.length}`, empty: false };
+    }
+
+    function iconSearch() {
+      return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21l-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>`;
+    }
+    function iconUp() {
+      return `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 10l4-4 4 4"/></svg>`;
+    }
+    function iconDown() {
+      return `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6l4 4 4-4"/></svg>`;
+    }
+    function iconClose() {
+      return `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 4l8 8M12 4L4 12"/></svg>`;
+    }
+
+    function renderFindA(c) {
+      return `<div class="find-A" role="search">
+        <input class="find-input" id="findInput" type="search" placeholder="在此文件中搜索…" value="${esc(state.draft)}" aria-label="搜索" />
+        <button type="button" class="find-btn primary" data-act="search">搜索</button>
+        <span class="sep"></span>
+        <span class="count ${c.empty ? "empty" : ""}">${esc(c.text)}</span>
+        <button type="button" class="nav-btn" data-act="prev" ${state.matches.length ? "" : "disabled"} aria-label="上一个">${iconUp()}</button>
+        <button type="button" class="nav-btn" data-act="next" ${state.matches.length ? "" : "disabled"} aria-label="下一个">${iconDown()}</button>
+      </div>`;
+    }
+
+    function renderFindB(c) {
+      return `<div class="find-B" role="search">
+        <div class="field">
+          <input class="find-input" id="findInput" type="search" placeholder="搜索旧侧 / 新侧文本…" value="${esc(state.draft)}" aria-label="搜索" />
+        </div>
+        <button type="button" class="find-btn primary" data-act="search">搜索</button>
+        <div class="meta">
+          <span class="count ${c.empty ? "empty" : ""}">${esc(c.text)}</span>
+          <div class="nav-cluster">
+            <button type="button" class="nav-btn" data-act="prev" ${state.matches.length ? "" : "disabled"} aria-label="上一个">${iconUp()}</button>
+            <button type="button" class="nav-btn" data-act="next" ${state.matches.length ? "" : "disabled"} aria-label="下一个">${iconDown()}</button>
+          </div>
+        </div>
+        <button type="button" class="close-btn" data-act="close" aria-label="关闭搜索" title="关闭">${iconClose()}</button>
+      </div>`;
+    }
+
+    function renderFindC(c) {
+      return `<div class="find-C" role="search">
+        <div class="field">
+          <input class="find-input" id="findInput" type="search" placeholder="查找…" value="${esc(state.draft)}" aria-label="搜索" />
+        </div>
+        <button type="button" class="find-btn primary" data-act="search" title="搜索" aria-label="搜索">${iconSearch()}</button>
+        <div class="meta">
+          <span class="count ${c.empty ? "empty" : ""}">${esc(c.text)}</span>
+          <button type="button" class="nav-btn" data-act="prev" ${state.matches.length ? "" : "disabled"} aria-label="上一个">${iconUp()}</button>
+          <button type="button" class="nav-btn" data-act="next" ${state.matches.length ? "" : "disabled"} aria-label="下一个">${iconDown()}</button>
+        </div>
+      </div>`;
+    }
+
+    function renderFind() {
+      if (!state.findOpen) return "";
+      const c = countLabel();
+      const v = getVariant();
+      if (v === "B") return renderFindB(c);
+      if (v === "C") return renderFindC(c);
+      return renderFindA(c);
+    }
+
+    function dumpState() {
+      document.getElementById("stateDump").textContent = JSON.stringify(
+        {
+          variant: getVariant(),
+          findOpen: state.findOpen,
+          draft: state.draft,
+          query: state.query,
+          matchCount: state.matches.length,
+          index: state.index < 0 ? null : state.index + 1,
+          current: state.index >= 0 ? state.matches[state.index] : null,
+          note: "find floats over stage (no flow height). find-open → sheet padding-top + scroll-padding-top so top lines stay reachable.",
+        },
+        null,
+        2
+      );
+    }
+
+    function render() {
+      const v = getVariant();
+      state.variant = v;
+      const meta = VARIANTS.find((x) => x.key === v);
+      document.getElementById("varLabel").textContent = `${meta.key} (${meta.name})`;
+
+      const stageClass = state.findOpen ? "stage find-open" : "stage";
+      document.getElementById("desk").innerHTML = `
+        <div class="win">
+          <aside class="side">
+            <div class="side-chrome">Changes</div>
+            <div class="side-body">
+              <div class="leaf active"><span class="badge M">M</span><span>StressBridge.hpp</span></div>
+              <div class="leaf"><span class="badge M">M</span><span>alignment.rs</span></div>
+            </div>
+          </aside>
+          <div class="main">
+            <div class="file-chrome">
+              <strong>StressBridge.hpp</strong>
+              <span>a1b2c3d..9f8e7d6</span>
+              <span class="spacer"></span>
+              <button type="button" class="tool-btn" data-act="toggle-find" aria-pressed="${state.findOpen}">
+                ${state.findOpen ? "关闭搜索" : "打开搜索"}
+              </button>
+              <button type="button" class="tool-btn" data-act="scroll-top">滚到顶</button>
+            </div>
+            <div class="${stageClass}" id="stage">
+              <div class="pane" id="paneL"><div class="sheet">${renderRows("old", OLD_LINES)}</div></div>
+              <div class="gutter"></div>
+              <div class="pane" id="paneR"><div class="sheet">${renderRows("new", NEW_LINES)}</div></div>
+              ${renderFind()}
+              <div class="hint-row">${state.findOpen
+                ? "胶囊悬浮 · 内容 padding-top 让第 1 行可滚到胶囊下方"
+                : "搜索关闭 · 打开/关闭不应让 diff 高度抖动"}</div>
+            </div>
+          </div>
+        </div>`;
+      dumpState();
+
+      const input = document.getElementById("findInput");
+      if (input) {
+        input.focus();
+        const len = input.value.length;
+        input.setSelectionRange(len, len);
+      }
+    }
+
+    function onDeskClick(e) {
+      const el = e.target.closest("[data-act]");
+      if (!el) return;
+      const act = el.getAttribute("data-act");
+      if (act === "toggle-find" || act === "close") {
+        state.findOpen = act === "close" ? false : !state.findOpen;
+        if (state.findOpen && state.query && !state.matches.length) runSearch();
+        else render();
+        return;
+      }
+      if (act === "scroll-top") {
+        document.getElementById("paneL").scrollTop = 0;
+        document.getElementById("paneR").scrollTop = 0;
+        dumpState();
+        return;
+      }
+      if (act === "search") {
+        runSearch();
+        return;
+      }
+      if (act === "prev") {
+        jump(-1);
+        return;
+      }
+      if (act === "next") {
+        jump(1);
+        return;
+      }
+    }
+
+    function onDeskInput(e) {
+      if (e.target.id === "findInput") {
+        state.draft = e.target.value;
+        dumpState();
+      }
+    }
+
+    function onDeskKeydown(e) {
+      if (e.target.id !== "findInput") return;
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (e.shiftKey) jump(-1);
+        else if (state.query === state.draft.trim() && state.matches.length) jump(1);
+        else runSearch();
+      }
+    }
+
+    document.getElementById("desk").addEventListener("click", onDeskClick);
+    document.getElementById("desk").addEventListener("input", onDeskInput);
+    document.getElementById("desk").addEventListener("keydown", onDeskKeydown);
+    document.getElementById("prevVar").addEventListener("click", () => cycle(-1));
+    document.getElementById("nextVar").addEventListener("click", () => cycle(1));
+
+    document.addEventListener("keydown", (e) => {
+      const t = e.target;
+      const typing =
+        t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        state.findOpen = true;
+        render();
+        return;
+      }
+      if (e.key === "Escape" && state.findOpen) {
+        e.preventDefault();
+        state.findOpen = false;
+        render();
+        return;
+      }
+      if (typing) return;
+      if (e.key === "ArrowLeft") cycle(-1);
+      if (e.key === "ArrowRight") cycle(1);
+    });
+
+    // Initial search so index/count is visible when evaluating.
+    state.variant = getVariant();
+    runSearch();
+  </script>
+</body>
+</html>
