@@ -76,7 +76,8 @@ pub fn picker_shadow() -> Vec<BoxShadow> {
     ]
 }
 
-/// Floating Diff find bar (prototype B): shadow-only edge, no border.
+/// Floating Diff find bar (prototype B): shadow-only edge. Painted as a
+/// window-root overlay *after* DualPane so the drop shadow sits on the code.
 pub fn find_bar_shadow() -> Vec<BoxShadow> {
     let ink = |a: f32| -> Hsla { hsla(220. / 360., 0.38, 0.14, a) };
     vec![
@@ -95,16 +96,6 @@ pub fn find_bar_shadow() -> Vec<BoxShadow> {
     ]
 }
 
-/// Soft accent ring for the find input while searching / focused.
-pub fn find_field_focus_ring() -> Vec<BoxShadow> {
-    vec![BoxShadow {
-        color: hsla(220. / 360., 0.55, 0.48, 0.28),
-        offset: point(px(0.), px(0.)),
-        blur_radius: px(0.),
-        spread_radius: px(2.),
-    }]
-}
-
 /// Translucent white fill for the floating find bar.
 pub fn find_bar_bg() -> Rgba {
     Rgba {
@@ -115,15 +106,19 @@ pub fn find_bar_bg() -> Rgba {
     }
 }
 
-/// Find capsule corner radius (island keeps [`CHANGES_RADIUS`]).
+/// Outer capsule radius. Field radius is [`FIND_FIELD_RADIUS`] so corners stay
+/// concentric with the pad ([`FIND_BAR_PAD`]) at 45°.
 pub const FIND_BAR_RADIUS: f32 = 8.;
-/// Inset of the floating find bar from the pane island edges.
-pub const FIND_BAR_TOP: f32 = 8.;
-pub const FIND_BAR_X: f32 = 10.;
-pub const FIND_BAR_HEIGHT: f32 = 36.;
-/// Body top pad when find is open: clears capsule so line 1 can sit under it
-/// (prototype `--find-pad` = sheet padding-top).
-pub const FIND_CONTENT_PAD: f32 = FIND_BAR_TOP + FIND_BAR_HEIGHT;
+/// Equal inset of the find bar from the Diff island on top / left / right.
+pub const FIND_BAR_INSET: f32 = 6.;
+/// Equal pad inside the capsule on top / left / right (and bottom).
+pub const FIND_BAR_PAD: f32 = 4.;
+/// Inner input radius = outer − pad (parallel arcs).
+pub const FIND_FIELD_RADIUS: f32 = FIND_BAR_RADIUS - FIND_BAR_PAD;
+pub const FIND_FIELD_HEIGHT: f32 = 28.;
+pub const FIND_BAR_HEIGHT: f32 = FIND_FIELD_HEIGHT + 2. * FIND_BAR_PAD;
+/// Body top pad when find is open: clears the capsule so line 1 stays reachable.
+pub const FIND_CONTENT_PAD: f32 = FIND_BAR_INSET + FIND_BAR_HEIGHT;
 
 #[cfg(target_os = "macos")]
 pub const TRAFFIC_LIGHT_TOP_INSET: f32 = 11.;
