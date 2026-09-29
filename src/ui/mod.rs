@@ -82,6 +82,7 @@ const ICON_ASSETS: &[(&str, &[u8])] = icon_assets![
     "pin.svg",
     "pin_off.svg",
     "trash.svg",
+    "pencil.svg",
     "square_minus.svg",
     "square_plus.svg",
     "diff.svg",
