@@ -26,6 +26,9 @@ pub struct DiffReopen {
     pub base_oid: Option<String>,
     pub head_oid: String,
     pub selected_path: String,
+    /// Worktree Comparison (ADR-0012). Absent in older geometry files.
+    #[serde(default)]
+    pub worktree: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -222,6 +225,7 @@ mod tests {
                 base_oid: Some("a".repeat(40)),
                 head_oid: "b".repeat(40),
                 selected_path: "src/a.rs".into(),
+                worktree: false,
             }),
         };
         let dir = tempfile::tempdir().unwrap();
@@ -240,6 +244,7 @@ mod tests {
                 base_oid: None,
                 head_oid: "b".repeat(40),
                 selected_path: "README.md".into(),
+                worktree: false,
             }),
             ..Default::default()
         };
@@ -260,6 +265,7 @@ mod tests {
         let reopen = loaded.diff_reopen.expect("diff_reopen");
         assert_eq!(reopen.base_oid, Some("a".repeat(40)));
         assert_eq!(reopen.head_oid, "b".repeat(40));
+        assert!(!reopen.worktree);
         assert!(loaded.diff_open);
     }
 

@@ -1,0 +1,5 @@
+# Worktree is a third Entry kind
+
+Worktree sits on the exclusive kind track beside Branch and, when GitLab chrome applies, MR. The track is shown even when GitLab chrome is off, so a repository without a forge can still select Worktree (extends ADR-0011, which otherwise used a Branch-only pill in that case). The value pill names the checkout — branch name, or the short OID when HEAD is detached — and does not open a picker. Right-click returns to Branch Browser. There is no last-Worktree memory: the checkout is the only value. Launch still selects Branch Browser. The kind is not marked dirty while another Entry is selected; a background status read just to paint a badge was rejected.
+
+Selecting Worktree hides the Commit island and any MR detail. The Changes island is the only island, centered on the stage at its usual width, without the HEAD commit footer. That footer describes the commit under review; on this Entry the HEAD commit is the base, so the same footer would mislabel the path list. Refresh is a control on that island. Clicking the already-selected Worktree kind does not refresh.
