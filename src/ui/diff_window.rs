@@ -1886,21 +1886,15 @@ fn render_comment_island(view: &DiffView, cx: &mut Context<DiffView>) -> impl In
                                         .child(label),
                                 )
                                 .child(
-                                    div()
-                                        .id(("cmt-edit", id as usize))
-                                        .flex_none()
-                                        .px(px(6.))
-                                        .py(px(2.))
-                                        .rounded_md()
-                                        .ui_text_size(11., cx)
-                                        .text_color(theme::muted())
-                                        .hover(|b| b.bg(theme::hover()).text_color(theme::text()))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            cx.stop_propagation();
-                                            this.begin_edit(id, window, cx);
-                                        }))
-                                        .child("Edit"),
+                                    IconButton::new(
+                                        ("cmt-edit", id as usize),
+                                        "pencil.svg",
+                                        "Edit DraftComment",
+                                    )
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.begin_edit(id, window, cx);
+                                    })),
                                 )
                                 .child(
                                     IconButton::new(
