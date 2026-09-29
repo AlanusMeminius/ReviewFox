@@ -2709,6 +2709,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                 )
                 .child({
                     let (scroll, sb) = scrollbar::vertical("file-tree-sb", cx);
+                    let pane_width = view.files_width;
                     scrollbar::overlay_flex(
                         div()
                             .id("file-tree")
@@ -2726,6 +2727,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                         name,
                                         collapsed,
                                         RowSurface::Island,
+                                        pane_width,
                                         cx,
                                     )
                                     .on_click(cx.listener(
@@ -2744,6 +2746,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                     false,
                                     RowSurface::Island,
                                     mono.clone(),
+                                    pane_width,
                                     cx,
                                 ),
                             })),

@@ -1427,6 +1427,7 @@ fn render_tree_pane(
         .bg(theme::sidebar())
         .child({
             let (scroll, sb) = scrollbar::vertical("diff-tree-sb", cx);
+            let pane_width = f32::from(width);
             scrollbar::overlay_flex(
                 div()
                     .id("diff-tree-body")
@@ -1445,6 +1446,7 @@ fn render_tree_pane(
                                 name,
                                 collapsed,
                                 RowSurface::Desk,
+                                pane_width,
                                 cx,
                             )
                             .on_click(cx.listener(
@@ -1466,6 +1468,7 @@ fn render_tree_pane(
                                 active,
                                 RowSurface::Desk,
                                 mono.clone(),
+                                pane_width,
                                 cx,
                             )
                             .cursor_pointer()
