@@ -69,7 +69,7 @@ pub(super) struct PointerMove {
 }
 
 /// Contiguous, same-side, line-granular selection from a center-gutter drag
-/// (line-number column + icon slot). `start..=end` in 1-based line numbers of `side`.
+/// on the line-number column. `start..=end` in 1-based line numbers of `side`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LineSelection {
     side: Side,
@@ -111,7 +111,7 @@ pub struct DualPane {
     highlights: [Option<Arc<[Span]>>; 2],
     /// Shaped text per (side, visual row), visible ± one screen.
     shapes: ShapeCache,
-    /// The selected path's DraftComments (comment row index + icon slots).
+    /// The selected path's DraftComments (comment row index + start-line bubbles).
     comments: Vec<PaneComment>,
     /// LineSpan being drafted, highlighted in its pane.
     drafting: Option<(Side, u32, u32)>,
@@ -1168,7 +1168,7 @@ impl DualPane {
         self.press = self.row_index_at(side, y).map(|row| (side, row));
     }
 
-    /// Left press on `side`'s center-gutter band (line numbers + icon slot).
+    /// Left press on `side`'s line-number column.
     /// On a line it starts a selection drag (replacing any selection, including
     /// one on the other side).
     pub(super) fn press_gutter_select(&mut self, side: Side, y: f32, cx: &mut Context<Self>) {

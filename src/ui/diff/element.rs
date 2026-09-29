@@ -35,11 +35,11 @@ const LN_DIGIT_PX: f32 = 8.;
 /// Line-number inset from the code side of its column.
 const LN_PAD: f32 = 4.;
 const BRIDGE_COL: f32 = 24.;
-/// Comment-icon slot beside each line-number column, on the bridge side of it
-/// (`preimage` = number then icon, `postimage` = icon then number), per the prototype.
-const ICON_COL: f32 = 18.;
-/// Bubble glyph drawn centred in an [`ICON_COL`] slot.
+/// Bubble glyph drawn in the line-number cell, hugging the bridge like the digits.
 const ICON_GLYPH: f32 = 12.;
+/// Active-state wash behind an open bubble. A square, not the whole cell, so a
+/// wide line-number column does not turn into a bar.
+const ICON_WASH: f32 = 16.;
 /// Code text inset from the pane's inner edge.
 pub(super) const TEXT_PAD: f32 = 12.;
 /// Comment marker bar width; hugs the center gutter (Preimage right / Postimage left).
@@ -64,7 +64,7 @@ pub struct ActiveSearchMatch {
     pub bytes: std::ops::Range<usize>,
 }
 
-/// Which bubble an icon slot carries, and what a click on it means.
+/// Which bubble a line-number cell carries, and what a click on it means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IconMark {
     /// Outline bubble on the selection's start line: click creates a comment.
@@ -162,7 +162,7 @@ impl Geom {
         let x1 = snap(f32::from(bounds.right()), scale);
         let y0 = snap(f32::from(bounds.top()), scale);
         let y1 = snap(f32::from(bounds.bottom()), scale);
-        let gutter_w = ln_w * 2. + ICON_COL * 2. + BRIDGE_COL;
+        let gutter_w = ln_w * 2. + BRIDGE_COL;
         let pane_w = snap(((x1 - x0 - gutter_w) / 2.).max(0.), scale);
         let rect = |a: f32, b: f32| {
             Bounds::from_corners(point(px(a), px(y0)), point(px(b.max(a)), px(y1)))
@@ -190,9 +190,9 @@ impl Geom {
     }
 
     /// Width the gutter holds flat on each edge before the bridge curve starts:
-    /// the line-number column plus its icon slot.
+    /// the line-number column. A comment bubble replaces the number in that cell.
     pub fn flat_w(&self) -> f32 {
-        self.ln_w + ICON_COL
+        self.ln_w
     }
 
     /// Line-number column of `side`, as window `(left, right)`.
@@ -209,33 +209,17 @@ impl Geom {
         }
     }
 
-    /// Line numbers plus icon slot — the band that carries the row's kind tint
-    /// and starts a comment line-selection drag.
+    /// Line-number column — the band that carries the row's kind tint and starts
+    /// a comment line-selection drag. A bubble, when one is shown, occupies this
+    /// same cell.
     pub(super) fn gutter_band(&self, side: Side) -> (f32, f32) {
-        match side {
-            Side::Preimage => {
-                let l = f32::from(self.gutter.left());
-                (l, l + self.flat_w())
-            }
-            Side::Postimage => {
-                let r = f32::from(self.gutter.right());
-                (r - self.flat_w(), r)
-            }
-        }
+        self.ln_col(side)
     }
 
-    /// Icon slot of `side` over the row band `y0..y1`.
+    /// Line-number cell of `side` over the row band `y0..y1`. Hit target for the
+    /// bubble that replaces that row's number.
     fn icon_slot(&self, side: Side, y0: f32, y1: f32) -> Bounds<Pixels> {
-        let (a, b) = match side {
-            Side::Preimage => {
-                let x = f32::from(self.gutter.left()) + self.ln_w;
-                (x, x + ICON_COL)
-            }
-            Side::Postimage => {
-                let x = f32::from(self.gutter.right()) - self.flat_w();
-                (x, x + ICON_COL)
-            }
-        };
+        let (a, b) = self.ln_col(side);
         Bounds::from_corners(point(px(a), px(y0)), point(px(b), px(y1)))
     }
 
@@ -350,7 +334,7 @@ struct SideFrame {
     /// column draws those too).
     seams: Vec<(f32, bool)>,
     empty_seam: Option<f32>,
-    /// Visible icon slots on this side, as row bands.
+    /// Visible bubbles on this side, as row bands in the line-number column.
     icons: Vec<IconPlace>,
     thumb: Option<Thumb>,
     h_thumb: Option<Thumb>,
@@ -361,7 +345,7 @@ struct SideFrame {
     x_offset: f32,
 }
 
-/// An icon slot before its side is turned into gutter x, as a row band.
+/// A bubble before its side is turned into a line-number cell, as a row band.
 struct IconPlace {
     y0: f32,
     y1: f32,
@@ -370,10 +354,12 @@ struct IconPlace {
     open: bool,
 }
 
-/// A placed icon slot: what to paint, and the rect a click must hit.
+/// A placed bubble: what to paint, and the line-number cell a click must hit.
 pub(super) struct IconSlot {
     pub(super) slot: Bounds<Pixels>,
     pub(super) mark: IconMark,
+    /// Which way the bubble hugs the bridge, matching that side's line numbers.
+    side: Side,
     open: bool,
 }
 
@@ -501,7 +487,8 @@ pub(super) fn build_frame(
                 shape
             });
             // Selection is line-granular, so it needs no shaped text; the
-            // icon rides the start line's first visual row.
+            // bubble replaces the start line's number on its first visual row.
+            let mut replaces_number = false;
             let selected_here = match row {
                 Row::Line(l) if !l.is_equal_padding() => {
                     let sel = selection.as_ref().filter(|s| s.contains(&l.ln));
@@ -513,6 +500,7 @@ pub(super) fn build_frame(
                             sel.is_some_and(|s| *s.start() == l.ln),
                         );
                         if let Some(mark) = mark {
+                            replaces_number = true;
                             icons.push(IconPlace {
                                 y0: y_of(i),
                                 y1: y_of(i + 1),
@@ -580,7 +568,7 @@ pub(super) fn build_frame(
                         !pad && drafting.as_ref().is_some_and(|d| d.contains(&l.ln)),
                         marks,
                         search,
-                        l.shows_line_number(),
+                        l.shows_line_number() && !replaces_number,
                         shape.text_leading,
                     )
                 }
@@ -686,6 +674,7 @@ pub(super) fn build_frame(
                 .map(move |place| IconSlot {
                     slot: geom.icon_slot(side, place.y0, place.y1),
                     mark: place.mark,
+                    side,
                     open: place.open,
                 })
         })
@@ -1143,8 +1132,8 @@ impl Frame {
         let g = self.geom.gutter;
         window.paint_quad(fill(g, theme::white()));
         for side in [Side::Preimage, Side::Postimage] {
-            // The kind tint runs under the icon slot as well, so the bridge
-            // leaves a flat edge past both.
+            // Kind tint covers the line-number column; the bridge starts at its
+            // inner edge.
             let (c0, c1) = self.geom.gutter_band(side);
             let frame = &self.sides[side_ix(side)];
             for row in &frame.rows {
@@ -1166,12 +1155,7 @@ impl Frame {
                     continue;
                 }
                 let Some(label) = &row.label else { continue };
-                // Old numbers hug the gutter's inner edge from the left column's
-                // right; postimage numbers start at the right column's left.
-                let x = match side {
-                    Side::Preimage => c1 - LN_PAD - f32::from(label.width),
-                    Side::Postimage => c0 + LN_PAD,
-                };
+                let x = bridge_aligned_x(c0, c1, side, f32::from(label.width));
                 label
                     .paint(point(px(x), px(row.y0)), row_h, window, cx)
                     .ok();
@@ -1183,18 +1167,40 @@ impl Frame {
     }
 }
 
-/// A comment bubble in its icon slot — the prototype's `ICON_EMPTY` outline or
-/// `ICON_FILLED` solid, scaled from their 16-unit viewBox into an [`ICON_GLYPH`]
-/// box centred in the slot. An existing comment reads accent like its
-/// [`COMMENT_BAR`]; `open` adds the range tint while the dock is on this line.
+/// Left edge of a `width`-wide mark in a line-number column (`left`..`right`),
+/// hugging the bridge with a [`LN_PAD`] inset. Digits and comment bubbles share
+/// this so swapping one for the other does not jump sideways.
+fn bridge_aligned_x(left: f32, right: f32, side: Side, width: f32) -> f32 {
+    match side {
+        Side::Preimage => right - LN_PAD - width,
+        Side::Postimage => left + LN_PAD,
+    }
+}
+
+/// A comment bubble in the line-number cell it replaces — the prototype's
+/// `ICON_EMPTY` outline or `ICON_FILLED` solid, scaled from their 16-unit
+/// viewBox into an [`ICON_GLYPH`] box. The box hugs the bridge the way the
+/// digits do, so swapping a number for a bubble does not jump sideways. An
+/// existing comment reads accent like its [`COMMENT_BAR`]; `open` adds an
+/// [`ICON_WASH`] square centred on the bubble while the dock is on this line.
 fn paint_comment_icon(window: &mut Window, icon: &IconSlot) {
     let slot = icon.slot;
     let unit = ICON_GLYPH / 16.;
-    let x0 = f32::from(slot.left()) + (f32::from(slot.size.width) - ICON_GLYPH) / 2.;
+    let x0 = bridge_aligned_x(
+        f32::from(slot.left()),
+        f32::from(slot.right()),
+        icon.side,
+        ICON_GLYPH,
+    );
     let y0 = f32::from(slot.top()) + (f32::from(slot.size.height) - ICON_GLYPH) / 2.;
     let at = |x: f32, y: f32| point(px(x0 + x * unit), px(y0 + y * unit));
     if icon.open {
-        window.paint_quad(fill(slot, theme::range()).corner_radii(px(4.)));
+        let wash = ICON_WASH.min(f32::from(slot.size.width)).min(f32::from(slot.size.height));
+        let wx = x0 - (wash - ICON_GLYPH) / 2.;
+        let wy = y0 - (wash - ICON_GLYPH) / 2.;
+        let wash_bounds =
+            Bounds::from_corners(point(px(wx), px(wy)), point(px(wx + wash), px(wy + wash)));
+        window.paint_quad(fill(wash_bounds, theme::range()).corner_radii(px(4.)));
     }
     match icon.mark {
         IconMark::Empty => {
@@ -1630,7 +1636,8 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                 return;
             }
         }
-        // Comment line selection: center gutter band (ln + icon) only.
+        // Comment line selection: the line-number column only. A bubble in that
+        // cell is hit first and opens the comment instead.
         if down_hitbox.is_hovered(window) {
             let x = f32::from(event.position.x);
             for side in [Side::Preimage, Side::Postimage] {
