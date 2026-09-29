@@ -9,7 +9,7 @@ A local Git worktree root identified by its canonical absolute path (symlinks re
 _Avoid_: project, clone, repo path (unspecified canonicalization), working copy
 
 **Workspace**:
-The user's current place in the app: which Repository is open and which single Entry is selected; not Comparison identity (OIDs). Survives relaunch as a set of Workspaces plus which one is last (persisted only; not a sidebar section) and which are pinned; last is opened on launch, with Branch Browser as the default selected Entry. May also persist a last MR Entry label for return after the selected Entry is a Branch Browser selection—that memory is not the selected Entry and does not drive Comparison until the user selects an MR Entry again.
+The user's current place in the app: which Repository is open and which single Entry is selected; not Comparison identity (OIDs). Survives relaunch as a set of Workspaces plus which one is last (persisted only; not a sidebar section) and which are pinned. Opening a Workspace restores its selected Entry, which is an MR Entry label when one is selected and Branch Browser otherwise; last is the Workspace opened on launch. May also persist a last MR Entry label for return after the selected Entry is Branch Browser—that memory is not the selected Entry and does not drive Comparison until the user selects an MR Entry again.
 _Avoid_: session, last opened (as a domain term), MRU, concurrent Entries, entry mode
 
 **Entry**:

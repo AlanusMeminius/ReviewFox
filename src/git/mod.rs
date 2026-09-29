@@ -142,9 +142,8 @@ impl BranchBrowser {
         match result {
             Ok(bb) => {
                 let path = bb.comparison.repository.path();
+                // Keep a selected `mr` label; do not demote it into `last_mr` (ADR-0012).
                 workspace_store::remember(path, &bb.branch);
-                // Launch/open defaults to Branch Browser (ADR-0011).
-                workspace_store::demote_selected_mr_to_memory(path);
                 Ok(bb)
             }
             Err(e) => {

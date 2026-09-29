@@ -109,14 +109,6 @@ pub fn clear_last_mr_memory(path: &Path) {
     save(&store);
 }
 
-/// On Workspace open/launch: move selected `mr` into `last_mr` and clear `mr`
-/// so Comparison stays Branch-driven until the user picks MR kind (ADR-0011).
-pub fn demote_selected_mr_to_memory(path: &Path) {
-    let mut store = load();
-    demote_selected_mr_to_memory_in(&mut store, path);
-    save(&store);
-}
-
 /// Entry matching `last`, if any.
 pub fn last_entry(store: &WorkspaceStore) -> Option<&WorkspaceEntry> {
     let last = store.last.as_ref()?;
@@ -209,14 +201,6 @@ fn clear_last_mr_memory_in(store: &mut WorkspaceStore, path: &Path) {
     if let Some(entry) = store.workspaces.iter_mut().find(|e| e.path == path) {
         entry.mr = None;
         entry.last_mr = None;
-    }
-}
-
-fn demote_selected_mr_to_memory_in(store: &mut WorkspaceStore, path: &Path) {
-    if let Some(entry) = store.workspaces.iter_mut().find(|e| e.path == path) {
-        if let Some(label) = entry.mr.take() {
-            entry.last_mr = Some(label);
-        }
     }
 }
 
@@ -363,20 +347,22 @@ mod tests {
     }
 
     #[test]
-    fn demote_selected_mr_moves_to_last_mr_memory() {
+    fn opening_workspace_keeps_selected_mr_label() {
         let mut store = WorkspaceStore::default();
         remember_in(&mut store, PathBuf::from("/a"), "main".into());
         set_mr_in(&mut store, Path::new("/a"), Some(label("acme/app", 42)));
-        demote_selected_mr_to_memory_in(&mut store, Path::new("/a"));
-        assert!(
-            store.workspaces[0].mr.is_none(),
-            "open defaults to Branch Browser"
+        // Open updates the branch and must not move `mr` into `last_mr` (ADR-0012).
+        remember_in(&mut store, PathBuf::from("/a"), "main".into());
+        assert_eq!(
+            store.workspaces[0].mr,
+            Some(label("acme/app", 42)),
+            "opening keeps the selected MR Entry"
         );
         assert_eq!(store.workspaces[0].last_mr, Some(label("acme/app", 42)));
     }
 
     #[test]
-    fn demote_selected_mr_keeps_existing_last_mr_when_already_cleared() {
+    fn opening_workspace_without_mr_stays_branch_and_keeps_last_mr() {
         let mut store = WorkspaceStore {
             last: None,
             pinned: Vec::new(),
@@ -387,13 +373,17 @@ mod tests {
                 last_mr: Some(label("acme/app", 42)),
             }],
         };
-        demote_selected_mr_to_memory_in(&mut store, Path::new("/a"));
-        assert!(store.workspaces[0].mr.is_none());
+        remember_in(&mut store, PathBuf::from("/a"), "develop".into());
+        assert!(
+            store.workspaces[0].mr.is_none(),
+            "no mr label: selected Entry stays Branch Browser"
+        );
         assert_eq!(store.workspaces[0].last_mr, Some(label("acme/app", 42)));
+        assert_eq!(store.workspaces[0].branch, "develop");
     }
 
     #[test]
-    fn mr_selected_json_roundtrip_then_demote_yields_branch_with_memory() {
+    fn selected_mr_json_roundtrip_survives_open() {
         let store = WorkspaceStore {
             last: Some(PathBuf::from("/a")),
             pinned: Vec::new(),
@@ -408,11 +398,9 @@ mod tests {
         assert!(json.contains("\"mr\""));
         assert!(json.contains("\"last_mr\""));
         let mut loaded: WorkspaceStore = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.workspaces[0].mr, Some(label("acme/app", 42)));
-        assert_eq!(loaded.workspaces[0].last_mr, Some(label("acme/app", 42)));
-        demote_selected_mr_to_memory_in(&mut loaded, Path::new("/a"));
+        remember_in(&mut loaded, PathBuf::from("/a"), "main".into());
         let e = last_entry(&loaded).unwrap();
-        assert!(e.mr.is_none(), "after open demote: Branch selected");
+        assert_eq!(e.mr, Some(label("acme/app", 42)));
         assert_eq!(e.last_mr, Some(label("acme/app", 42)));
     }
 

@@ -1,8 +1,9 @@
-//! Exclusive Entry chrome decisions (ADR-0011, prototype A).
+//! Exclusive Entry chrome decisions (ADR-0011, prototype A; open restore ADR-0012).
 //!
 //! Pure seam: which Entry kind is active, what a kind hit does, empty-MR /
-//! open-picker-on-enter, and whether titlebar shows the two-piece GitLab chrome
-//! (kind track + value pill) vs the Branch-only pill. Rendering stays in `app_view`.
+//! open-picker-on-enter, what opening a Workspace does with its stored `mr`
+//! label, and whether titlebar shows the two-piece GitLab chrome (kind track +
+//! value pill) vs the Branch-only pill. Rendering stays in `app_view`.
 
 use crate::workspace_store::MrEntryLabel;
 
@@ -83,6 +84,36 @@ pub fn kind_switch_action(
             Some(label) => KindSwitchAction::RestoreMr(label.clone()),
             None => KindSwitchAction::EnterEmptyMr,
         },
+    }
+}
+
+/// What opening a Workspace does with its stored selected Entry (ADR-0012).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenWorkspace {
+    pub entry: OpenEntry,
+    /// Refetch failure for this open. Not the kind-switch empty-MR picker.
+    pub refetch_failure: RestoreFailureAction,
+}
+
+/// Selected Entry when a Workspace is opened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpenEntry {
+    /// Activate this MR Entry on the existing MR path (refetch `diff_refs`).
+    ActivateMr(MrEntryLabel),
+    /// Display Branch Browser. A stored `mr` label stays on the Workspace.
+    ShowBranchKeepLabel,
+}
+
+/// Given the stored `mr` label and whether GitLab chrome is visible.
+/// Absent `mr` is Branch Browser. Hidden chrome shows Branch and keeps the label.
+pub fn opening_workspace(mr: Option<&MrEntryLabel>, gitlab_chrome_visible: bool) -> OpenWorkspace {
+    let entry = match (mr, gitlab_chrome_visible) {
+        (Some(label), true) => OpenEntry::ActivateMr(label.clone()),
+        _ => OpenEntry::ShowBranchKeepLabel,
+    };
+    OpenWorkspace {
+        entry,
+        refetch_failure: RestoreFailureAction::KeepFailedDetail,
     }
 }
 
@@ -188,6 +219,38 @@ mod tests {
             restore_failure_action(false),
             RestoreFailureAction::KeepFailedDetail
         );
+    }
+
+    #[test]
+    fn opening_without_mr_shows_branch_browser() {
+        assert_eq!(
+            opening_workspace(None, true).entry,
+            OpenEntry::ShowBranchKeepLabel
+        );
+        assert_eq!(
+            opening_workspace(None, false).entry,
+            OpenEntry::ShowBranchKeepLabel
+        );
+        assert_eq!(
+            opening_workspace(None, true).refetch_failure,
+            RestoreFailureAction::KeepFailedDetail
+        );
+    }
+
+    #[test]
+    fn opening_with_mr_but_no_gitlab_chrome_shows_branch_and_keeps_label() {
+        let stored = label("acme/app", 42);
+        let open = opening_workspace(Some(&stored), false);
+        assert_eq!(open.entry, OpenEntry::ShowBranchKeepLabel);
+        assert_eq!(open.refetch_failure, RestoreFailureAction::KeepFailedDetail);
+    }
+
+    #[test]
+    fn opening_with_mr_and_gitlab_chrome_activates_that_entry() {
+        let stored = label("acme/app", 42);
+        let open = opening_workspace(Some(&stored), true);
+        assert_eq!(open.entry, OpenEntry::ActivateMr(stored));
+        assert_eq!(open.refetch_failure, RestoreFailureAction::KeepFailedDetail);
     }
 
     #[test]

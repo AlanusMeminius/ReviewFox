@@ -1,5 +1,7 @@
 //! Global OS window geometry for main + Diff (ADR-0007). Not Workspace-scoped.
-//! Splitters stay session-only (ADR-0004). Settings window is not persisted.
+//! Shell open/closed (repo sidebar, Diff file tree, comment island toggle) is
+//! stored here too (ADR-0012). Splitter widths stay session-only (ADR-0004).
+//! Settings window is not persisted.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -39,6 +41,15 @@ pub struct WindowGeometryFile {
     pub diff_open: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_reopen: Option<DiffReopen>,
+    /// Main window repo sidebar collapsed. Absent = open (false). ADR-0012.
+    #[serde(default)]
+    pub repos_collapsed: bool,
+    /// Diff window file tree collapsed. Absent = open (false). ADR-0012.
+    #[serde(default)]
+    pub tree_collapsed: bool,
+    /// Comment island toggle preference. Absent = closed (false). Not `comments_forced`.
+    #[serde(default)]
+    pub comments_visible: bool,
 }
 
 static STATE: Mutex<Option<WindowGeometryFile>> = Mutex::new(None);
@@ -65,6 +76,24 @@ pub fn set_main_bounds(bounds: StoredBounds) {
 
 pub fn set_diff_bounds(bounds: StoredBounds) {
     with_state(|s| s.diff = Some(bounds));
+}
+
+/// Persist as soon as the preference changes. Does not touch bounds or widths.
+pub fn set_repos_collapsed(collapsed: bool) {
+    with_state(|s| s.repos_collapsed = collapsed);
+    flush();
+}
+
+/// Persist as soon as the preference changes. Does not touch bounds or widths.
+pub fn set_tree_collapsed(collapsed: bool) {
+    with_state(|s| s.tree_collapsed = collapsed);
+    flush();
+}
+
+/// Comment-island toggle preference. A narrow-window yield (`comments_forced`) must not call this.
+pub fn set_comments_visible(visible: bool) {
+    with_state(|s| s.comments_visible = visible);
+    flush();
 }
 
 pub fn note_diff_opened(reopen: DiffReopen) {
@@ -223,6 +252,9 @@ mod tests {
                 head_oid: "b".repeat(40),
                 selected_path: "src/a.rs".into(),
             }),
+            repos_collapsed: false,
+            tree_collapsed: false,
+            comments_visible: false,
         };
         let dir = tempfile::tempdir().unwrap();
         let path = store_path_for_tests(dir.path());
@@ -268,6 +300,104 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = store_path_for_tests(dir.path());
         assert_eq!(load_at(&path), WindowGeometryFile::default());
+    }
+
+    #[test]
+    fn shell_open_closed_round_trips() {
+        let file = WindowGeometryFile {
+            main: Some(StoredBounds {
+                x: 10.,
+                y: 20.,
+                width: 1280.,
+                height: 820.,
+            }),
+            diff: Some(StoredBounds {
+                x: 100.,
+                y: 80.,
+                width: 1100.,
+                height: 720.,
+            }),
+            diff_open: true,
+            diff_reopen: Some(DiffReopen {
+                repository: PathBuf::from("/repo"),
+                base_oid: Some("a".repeat(40)),
+                head_oid: "b".repeat(40),
+                selected_path: "src/a.rs".into(),
+            }),
+            repos_collapsed: true,
+            tree_collapsed: true,
+            comments_visible: true,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path_for_tests(dir.path());
+        save_at(&path, &file);
+        assert_eq!(load_at(&path), file);
+    }
+
+    #[test]
+    fn absent_shell_flags_default_to_open_sidebars_and_closed_comments() {
+        let json = r#"{"main":{"x":1.0,"y":2.0,"width":800.0,"height":600.0},"diff":{"x":3.0,"y":4.0,"width":900.0,"height":700.0},"diff_open":true,"diff_reopen":{"repository":"/repo","base_oid":null,"head_oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","selected_path":"a.rs"}}"#;
+        let loaded: WindowGeometryFile = serde_json::from_str(json).unwrap();
+        assert!(!loaded.repos_collapsed, "sidebar defaults open");
+        assert!(!loaded.tree_collapsed, "Diff tree defaults open");
+        assert!(!loaded.comments_visible, "comment island defaults closed");
+        assert_eq!(loaded.main.as_ref().unwrap().width, 800.);
+        assert_eq!(loaded.diff.as_ref().unwrap().height, 700.);
+        assert!(loaded.diff_open);
+        let reopen = loaded.diff_reopen.as_ref().unwrap();
+        assert_eq!(reopen.repository, PathBuf::from("/repo"));
+        assert_eq!(reopen.selected_path, "a.rs");
+        assert!(reopen.base_oid.is_none());
+    }
+
+    #[test]
+    fn setting_shell_flags_saves_without_touching_bounds_or_diff() {
+        let original = WindowGeometryFile {
+            main: Some(StoredBounds {
+                x: 10.,
+                y: 20.,
+                width: 1280.,
+                height: 820.,
+            }),
+            diff: Some(StoredBounds {
+                x: 100.,
+                y: 80.,
+                width: 1100.,
+                height: 720.,
+            }),
+            diff_open: true,
+            diff_reopen: Some(DiffReopen {
+                repository: PathBuf::from("/repo"),
+                base_oid: Some("c".repeat(40)),
+                head_oid: "d".repeat(40),
+                selected_path: "src/b.rs".into(),
+            }),
+            repos_collapsed: false,
+            tree_collapsed: false,
+            comments_visible: false,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path_for_tests(dir.path());
+        save_at(&path, &original);
+
+        let mut updated = load_at(&path);
+        updated.repos_collapsed = true;
+        updated.tree_collapsed = true;
+        updated.comments_visible = true;
+        save_at(&path, &updated);
+
+        let loaded = load_at(&path);
+        assert!(loaded.repos_collapsed);
+        assert!(loaded.tree_collapsed);
+        assert!(loaded.comments_visible);
+        assert_eq!(loaded.main, original.main);
+        assert_eq!(loaded.diff, original.diff);
+        assert_eq!(loaded.diff_open, original.diff_open);
+        assert_eq!(loaded.diff_reopen, original.diff_reopen);
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(!json.contains("sidebar_width"));
+        assert!(!json.contains("tree_width"));
+        assert!(!json.contains("comment_width"));
     }
 
     #[test]

@@ -250,12 +250,13 @@ impl DiffView {
         );
         // Grow/shrink the bottom dock when Shift+Enter adds lines.
         let draft_observe = cx.observe(&draft_field, |_, _, cx| cx.notify());
+        let shell = window_geometry_store::snapshot();
         let mut this = Self {
             focus: cx.focus_handle(),
-            tree_collapsed: false,
+            tree_collapsed: shell.tree_collapsed,
             tree_width: f32::from(theme::DIFF_TREE_WIDTH),
             tree_resize_state: Rc::new(ResizeState::default()),
-            comments_visible: false,
+            comments_visible: shell.comments_visible,
             comment_width: theme::COMMENT_ISLAND_WIDTH,
             comments_forced: false,
             comment_anim_gen: None,
@@ -498,7 +499,9 @@ impl DiffView {
                 .map(|p| p.status)
                 .unwrap_or(PathStatus::Modify);
             if let FileDiff::Text {
-                preimage_text, postimage_text, ..
+                preimage_text,
+                postimage_text,
+                ..
             } = git::file_diff(&snap.comparison, &path, status, &opts)
             {
                 out.push((path, preimage_text, postimage_text));
@@ -666,12 +669,19 @@ impl DiffView {
         match self.search_files {
             SearchFiles::File => {
                 let Some(FileDiff::Text {
-                    preimage_text, postimage_text, ..
+                    preimage_text,
+                    postimage_text,
+                    ..
                 }) = self.snapshot.as_ref().map(|s| &s.file)
                 else {
                     return Vec::new();
                 };
-                search_file(preimage_text, postimage_text, &self.search_query, self.search_side)
+                search_file(
+                    preimage_text,
+                    postimage_text,
+                    &self.search_query,
+                    self.search_side,
+                )
             }
             SearchFiles::All => {
                 let Some(files) = &self.all_search_texts else {
@@ -773,11 +783,20 @@ impl DiffView {
         .detach();
     }
 
+    /// Toggle preference only. A narrow-window yield (`comments_forced`) must not call this.
+    fn set_comments_preference(&mut self, visible: bool) {
+        if self.comments_visible == visible {
+            return;
+        }
+        self.comments_visible = visible;
+        window_geometry_store::set_comments_visible(visible);
+    }
+
     /// Show at the last width. Drops the diff floor (and, via `comment_fit`,
     /// the snap threshold) when that width cannot sit beside a 400px diff.
     fn reveal_comments(&mut self, room: f32, cx: &mut Context<Self>) {
         self.begin_comment_anim(room, cx);
-        self.comments_visible = true;
+        self.set_comments_preference(true);
         self.comments_forced = splitter::resolve_collapsible(
             self.comment_width,
             room,
@@ -793,7 +812,7 @@ impl DiffView {
             self.reveal_comments(room, cx);
         } else {
             self.begin_comment_anim(room, cx);
-            self.comments_visible = false;
+            self.set_comments_preference(false);
             self.comments_forced = false;
             cx.notify();
         }
@@ -821,8 +840,7 @@ impl DiffView {
                 }
                 // HorizontalTrailing reports distance to viewport right; the pointer
                 // rides the middle of the gap, and the stage is inset on the right.
-                let requested =
-                    raw - theme::CHANGES_INSET - theme::CHANGES_SHADOW_GAP / 2.;
+                let requested = raw - theme::CHANGES_INSET - theme::CHANGES_SHADOW_GAP / 2.;
                 this.comments_forced = false;
                 match splitter::resolve_collapsible(
                     requested,
@@ -835,14 +853,14 @@ impl DiffView {
                             this.comment_anim_gen = None;
                             this.comment_pane_freeze = None;
                         }
-                        this.comments_visible = true;
+                        this.set_comments_preference(true);
                         this.comment_width = width;
                     }
                     splitter::Collapse::Hidden => {
                         if shown {
                             this.begin_comment_anim(room, cx);
                         }
-                        this.comments_visible = false;
+                        this.set_comments_preference(false);
                     }
                 }
                 cx.notify();
@@ -1175,8 +1193,7 @@ impl DiffView {
         };
         let show_tree_split = !self.tree_collapsed;
         let room = self.comment_room(window);
-        if self.comments_forced && room - splitter::MIN_DIFF_CONTENT_WIDTH >= self.comment_width
-        {
+        if self.comments_forced && room - splitter::MIN_DIFF_CONTENT_WIDTH >= self.comment_width {
             self.comments_forced = false;
         }
         let comment_layout = self.comment_layout(room);
@@ -2145,10 +2162,12 @@ fn render_comment_island(
                                             "pencil.svg",
                                             "Edit DraftComment",
                                         )
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            cx.stop_propagation();
-                                            this.begin_edit(id, window, cx);
-                                        })),
+                                        .on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.begin_edit(id, window, cx);
+                                            }),
+                                        ),
                                     )
                                     .child(
                                         IconButton::new(
@@ -2156,12 +2175,12 @@ fn render_comment_island(
                                             "trash.svg",
                                             "Delete DraftComment",
                                         )
-                                        .on_click(cx.listener(
-                                            move |this, _, window, cx| {
+                                        .on_click(
+                                            cx.listener(move |this, _, window, cx| {
                                                 cx.stop_propagation();
                                                 this.delete_comment(id, window, cx);
-                                            },
-                                        )),
+                                            }),
+                                        ),
                                     ),
                             )
                             .child(
@@ -2493,6 +2512,7 @@ fn toggle_button(
         .pressed(collapsed)
         .on_click(cx.listener(|this, _, _, cx| {
             this.tree_collapsed = !this.tree_collapsed;
+            window_geometry_store::set_tree_collapsed(this.tree_collapsed);
             cx.notify();
         }))
 }

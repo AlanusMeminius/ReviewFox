@@ -15,7 +15,7 @@ use super::OpenSettings;
 use super::appearance::{self, UiTextSize};
 use super::diff_window::{DiffSnapshot, DiffView};
 use super::entry_chrome::{
-    self, EntryChromeMode, EntryKind, KindSwitchAction, RestoreFailureAction,
+    self, EntryChromeMode, EntryKind, KindSwitchAction, OpenEntry, RestoreFailureAction,
 };
 use super::file_tree::{self, TreeRow};
 use super::file_tree_rows::{self, RowSurface};
@@ -119,11 +119,10 @@ impl AppView {
             None => MainState::Empty,
         };
         gitlab_connection::spawn_refresh_connection(gitlab_connection, cx.entity().downgrade(), cx);
-        // ADR-0011: launch defaults to Branch Browser. Persisted `mr` is demoted
-        // in open_workspace; chrome restores from last_mr via the kind switch.
-        let view = Self {
+        // ADR-0012: opening restores the selected Entry. Shell open/closed is app-global.
+        let mut view = Self {
             focus: cx.focus_handle(),
-            repos_collapsed: false,
+            repos_collapsed: window_geometry_store::snapshot().repos_collapsed,
             state,
             store: workspace_store::load(),
             diff_window: None,
@@ -153,6 +152,7 @@ impl AppView {
             #[cfg(target_os = "macos")]
             window_vibrancy: None,
         };
+        view.restore_selected_entry(cx);
         if let Some(reopen) = restore_diff {
             cx.spawn(async move |this, cx| {
                 this.update(cx, |this, cx| {
@@ -314,14 +314,20 @@ impl AppView {
         }
     }
 
-    /// Restore MR Entry from a label (used when chrome selects MR kind).
-    fn begin_restore_mr(&mut self, label: MrEntryLabel, cx: &mut Context<Self>) {
+    /// Restore MR Entry from a label.
+    /// `from_kind_switch` uses the empty-MR picker on failure; opening a Workspace does not.
+    fn begin_restore_mr(
+        &mut self,
+        label: MrEntryLabel,
+        from_kind_switch: bool,
+        cx: &mut Context<Self>,
+    ) {
         if !gitlab_chrome_visible(self) {
             return;
         }
         let iid = label.iid;
         self.empty_mr = false;
-        self.pending_kind_restore = true;
+        self.pending_kind_restore = from_kind_switch;
         self.mr_entry = Some(MrEntry {
             summary: MergeRequestSummary {
                 iid,
@@ -333,6 +339,30 @@ impl AppView {
             project: Some(label.project),
         });
         self.spawn_mr_activate(iid, cx);
+    }
+
+    /// Selected `mr` label for the open Workspace. `last_mr` is not the selected Entry.
+    fn stored_selected_mr(&self) -> Option<MrEntryLabel> {
+        let MainState::Ready(loaded) = &self.state else {
+            return None;
+        };
+        let path = loaded.comparison.repository.path();
+        self.store
+            .workspaces
+            .iter()
+            .find(|e| e.path == path)
+            .and_then(|e| e.mr.clone())
+    }
+
+    /// Launch or choosing a Workspace: activate `mr`, or show Branch without writing the label back.
+    fn restore_selected_entry(&mut self, cx: &mut Context<Self>) {
+        let stored = self.stored_selected_mr();
+        let open = entry_chrome::opening_workspace(stored.as_ref(), gitlab_chrome_visible(self));
+        let OpenEntry::ActivateMr(label) = open.entry else {
+            return;
+        };
+        let from_kind_switch = open.refetch_failure == RestoreFailureAction::EnterEmptyMrOpenPicker;
+        self.begin_restore_mr(label, from_kind_switch, cx);
     }
 
     fn current_last_mr(&self) -> Option<MrEntryLabel> {
@@ -382,7 +412,7 @@ impl AppView {
             KindSwitchAction::RestoreMr(label) => {
                 self.branch_picker = None;
                 self.mr_picker = None;
-                self.begin_restore_mr(label, cx);
+                self.begin_restore_mr(label, true, cx);
             }
             KindSwitchAction::EnterEmptyMr => {
                 self.enter_empty_mr(cx);
@@ -397,18 +427,17 @@ impl AppView {
                 return;
             }
         }
-        let (branch, last_mr) = self
+        let (branch, mr, last_mr) = self
             .store
             .workspaces
             .iter()
             .find(|e| e.path == path)
-            .map(|e| (e.branch.clone(), e.last_mr.clone()))
-            .unwrap_or_else(|| ("HEAD".into(), None));
-        // open_workspace demotes any selected `mr` into last_mr (ADR-0011).
+            .map(|e| (e.branch.clone(), e.mr.clone(), e.last_mr.clone()))
+            .unwrap_or_else(|| ("HEAD".into(), None, None));
         match BranchBrowser::open_workspace(&WorkspaceEntry {
             path: path.clone(),
             branch,
-            mr: None,
+            mr,
             last_mr,
         }) {
             Ok(bb) => {
@@ -419,6 +448,7 @@ impl AppView {
                 self.mr_entry = None;
                 self.empty_mr = false;
                 self.pending_kind_restore = false;
+                self.restore_selected_entry(cx);
             }
             Err(_) => {
                 // Stale entry already dropped by open_workspace; keep current Ready if any.
@@ -874,11 +904,7 @@ impl AppView {
             return;
         }
         let mods = &event.keystroke.modifiers;
-        if event.keystroke.key.as_str() == "a"
-            && mods.secondary()
-            && !mods.alt
-            && !mods.shift
-        {
+        if event.keystroke.key.as_str() == "a" && mods.secondary() && !mods.alt && !mods.shift {
             self.handle_commits_select_all(cx);
         }
     }
@@ -2776,10 +2802,7 @@ struct HeadMeta {
     range_label: Option<String>,
 }
 
-fn head_commit_meta(
-    loaded: &BranchBrowser,
-    mr_diff: Option<(Oid, Oid)>,
-) -> Option<HeadMeta> {
+fn head_commit_meta(loaded: &BranchBrowser, mr_diff: Option<(Oid, Oid)>) -> Option<HeadMeta> {
     let commit = loaded
         .commits
         .iter()
@@ -3093,6 +3116,7 @@ fn toggle_button(id: &'static str, collapsed: bool, cx: &mut Context<AppView>) -
         .pressed(collapsed)
         .on_click(cx.listener(|this, _, _, cx| {
             this.repos_collapsed = !this.repos_collapsed;
+            window_geometry_store::set_repos_collapsed(this.repos_collapsed);
             cx.notify();
         }))
 }
