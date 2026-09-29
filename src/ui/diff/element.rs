@@ -39,7 +39,10 @@ const BRIDGE_COL: f32 = 24.;
 pub(super) const TEXT_PAD: f32 = 12.;
 /// Left bar on a commented line; the text moves right by the same amount.
 pub(super) const COMMENT_BAR: f32 = 2.;
-const SEAM_H: f32 = 2.;
+/// Seams and Hunk block outlines.
+const EDGE_W: f32 = 1.;
+/// How far a culled bridge's tab reaches into the middle gutter; also its corner radius.
+const TAB_W: f32 = 3.;
 const DRAFTING_BG: u32 = 0xdbe4ff;
 /// Non-current search hit (`--hit` in find-capsule prototype).
 const SEARCH_HIT_BG: u32 = 0xffe08a;
@@ -290,6 +293,17 @@ struct WinBridge {
     y_l1: f32,
     y_r0: f32,
     y_r1: f32,
+    /// Culled: only this side is on screen; draw a tab there instead of a ribbon.
+    tab_side: Option<Side>,
+}
+
+impl WinBridge {
+    fn ends(&self, side: Side) -> (f32, f32) {
+        match side {
+            Side::Old => (self.y_l0, self.y_l1),
+            Side::New => (self.y_r0, self.y_r1),
+        }
+    }
 }
 
 /// Everything paint needs, built in prepaint.
@@ -515,6 +529,7 @@ pub(super) fn build_frame(
                     y_l1: y(p.y_l1),
                     y_r0: y(p.y_r0),
                     y_r1: y(p.y_r1),
+                    tab_side: p.tab_side,
                 })
                 .collect(),
             vp.omit_links()
@@ -779,10 +794,20 @@ fn kind_bg(kind: Option<LineKind>) -> Rgba {
     }
 }
 
+fn kind_edge(kind: LineKind) -> Rgba {
+    match kind {
+        LineKind::Replace => theme::mod_edge(),
+        LineKind::Insert => theme::add_edge(),
+        LineKind::Delete => theme::del_edge(),
+        LineKind::Equal => theme::line(),
+    }
+}
+
+/// A seam on the old side is an insertion point, on the new side a deletion point.
 fn seam_color(side: Side) -> Rgba {
     match side {
-        Side::Old => theme::add_bg(),
-        Side::New => theme::del_bg(),
+        Side::Old => theme::add_edge(),
+        Side::New => theme::del_edge(),
     }
 }
 
@@ -915,18 +940,25 @@ impl Frame {
                 }
             }
             paint_gaps(window, pane, &frame.gaps);
-            if let Some(y) = frame.empty_seam {
-                let mut stroke = PathBuilder::stroke(px(2.));
-                stroke.move_to(point(px(x0 + 8.), px(y)));
-                stroke.line_to(point(px(x1 - 8.), px(y)));
-                if let Ok(path) = stroke.build() {
-                    window.paint_path(path, rgb(0x8aa0b8));
-                }
+            for y in frame.seams.iter().map(|&(y, _)| y).chain(frame.empty_seam) {
+                window.paint_quad(fill(hline(x0, x1, y, EDGE_W), seam_color(side)));
             }
-            for &(y, _) in &frame.seams {
-                window.paint_quad(fill(hline(x0, x1, y, SEAM_H), seam_color(side)));
-            }
+            self.paint_block_edges(side, x0, x1, window);
         });
+    }
+
+    /// Top and bottom outline of each Hunk's block on `side`, across `x0..x1`.
+    /// Zero-height ends are seams, drawn with those.
+    fn paint_block_edges(&self, side: Side, x0: f32, x1: f32, window: &mut Window) {
+        for bridge in &self.bridges {
+            let (y0, y1) = bridge.ends(side);
+            if y1 - y0 < EDGE_W {
+                continue;
+            }
+            let color = kind_edge(bridge.kind);
+            window.paint_quad(fill(hline(x0, x1, y0, EDGE_W), color));
+            window.paint_quad(fill(hline(x0, x1, y1 - EDGE_W, EDGE_W), color));
+        }
     }
 
     fn paint_gutter(&self, window: &mut Window, cx: &mut App) {
@@ -945,9 +977,10 @@ impl Frame {
             }
             for &(y, in_rows) in &frame.seams {
                 if in_rows {
-                    window.paint_quad(fill(hline(c0, c1, y, SEAM_H), seam_color(side)));
+                    window.paint_quad(fill(hline(c0, c1, y, EDGE_W), seam_color(side)));
                 }
             }
+            self.paint_block_edges(side, c0, c1, window);
         }
         paint_bridges(window, &self.bridges, ln_w);
         let row_h = px(self.row_h);
@@ -974,99 +1007,89 @@ impl Frame {
 
 fn paint_bridges(window: &mut Window, placed: &[WinBridge], ln_w: f32) {
     for bridge in placed {
-        let parallel =
-            (bridge.y_l0 - bridge.y_r0).abs() < 1. && (bridge.y_l1 - bridge.y_r1).abs() < 1.;
-        let mut path = PathBuilder::fill();
-        if parallel {
-            path.move_to(point(px(bridge.x_l), px(bridge.y_l0)));
-            path.line_to(point(px(bridge.x_r), px(bridge.y_r0)));
-            path.line_to(point(px(bridge.x_r), px(bridge.y_r1)));
-            path.line_to(point(px(bridge.x_l), px(bridge.y_l1)));
-        } else {
-            pinch_bezier(&mut path, bridge, ln_w);
-        }
-        path.close();
-        if let Ok(path) = path.build() {
+        let (fill_path, edges) = match bridge.tab_side {
+            None => ribbon(bridge, ln_w),
+            Some(side) => tab(bridge, side, ln_w),
+        };
+        if let Ok(path) = fill_path.build() {
             window.paint_path(path, kind_bg(Some(bridge.kind)));
+        }
+        if let Ok(path) = edges.build() {
+            window.paint_path(path, kind_edge(bridge.kind));
         }
     }
 }
 
-/// Full row on the long side, cubic Bézier through the center gutter, then a 2px
-/// hairline across the short side's line-number column so it meets the code hairline.
-fn pinch_bezier(path: &mut PathBuilder, bridge: &WinBridge, ln_w: f32) {
-    let x_l = bridge.x_l;
-    let x_r = bridge.x_r;
-    let mid_l = x_l + ln_w;
-    let mid_r = x_r - ln_w;
-    let mw = (mid_r - mid_l).max(8.);
-    match bridge.kind {
-        LineKind::Delete => {
-            let y0 = bridge.y_l0;
-            let y1 = bridge.y_l1;
-            let top = bridge.y_r0;
-            let bot = bridge.y_r0 + 2.;
-            path.move_to(point(px(x_l), px(y0)));
-            path.line_to(point(px(mid_l), px(y0)));
-            path.cubic_bezier_to(
-                point(px(mid_r), px(top)),
-                point(px(mid_l + mw * 0.45), px(y0)),
-                point(px(mid_r - mw * 0.45), px(top)),
-            );
-            path.line_to(point(px(x_r), px(top)));
-            path.line_to(point(px(x_r), px(bot)));
-            path.line_to(point(px(mid_r), px(bot)));
-            path.cubic_bezier_to(
-                point(px(mid_l), px(y1)),
-                point(px(mid_r - mw * 0.45), px(bot)),
-                point(px(mid_l + mw * 0.45), px(y1)),
-            );
-            path.line_to(point(px(x_l), px(y1)));
-        }
-        LineKind::Insert => {
-            let top = bridge.y_l0;
-            let bot = bridge.y_l0 + 2.;
-            let y0 = bridge.y_r0;
-            let y1 = bridge.y_r1;
-            path.move_to(point(px(x_l), px(top)));
-            path.line_to(point(px(mid_l), px(top)));
-            path.cubic_bezier_to(
-                point(px(mid_r), px(y0)),
-                point(px(mid_l + mw * 0.45), px(top)),
-                point(px(mid_r - mw * 0.45), px(y0)),
-            );
-            path.line_to(point(px(x_r), px(y0)));
-            path.line_to(point(px(x_r), px(y1)));
-            path.line_to(point(px(mid_r), px(y1)));
-            path.cubic_bezier_to(
-                point(px(mid_l), px(bot)),
-                point(px(mid_r - mw * 0.45), px(y1)),
-                point(px(mid_l + mw * 0.45), px(bot)),
-            );
-            path.line_to(point(px(x_l), px(bot)));
-        }
-        _ => {
-            // Hold the full block through each line-number column. The cubic
-            // only runs between the columns, from the top of the left block
-            // to the top of the right block (and bottom to bottom).
-            path.move_to(point(px(x_l), px(bridge.y_l0)));
-            path.line_to(point(px(mid_l), px(bridge.y_l0)));
-            path.cubic_bezier_to(
-                point(px(mid_r), px(bridge.y_r0)),
-                point(px(mid_l + mw * 0.45), px(bridge.y_l0)),
-                point(px(mid_r - mw * 0.45), px(bridge.y_r0)),
-            );
-            path.line_to(point(px(x_r), px(bridge.y_r0)));
-            path.line_to(point(px(x_r), px(bridge.y_r1)));
-            path.line_to(point(px(mid_r), px(bridge.y_r1)));
-            path.cubic_bezier_to(
-                point(px(mid_l), px(bridge.y_l1)),
-                point(px(mid_r - mw * 0.45), px(bridge.y_r1)),
-                point(px(mid_l + mw * 0.45), px(bridge.y_l1)),
-            );
-            path.line_to(point(px(x_l), px(bridge.y_l1)));
-        }
+/// Pixel-row centers of a block's top and bottom outline, so a 1px stroke
+/// covers the same pixels as the code pane's outline quads. A zero-height end
+/// has one line, on its seam.
+fn edge_ys((y0, y1): (f32, f32)) -> (f32, f32) {
+    let top = y0 + EDGE_W / 2.;
+    let bot = if y1 - y0 < EDGE_W {
+        top
+    } else {
+        y1 - EDGE_W / 2.
+    };
+    (top, bot)
+}
+
+/// Fill and top/bottom outline of a bridge: straight through each
+/// line-number column, a cubic with horizontal tangents across the middle.
+/// The ends overshoot half a pixel so the outline meets the code panes'.
+fn ribbon(bridge: &WinBridge, ln_w: f32) -> (PathBuilder, PathBuilder) {
+    let (x0, x1) = (bridge.x_l - EDGE_W / 2., bridge.x_r + EDGE_W / 2.);
+    let (mid_l, mid_r) = (bridge.x_l + ln_w, bridge.x_r - ln_w);
+    let mid = (mid_l + mid_r) / 2.;
+    let (l0, l1) = edge_ys(bridge.ends(Side::Old));
+    let (r0, r1) = edge_ys(bridge.ends(Side::New));
+    let p = |x: f32, y: f32| point(px(x), px(y));
+
+    let mut fill = PathBuilder::fill();
+    fill.move_to(p(x0, l0));
+    fill.line_to(p(mid_l, l0));
+    fill.cubic_bezier_to(p(mid_r, r0), p(mid, l0), p(mid, r0));
+    fill.line_to(p(x1, r0));
+    fill.line_to(p(x1, r1));
+    fill.line_to(p(mid_r, r1));
+    fill.cubic_bezier_to(p(mid_l, l1), p(mid, r1), p(mid, l1));
+    fill.line_to(p(x0, l1));
+    fill.close();
+
+    let mut edges = PathBuilder::stroke(px(EDGE_W));
+    for (l, r) in [(l0, r0), (l1, r1)] {
+        edges.move_to(p(x0, l));
+        edges.line_to(p(mid_l, l));
+        edges.cubic_bezier_to(p(mid_r, r), p(mid, l), p(mid, r));
+        edges.line_to(p(x1, r));
     }
+    (fill, edges)
+}
+
+/// A culled bridge: a rounded tab from `side`'s line-number column into the
+/// middle gutter. Its open end sits against the column.
+fn tab(bridge: &WinBridge, side: Side, ln_w: f32) -> (PathBuilder, PathBuilder) {
+    let (top, bot) = edge_ys(bridge.ends(side));
+    let (base, dir) = match side {
+        Side::Old => (bridge.x_l + ln_w, 1.),
+        Side::New => (bridge.x_r - ln_w, -1.),
+    };
+    let r = TAB_W.min((bot - top) / 2.);
+    let tip = base + dir * r;
+    let sweep = side == Side::Old;
+    let p = |x: f32, y: f32| point(px(x), px(y));
+    let radii = p(r, r);
+    let outline = |path: &mut PathBuilder| {
+        path.move_to(p(base, top));
+        path.arc_to(radii, px(0.), false, sweep, p(tip, top + r));
+        path.line_to(p(tip, bot - r));
+        path.arc_to(radii, px(0.), false, sweep, p(base, bot));
+    };
+    let mut fill = PathBuilder::fill();
+    outline(&mut fill);
+    fill.close();
+    let mut edges = PathBuilder::stroke(px(EDGE_W));
+    outline(&mut edges);
+    (fill, edges)
 }
 
 fn paint_omit_waves(window: &mut Window, geom: Geom, folds: &[(f32, f32)]) {

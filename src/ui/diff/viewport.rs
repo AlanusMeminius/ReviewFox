@@ -18,6 +18,26 @@ pub struct PlacedBridge {
     pub y_l1: f32,
     pub y_r0: f32,
     pub y_r1: f32,
+    /// `Some(side)`: culled. The other side's ends are both off the pane, so
+    /// only `side`'s block is drawn, as a tab (§3.4).
+    pub tab_side: Option<Side>,
+}
+
+impl PlacedBridge {
+    pub fn ends(&self, side: Side) -> (f32, f32) {
+        match side {
+            Side::Old => (self.y_l0, self.y_l1),
+            Side::New => (self.y_r0, self.y_r1),
+        }
+    }
+
+    /// Vertical extent of what is drawn: both sides, or the tab's side.
+    fn band(&self) -> (f32, f32) {
+        match self.tab_side {
+            Some(side) => self.ends(side),
+            None => (self.y_l0.min(self.y_r0), self.y_l1.max(self.y_r1)),
+        }
+    }
 }
 
 /// Viewport position of the line held in place across a fold change (§3.3).
@@ -155,22 +175,28 @@ impl<'a> Viewport<'a> {
 
     /// Bridges that can be on screen, placed in pane pixels.
     pub fn bridges(&self) -> Vec<PlacedBridge> {
+        let off_pane =
+            |(y0, y1): (f32, f32)| (y0 < 0. && y1 < 0.) || (y0 > self.view_h && y1 > self.view_h);
         self.bridge_window()
             .filter_map(|i| self.place(i))
-            .filter(|p| {
-                let y0 = p.y_l0.min(p.y_r0);
-                let y1 = p.y_l1.max(p.y_r1);
-                y1 >= 0. && y0 <= self.view_h
+            .filter_map(|mut p| {
+                p.tab_side = match (off_pane(p.ends(Side::Old)), off_pane(p.ends(Side::New))) {
+                    (false, false) => None,
+                    (false, true) => Some(Side::Old),
+                    (true, false) => Some(Side::New),
+                    (true, true) => return None,
+                };
+                let (y0, y1) = p.band();
+                (p.tab_side.is_none() || y1 > y0).then_some(p)
             })
             .collect()
     }
 
-    /// Index of the first bridge whose vertical band contains pane y `y`.
+    /// Index of the first bridge whose drawn vertical band contains pane y `y`.
     pub fn bridge_at(&self, y: f32) -> Option<usize> {
         self.bridges().into_iter().find_map(|p| {
-            let y0 = p.y_l0.min(p.y_r0);
-            let y1 = p.y_l1.max(p.y_r1).max(y0 + 2.);
-            (y >= y0 && y <= y1).then_some(p.index)
+            let (y0, y1) = p.band();
+            (y >= y0 && y <= y1.max(y0 + 2.)).then_some(p.index)
         })
     }
 
@@ -336,6 +362,7 @@ impl<'a> Viewport<'a> {
             y_l1,
             y_r0,
             y_r1,
+            tab_side: None,
         })
     }
 }
@@ -1176,6 +1203,101 @@ mod tests {
             }
             assert!(vp.omit_links().len() <= 5);
         }
+    }
+
+    /// 20 Equal, a 1↔40 (or 40↔1) Replace, 2 Equal, then `second`, 20 Equal.
+    fn stretched_case(old_long: bool, second: AlignmentOp) -> Layout {
+        let (o, n) = if old_long { (40, 1) } else { (1, 40) };
+        let second_rows = |s: &AlignmentOp| match s {
+            AlignmentOp::Replace { olds, news } => (olds.count, news.count),
+            AlignmentOp::Insert { news, .. } => (0, news.count),
+            _ => unreachable!(),
+        };
+        let (old_rows, new_rows) = second_rows(&second);
+        let old = lines(1, 20 + o + 2 + old_rows + 20, "L");
+        let new = lines(1, 20 + n + 2 + new_rows + 20, "L");
+        let ops = vec![
+            eq(1, 1, 20),
+            AlignmentOp::Replace {
+                olds: span(21, o),
+                news: span(21, n),
+            },
+            eq(21 + o, 21 + n, 2),
+            second,
+            eq(23 + o + old_rows, 23 + n + new_rows, 20),
+        ];
+        build(&old, &new, ops, None)
+    }
+
+    /// Scroll that puts the middle of the long side of the first Replace on
+    /// the anchor; the short side waits there, so the second bridge's long
+    /// side ends are far below the pane.
+    fn mid_first_hunk(layout: &Layout, long: Side) -> Viewport<'_> {
+        let s = s_for_content(layout, long, 40. * ROW_H, ROW_H, 0.);
+        Viewport::new(layout, s, VIEW_H, ROW_H)
+    }
+
+    #[test]
+    fn bridge_with_new_side_off_screen_is_culled_to_old() {
+        let second = AlignmentOp::Replace {
+            olds: span(24, 1),
+            news: span(63, 1),
+        };
+        let layout = stretched_case(false, second);
+        let vp = mid_first_hunk(&layout, Side::New);
+        let placed = vp.bridges();
+        let b = placed.iter().find(|p| p.index == 1).expect("second bridge");
+        assert!(b.y_r0 > VIEW_H, "new end is below the pane");
+        assert!(b.y_l0 >= 0. && b.y_l1 <= VIEW_H, "old block is on screen");
+        assert_eq!(b.tab_side, Some(Side::Old));
+        let first = placed.iter().find(|p| p.index == 0).unwrap();
+        assert_eq!(
+            first.tab_side, None,
+            "a side spanning the pane is not culled"
+        );
+    }
+
+    #[test]
+    fn bridge_with_new_side_above_the_pane_is_culled_to_old() {
+        let second = AlignmentOp::Replace {
+            olds: span(24, 1),
+            news: span(63, 40),
+        };
+        let layout = stretched_case(false, second);
+        // Middle of the second Replace's 40 new lines on the anchor.
+        let s = s_for_content(&layout, Side::New, 82. * ROW_H, ROW_H, 0.);
+        let vp = Viewport::new(&layout, s, VIEW_H, ROW_H);
+        let b = vp.bridges().into_iter().find(|p| p.index == 0).unwrap();
+        assert!(b.y_r1 < 0., "new end is above the pane");
+        assert!(b.y_l0 >= 0. && b.y_l1 <= VIEW_H, "old block is on screen");
+        assert_eq!(b.tab_side, Some(Side::Old));
+    }
+
+    #[test]
+    fn bridge_with_old_side_off_screen_is_culled_to_new() {
+        let second = AlignmentOp::Replace {
+            olds: span(63, 1),
+            news: span(24, 1),
+        };
+        let layout = stretched_case(true, second);
+        let vp = mid_first_hunk(&layout, Side::Old);
+        let b = vp.bridges().into_iter().find(|p| p.index == 1).unwrap();
+        assert!(b.y_l0 > VIEW_H, "old end is below the pane");
+        assert!(b.y_r0 >= 0. && b.y_r1 <= VIEW_H, "new block is on screen");
+        assert_eq!(b.tab_side, Some(Side::New));
+    }
+
+    #[test]
+    fn culled_bridge_with_a_zero_height_visible_side_is_dropped() {
+        let second = AlignmentOp::Insert {
+            after_old: 23,
+            news: span(63, 3),
+        };
+        let layout = stretched_case(false, second);
+        let vp = mid_first_hunk(&layout, Side::New);
+        assert!(vp.bridges().iter().all(|p| p.index != 1));
+        // The old seam still marks the insertion point.
+        assert_eq!(vp.visible_seams(Side::Old), [23]);
     }
 
     #[test]

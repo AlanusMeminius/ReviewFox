@@ -256,6 +256,17 @@ pub fn del_bg() -> Rgba {
     // Prototype delete tint: grey, same color the connector uses.
     rgb(0xd8dce1)
 }
+/// Outline of a Replace block and its connector (§3.2).
+pub fn mod_edge() -> Rgba {
+    rgb(0x7fa6ea)
+}
+pub fn add_edge() -> Rgba {
+    rgb(0x7ccf98)
+}
+/// Grey-blue, so it does not read as the grey omission wave.
+pub fn del_edge() -> Rgba {
+    rgb(0xa3aab3)
+}
 pub fn gap_bg() -> Rgba {
     rgb(0xe8eaef)
 }
