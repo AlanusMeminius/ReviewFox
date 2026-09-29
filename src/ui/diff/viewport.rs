@@ -77,8 +77,8 @@ impl<'a> Viewport<'a> {
     /// Scroll offset of `side`'s content (content y at the pane top).
     pub fn top(&self, side: Side) -> f32 {
         match side {
-            Side::Old => self.old_top,
-            Side::New => self.new_top,
+            Side::Preimage => self.old_top,
+            Side::Postimage => self.new_top,
         }
     }
 
@@ -131,7 +131,7 @@ impl<'a> Viewport<'a> {
         for i in self.bridge_window() {
             let bridge = &self.layout.bridges[i];
             let from_other = match (bridge, side) {
-                (Bridge::Insert { .. }, Side::Old) | (Bridge::Delete { .. }, Side::New) => true,
+                (Bridge::Insert { .. }, Side::Preimage) | (Bridge::Delete { .. }, Side::Postimage) => true,
                 _ => false,
             };
             if !from_other {
@@ -220,7 +220,7 @@ impl<'a> Viewport<'a> {
     /// The line to hold in place across a fold change (§3.3). If the anchor
     /// is on an omission separator, the last line above it is held.
     pub fn capture_anchor(&self) -> Option<AnchorCap> {
-        let hits = [Side::Old, Side::New].map(|side| (side, self.row_at_anchor(side)));
+        let hits = [Side::Preimage, Side::Postimage].map(|side| (side, self.row_at_anchor(side)));
         let cap = |side: Side, row: u32, ln: u32| AnchorCap {
             side,
             ln,
@@ -254,11 +254,11 @@ impl<'a> Viewport<'a> {
             bridges.len(),
             |i| {
                 let b = &bridges[i];
-                y(b.rows(Side::Old).0, Side::Old).min(y(b.rows(Side::New).0, Side::New))
+                y(b.rows(Side::Preimage).0, Side::Preimage).min(y(b.rows(Side::Postimage).0, Side::Postimage))
             },
             |i| {
                 let b = &bridges[i];
-                y(b.rows(Side::Old).1, Side::Old).max(y(b.rows(Side::New).1, Side::New))
+                y(b.rows(Side::Preimage).1, Side::Preimage).max(y(b.rows(Side::Postimage).1, Side::Postimage))
             },
             self.view_h,
         )
@@ -374,8 +374,8 @@ fn partition(n: usize, pred: impl Fn(usize) -> bool) -> usize {
 
 fn other(side: Side) -> Side {
     match side {
-        Side::Old => Side::New,
-        Side::New => Side::Old,
+        Side::Preimage => Side::Postimage,
+        Side::Postimage => Side::Preimage,
     }
 }
 
@@ -394,7 +394,7 @@ pub fn s_range(layout: &Layout, view_h: f32, row_h: f32) -> (f32, f32) {
     let anchor = anchor_of(view_h);
     let mut lo = f32::INFINITY;
     let mut hi = f32::NEG_INFINITY;
-    for side in [Side::Old, Side::New] {
+    for side in [Side::Preimage, Side::Postimage] {
         let n = layout.side(side).rows();
         let max = max_scroll(n, anchor, row_h);
         if max <= 0. {
@@ -444,7 +444,7 @@ pub fn s_for_content(
 ) -> f32 {
     let knots = &layout.knots;
     let (cur_old, cur_new) = interp(current_s, knots, row_h);
-    let cur = if side == Side::Old { cur_old } else { cur_new };
+    let cur = if side == Side::Preimage { cur_old } else { cur_new };
     if (cur - content_px).abs() < 0.5 {
         return current_s;
     }
@@ -660,8 +660,8 @@ pub fn clamp_x_synced(x: f32, max_per_side: [f32; 2]) -> f32 {
 /// or old when neither side has been scrolled yet.
 pub fn shared_x_on_sync_enable(offsets: [f32; 2], last_scrolled: Option<Side>) -> f32 {
     let ix = match last_scrolled {
-        Some(Side::Old) | None => 0,
-        Some(Side::New) => 1,
+        Some(Side::Preimage) | None => 0,
+        Some(Side::Postimage) => 1,
     };
     offsets[ix]
 }
@@ -745,7 +745,7 @@ mod tests {
 
     fn tops(layout: &Layout, s: f32) -> (f32, f32) {
         let vp = Viewport::new(layout, s, VIEW_H, ROW_H);
-        (vp.top(Side::Old), vp.top(Side::New))
+        (vp.top(Side::Preimage), vp.top(Side::Postimage))
     }
 
     /// Table of files: (name, old, new, ops). Index order is used below.
@@ -835,8 +835,8 @@ mod tests {
         let (lo, _) = s_range(&layout, VIEW_H, ROW_H);
         let raw = Viewport::new(&layout, lo + 60.3, VIEW_H, ROW_H);
         let vp = Viewport::new(&layout, lo + 60.3, VIEW_H, ROW_H).snapped(2.);
-        assert_eq!(vp.top(Side::New), snap(raw.top(Side::New), 2.));
-        assert!((vp.top(Side::New) * 2.).fract() == 0.);
+        assert_eq!(vp.top(Side::Postimage), snap(raw.top(Side::Postimage), 2.));
+        assert!((vp.top(Side::Postimage) * 2.).fract() == 0.);
         for p in vp.bridges() {
             assert!((p.y_r0 * 2.).fract() == 0. && (p.y_r1 * 2.).fract() == 0.);
         }
@@ -848,8 +848,8 @@ mod tests {
         let layout = build(&old, &new, ops, None);
         let (_, hi) = s_range(&layout, VIEW_H, ROW_H);
         let vp = Viewport::new(&layout, hi, VIEW_H, ROW_H);
-        assert_eq!(vp.top(Side::Old), vp.max_top(Side::Old));
-        assert_eq!(vp.top(Side::New), vp.max_top(Side::New));
+        assert_eq!(vp.top(Side::Preimage), vp.max_top(Side::Preimage));
+        assert_eq!(vp.top(Side::Postimage), vp.max_top(Side::Postimage));
     }
 
     #[test]
@@ -971,21 +971,21 @@ mod tests {
         let (_, hi) = s_range(&layout, VIEW_H, ROW_H);
         let end = Viewport::new(&layout, hi, VIEW_H, ROW_H);
         assert_eq!(
-            40. * ROW_H - end.top(Side::Old),
-            60. * ROW_H - end.top(Side::New)
+            40. * ROW_H - end.top(Side::Preimage),
+            60. * ROW_H - end.top(Side::Postimage)
         );
         // Inside the trailing insert, old has stopped; below its last line is gap.
         let vp = Viewport::new(&layout, 45. * ROW_H, VIEW_H, ROW_H);
-        assert_eq!(vp.top(Side::Old), 39. * ROW_H - VIEW_H / 3.);
-        let old_bottom = 40. * ROW_H - vp.top(Side::Old);
-        assert_eq!(vp.gaps(Side::Old), vec![(old_bottom, VIEW_H)]);
-        assert!(vp.gaps(Side::New).is_empty());
+        assert_eq!(vp.top(Side::Preimage), 39. * ROW_H - VIEW_H / 3.);
+        let old_bottom = 40. * ROW_H - vp.top(Side::Preimage);
+        assert_eq!(vp.gaps(Side::Preimage), vec![(old_bottom, VIEW_H)]);
+        assert!(vp.gaps(Side::Postimage).is_empty());
         // The insert bridge pinches at the old seam (end of old content).
         let placed = vp.bridges();
         assert_eq!(placed.len(), 1);
         assert_eq!((placed[0].y_l0, placed[0].y_l1), (old_bottom, old_bottom));
         assert_eq!(vp.bridge_at(old_bottom + 1.), Some(0));
-        assert_eq!(vp.visible_seams(Side::Old), [40]);
+        assert_eq!(vp.visible_seams(Side::Preimage), [40]);
     }
 
     #[test]
@@ -993,12 +993,12 @@ mod tests {
         let (_, old, new, ops) = cases().remove(4);
         let layout = build(&old, &new, ops, None);
         let vp = Viewport::new(&layout, 0., VIEW_H, ROW_H);
-        assert_eq!(vp.gaps(Side::Old), vec![(0., VIEW_H)]);
+        assert_eq!(vp.gaps(Side::Preimage), vec![(0., VIEW_H)]);
         let placed = vp.bridges();
         assert_eq!(placed.len(), 1);
         assert_eq!(placed[0].y_l0, VIEW_H / 3.);
-        assert_eq!(vp.empty_seam(Side::Old), VIEW_H / 3.);
-        assert!(vp.hit(Side::Old, 10.).is_none());
+        assert_eq!(vp.empty_seam(Side::Preimage), VIEW_H / 3.);
+        assert!(vp.hit(Side::Preimage, 10.).is_none());
     }
 
     #[test]
@@ -1006,13 +1006,13 @@ mod tests {
         let (_, old, new, ops) = cases().remove(1);
         let layout = build(&old, &new, ops, None);
         let vp = Viewport::new(&layout, VIEW_H / 3. + 30., VIEW_H, ROW_H);
-        assert_eq!(vp.top(Side::Old), 30.);
-        assert_eq!(vp.visible_rows(Side::Old), 1..17);
-        let Some(Row::Line(l)) = vp.hit(Side::Old, 0.) else {
+        assert_eq!(vp.top(Side::Preimage), 30.);
+        assert_eq!(vp.visible_rows(Side::Preimage), 1..17);
+        let Some(Row::Line(l)) = vp.hit(Side::Preimage, 0.) else {
             panic!("line at pane top");
         };
         assert_eq!(l.ln, 2);
-        assert_eq!(vp.row_at_anchor(Side::Old), Some(6));
+        assert_eq!(vp.row_at_anchor(Side::Preimage), Some(6));
     }
 
     /// 30 Equal, 2 inserted, 30 Equal; both Equal runs fold.
@@ -1065,17 +1065,17 @@ mod tests {
         let mut fold = FoldState::collapsed();
         let collapsed = build(&old, &new, ops.clone(), Some(&fold));
         // Old rows: L1-3, ~, L28-30, L31-33, ~, L58-60. Put old row 8 (L32) on the anchor.
-        let s = s_for_content(&collapsed, Side::Old, 8.5 * ROW_H, ROW_H, 0.);
+        let s = s_for_content(&collapsed, Side::Preimage, 8.5 * ROW_H, ROW_H, 0.);
         let vp = Viewport::new(&collapsed, s, VIEW_H, ROW_H);
         let cap = vp.capture_anchor().expect("anchor line");
-        assert_eq!((cap.side, cap.ln), (Side::Old, 32));
-        let before = view_y(&collapsed, vp.s(), Side::Old, 32);
+        assert_eq!((cap.side, cap.ln), (Side::Preimage, 32));
+        let before = view_y(&collapsed, vp.s(), Side::Preimage, 32);
 
         fold.expand(0);
         let expanded = build(&old, &new, ops.clone(), Some(&fold));
         let s2 = s_for_anchor(&expanded, cap, VIEW_H, ROW_H, vp.s()).unwrap();
         assert_eq!(
-            view_y(&expanded, s2, Side::Old, 32),
+            view_y(&expanded, s2, Side::Preimage, 32),
             before,
             "expand keeps L32"
         );
@@ -1097,18 +1097,18 @@ mod tests {
         let (old, new, ops) = folded_case();
         let collapsed = build(&old, &new, ops.clone(), Some(&FoldState::collapsed()));
         // Old row 10 is the second separator.
-        let s = s_for_content(&collapsed, Side::Old, 10.5 * ROW_H, ROW_H, 0.);
+        let s = s_for_content(&collapsed, Side::Preimage, 10.5 * ROW_H, ROW_H, 0.);
         let vp = Viewport::new(&collapsed, s, VIEW_H, ROW_H);
-        let at = vp.row_at_anchor(Side::Old).unwrap();
+        let at = vp.row_at_anchor(Side::Preimage).unwrap();
         assert!(matches!(collapsed.old.row(at), Some(Row::Omit(_))));
         let cap = vp.capture_anchor().unwrap();
-        assert_eq!((cap.side, cap.ln), (Side::Old, 33));
-        let before = view_y(&collapsed, vp.s(), Side::Old, 33);
+        assert_eq!((cap.side, cap.ln), (Side::Preimage, 33));
+        let before = view_y(&collapsed, vp.s(), Side::Preimage, 33);
         let mut fold = FoldState::collapsed();
         fold.expand(2);
         let expanded = build(&old, &new, ops, Some(&fold));
         let s2 = s_for_anchor(&expanded, cap, VIEW_H, ROW_H, vp.s()).unwrap();
-        assert_eq!(view_y(&expanded, s2, Side::Old, 33), before);
+        assert_eq!(view_y(&expanded, s2, Side::Preimage, 33), before);
     }
 
     #[test]
@@ -1119,12 +1119,12 @@ mod tests {
         fold.expand(2);
         let layout = build(&old, &new, ops, Some(&fold));
         let target = layout.hunk_lands[0].target;
-        assert_eq!((target.side, target.ln), (Side::New, 31));
+        assert_eq!((target.side, target.ln), (Side::Postimage, 31));
         let s = s_for_target(&layout, target, ROW_H, 0.).unwrap();
-        assert_eq!(view_y(&layout, s, Side::New, 31), VIEW_H / 3.);
+        assert_eq!(view_y(&layout, s, Side::Postimage, 31), VIEW_H / 3.);
         // The old side shows its seam (after old 30) at the same height.
         let vp = Viewport::new(&layout, s, VIEW_H, ROW_H);
-        assert_eq!(30. * ROW_H - vp.top(Side::Old), VIEW_H / 3.);
+        assert_eq!(30. * ROW_H - vp.top(Side::Preimage), VIEW_H / 3.);
     }
 
     #[test]
@@ -1231,8 +1231,8 @@ mod tests {
     #[test]
     fn enabling_sync_picks_last_scrolled_side_or_old() {
         assert_eq!(shared_x_on_sync_enable([10., 90.], None), 10.);
-        assert_eq!(shared_x_on_sync_enable([10., 90.], Some(Side::Old)), 10.);
-        assert_eq!(shared_x_on_sync_enable([10., 90.], Some(Side::New)), 90.);
+        assert_eq!(shared_x_on_sync_enable([10., 90.], Some(Side::Preimage)), 10.);
+        assert_eq!(shared_x_on_sync_enable([10., 90.], Some(Side::Postimage)), 90.);
     }
 
     #[test]
@@ -1290,7 +1290,7 @@ mod tests {
         let text = "a".repeat(25);
         let layout = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 100., None);
         let vp = Viewport::new(&layout, 0., VIEW_H, ROW_H);
-        let Some(Row::Line(l)) = vp.hit(Side::Old, ROW_H + 2.) else {
+        let Some(Row::Line(l)) = vp.hit(Side::Preimage, ROW_H + 2.) else {
             panic!("continuation row");
         };
         assert_eq!((l.ln, l.part), (1, LinePart::Continuation));
@@ -1300,14 +1300,14 @@ mod tests {
     fn rewrap_pins_logical_line_first_visual_row() {
         let text = "a".repeat(25);
         let layout = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 100., None);
-        let s = s_for_content(&layout, Side::Old, 0., ROW_H, 0.);
-        let before = view_y(&layout, s, Side::Old, 1);
+        let s = s_for_content(&layout, Side::Preimage, 0., ROW_H, 0.);
+        let before = view_y(&layout, s, Side::Preimage, 1);
         let cap = Viewport::new(&layout, s, VIEW_H, ROW_H)
             .capture_anchor()
             .expect("anchor");
         let layout2 = wrap_layout(&text, &text, vec![eq(1, 1, 1)], 50., None);
         let s2 = s_for_rewrap(&layout2, cap, VIEW_H, ROW_H, s).unwrap();
-        assert_eq!(view_y(&layout2, s2, Side::Old, 1), before);
+        assert_eq!(view_y(&layout2, s2, Side::Preimage, 1), before);
     }
 
     #[test]
@@ -1321,7 +1321,7 @@ mod tests {
         assert!(layout.old.rows() >= 4);
         let first = layout.old.row_of_line(2).unwrap();
         assert!(first > 0, "wrapped line not at content y 0");
-        let s = s_for_content(&layout, Side::Old, (first + 1) as f32 * ROW_H, ROW_H, 0.);
+        let s = s_for_content(&layout, Side::Preimage, (first + 1) as f32 * ROW_H, ROW_H, 0.);
         let cap = Viewport::new(&layout, s, H, ROW_H)
             .capture_anchor()
             .expect("anchor on continuation");
@@ -1329,14 +1329,14 @@ mod tests {
         let layout2 = wrap_layout(&text, &text, ops, 50., None);
         assert!(layout2.old.rows() > layout.old.rows());
         let vp1 = Viewport::new(&layout, s, H, ROW_H);
-        let Some(Row::Line(at_cap)) = vp1.hit(Side::Old, H / 3.) else {
+        let Some(Row::Line(at_cap)) = vp1.hit(Side::Preimage, H / 3.) else {
             panic!("setup: row on anchor");
         };
         assert_eq!(at_cap.part, LinePart::Continuation);
 
         let s2 = s_for_rewrap(&layout2, cap, H, ROW_H, s).unwrap();
         let vp2 = Viewport::new(&layout2, s2, H, ROW_H);
-        let Some(Row::Line(l)) = vp2.hit(Side::Old, H / 3.) else {
+        let Some(Row::Line(l)) = vp2.hit(Side::Preimage, H / 3.) else {
             panic!("first row on anchor");
         };
         assert_eq!((l.ln, l.part), (2, LinePart::First));
@@ -1349,7 +1349,7 @@ mod tests {
         let layout = wrap_layout(&old, &new, vec![eq(1, 1, 1)], 100., None);
         let pad_row = layout.new.lines()[2].row as usize;
         let vp = Viewport::new(&layout, 0., VIEW_H, ROW_H);
-        let Some(Row::Line(l)) = vp.hit(Side::New, pad_row as f32 * ROW_H + 1.) else {
+        let Some(Row::Line(l)) = vp.hit(Side::Postimage, pad_row as f32 * ROW_H + 1.) else {
             panic!("padding row");
         };
         assert!(l.is_equal_padding());
@@ -1374,10 +1374,10 @@ mod tests {
             .get(&15)
             .expect("line 15 wraps")
             .breaks[0];
-        let row = layout.row_of_match_byte(Side::Old, 15, b).unwrap();
-        let s = s_for_match_byte(&layout, Side::Old, 15, b, H, ROW_H, 0.).unwrap();
+        let row = layout.row_of_match_byte(Side::Preimage, 15, b).unwrap();
+        let s = s_for_match_byte(&layout, Side::Preimage, 15, b, H, ROW_H, 0.).unwrap();
         let vp = Viewport::new(&layout, s, H, ROW_H);
-        let view_y = row as f32 * ROW_H - vp.top(Side::Old);
+        let view_y = row as f32 * ROW_H - vp.top(Side::Preimage);
         assert!(
             (view_y - H / 2.).abs() < 1.,
             "search land should center; got view_y={view_y}, want {}",
@@ -1403,15 +1403,15 @@ mod tests {
         let collapsed = wrap_layout(&old, &new, ops.clone(), 40., Some(&fold));
         assert!(collapsed.old.rows() > 12, "lines should wrap");
         let row = collapsed.old.row_of_line(8).unwrap() as f32;
-        let s = s_for_content(&collapsed, Side::Old, row * ROW_H, ROW_H, 0.);
+        let s = s_for_content(&collapsed, Side::Preimage, row * ROW_H, ROW_H, 0.);
         let cap = Viewport::new(&collapsed, s, VIEW_H, ROW_H)
             .capture_anchor()
             .expect("anchor");
-        let before = view_y(&collapsed, s, Side::Old, 8);
+        let before = view_y(&collapsed, s, Side::Preimage, 8);
         fold.expand(0);
         let expanded = wrap_layout(&old, &new, ops, 40., Some(&fold));
         let s2 = s_for_anchor(&expanded, cap, VIEW_H, ROW_H, s).unwrap();
-        assert_eq!(view_y(&expanded, s2, Side::Old, 8), before);
+        assert_eq!(view_y(&expanded, s2, Side::Preimage, 8), before);
     }
 
     #[test]
@@ -1436,6 +1436,6 @@ mod tests {
         let s = s_for_target(&layout, target, ROW_H, 0.).unwrap();
         let vp = Viewport::new(&layout, s, H, ROW_H);
         let row = layout.new.row_of_line(2).unwrap() as f32;
-        assert!((row * ROW_H - vp.top(Side::New) - H / 3.).abs() < 0.01);
+        assert!((row * ROW_H - vp.top(Side::Postimage) - H / 3.).abs() < 0.01);
     }
 }

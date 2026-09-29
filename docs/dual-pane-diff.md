@@ -38,7 +38,7 @@ While scrolling down:
 
 Scrolling up reverses the same three steps.
 
-- Side-by-side: Old | center gutter | New
+- Side-by-side: Preimage | center gutter | Postimage
 - Each pane has its own vertical scrollbar. The old pane’s bar is on the outer left; the new pane’s bar is on the outer right.
 - Independent line numbers (two columns in the center gutter, CLion-like)
 - Horizontal scroll if a line overflows (§3.1.2); none while soft wrap is on
@@ -68,8 +68,8 @@ Settled 2026-09-29.
 
 | Kind | Visual |
 |------|--------|
-| Insert (add) | New-side tint (green). The connector uses that same green on both ends |
-| Delete | Old-side tint (grey). The connector uses that same grey on both ends |
+| Insert (add) | Postimage-side tint (green). The connector uses that same green on both ends |
+| Delete | Preimage-side tint (grey). The connector uses that same grey on both ends |
 | Replace (modify) | Both sides the same blue, including the connector |
 | Equal | Neutral; used as anchors |
 | Gap (no line on that side) | Diagonal hatch (true hatch, not `╱` stand-in) |
@@ -92,8 +92,8 @@ The gutter is the **primary** position UI. It must encode:
 
 | Alignment op | What the user must perceive |
 |--------------|----------------------------|
-| **Insert** | New line numbers; insertion anchored **between** two old lines (or file start / file end). Connector pinches to a point / edge on the old side and opens on the new side |
-| **Delete** | Old line numbers; deletion point on the new side. Connector opens on old, pinches on new |
+| **Insert** | Postimage line numbers; insertion anchored **between** two preimage lines (or file start / file end). Connector pinches to a point / edge on the preimage side and opens on the postimage side |
+| **Delete** | Preimage line numbers; deletion point on the postimage side. Connector opens on preimage, pinches on postimage |
 | **Replace** | One bridge covering the whole Hunk (olds block ↔ news block). **Not** a stack of implied 1:1 row links |
 | **Equal** | Accurate paired line numbers (old N ↔ new M); stable visual anchors |
 | **Pairwise** (optional refinement on Replace) | Only when reliable: thin links or labels `old N → new M` inside the block |
@@ -104,7 +104,7 @@ Connector ends use each side’s current viewport Y, so a bridge slants while on
 ### 3.5 Navigation & view options
 
 - **Hunk jump**: previous / next Hunk. The Hunk’s first visual line — on the side that has lines — is placed on the viewport anchor (§3.1, about one third down) and the scroll gap is the gap at that line. The other side shows its corresponding line, or its seam when it has no line there, at that same height. If that line lies in a collapsed Equal span, expand that span on both sides first, then place the line using the row counts after expansion.
-- **In-file search**: find occurrences (byte ranges) in old and/or new text, scoped by two orthogonal factors — **Side** (`Old` / `New` / `Both`) and **Files** (`File` = current path only / `All` = every changed path in tree order). Default on open: New + File. Tab cycles Side; Shift-Tab toggles Files. Changing either factor recomputes immediately and selects the first hit. Query edits recompute after ~150ms debounce. Match order: file-tree → (Both: Old before New) → line → byte start. Jumping expands a collapsed Equal that hides the line (same as Hunk jump), then lands the match at **viewport center** (Hunk jumps stay on the §3.1 one-third anchor). Non-current hits use a light highlight; the current hit is darker with a selection ring and a short pulse on land. When Files=All and the hit is on another path, select that path and open its diff first.
+- **In-file search**: find occurrences (byte ranges) in old and/or new text, scoped by two orthogonal factors — **Side** (`Preimage` / `Postimage` / `Both`) and **Files** (`File` = current path only / `All` = every changed path in tree order). Default on open: Postimage + File. Tab cycles Side; Shift-Tab toggles Files. Changing either factor recomputes immediately and selects the first hit. Query edits recompute after ~150ms debounce. Match order: file-tree → (Both: Preimage before Postimage) → line → byte start. Jumping expands a collapsed Equal that hides the line (same as Hunk jump), then lands the match at **viewport center** (Hunk jumps stay on the §3.1 one-third anchor). Non-current hits use a light highlight; the current hit is darker with a selection ring and a short pulse on land. When Files=All and the hit is on another path, select that path and open its diff first.
 - **Font size**: increase / decrease / reset for the dual-pane mono text. The base size is the persisted Code Font size setting; A−/A+ are session-only per-pane overrides, `A` returns to the setting, and a change of the setting resets every pane to it
 - **Ignore whitespace**: `ViewOptions.ignore_whitespace` wired into `compute_alignment` and a Diff UI toggle; changing it **recomputes Alignment** (same Comparison identity — see CONTEXT ViewOptions)
 

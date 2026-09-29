@@ -77,8 +77,8 @@ impl Drafting {
     }
 }
 
-/// A LineSpan as the dock and the comments list name it: `new L3` for one
-/// line, `new L3–5` for a span.
+/// A LineSpan as the dock and the comments list name it: `postimage L3` for one
+/// line, `postimage L3–5` for a span.
 fn span_label(side: Side, start: u32, count: u32) -> String {
     if count <= 1 {
         format!("{} L{start}", side.label())
@@ -134,7 +134,7 @@ pub struct DiffView {
     soft_wrap: bool,
     /// In-file search query; empty = no hits. Mirrored from [`Self::search_field`].
     search_query: String,
-    /// Side factor: Old / New / Both. Default on open: New.
+    /// Side factor: Preimage / Postimage / Both. Default on open: Postimage.
     search_side: SearchSide,
     /// Files factor: current file or all changed paths. Default on open: File.
     search_files: SearchFiles,
@@ -261,7 +261,7 @@ impl DiffView {
             ),
             soft_wrap: crate::settings_store::soft_wrap(&crate::settings_store::load_file()),
             search_query: String::new(),
-            search_side: SearchSide::New,
+            search_side: SearchSide::Postimage,
             search_files: SearchFiles::File,
             searching: false,
             search_match_index: None,
@@ -566,7 +566,7 @@ impl DiffView {
 
     fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.searching = true;
-        self.search_side = SearchSide::New;
+        self.search_side = SearchSide::Postimage;
         self.search_files = SearchFiles::File;
         self.set_drafting(None, cx);
         let handle = self.search_field.read(cx).focus_handle(cx);
@@ -1682,18 +1682,18 @@ fn render_side_segment(side: SearchSide, cx: &mut Context<DiffView>) -> impl Int
     search_seg_track()
         .id("search-side")
         .child(search_seg_btn(
-            "search-side-old",
-            "Old",
-            side == SearchSide::Old,
+            "search-side-preimage",
+            "Preimage",
+            side == SearchSide::Preimage,
             cx,
-            cx.listener(|this, _, _, cx| this.set_search_side(SearchSide::Old, cx)),
+            cx.listener(|this, _, _, cx| this.set_search_side(SearchSide::Preimage, cx)),
         ))
         .child(search_seg_btn(
-            "search-side-new",
-            "New",
-            side == SearchSide::New,
+            "search-side-postimage",
+            "Postimage",
+            side == SearchSide::Postimage,
             cx,
-            cx.listener(|this, _, _, cx| this.set_search_side(SearchSide::New, cx)),
+            cx.listener(|this, _, _, cx| this.set_search_side(SearchSide::Postimage, cx)),
         ))
         .child(search_seg_btn(
             "search-side-both",
@@ -2246,30 +2246,30 @@ mod tests {
 
     #[test]
     fn span_label_names_one_line_and_a_range() {
-        assert_eq!(span_label(Side::New, 3, 1), "new L3");
-        assert_eq!(span_label(Side::Old, 3, 3), "old L3–5");
+        assert_eq!(span_label(Side::Postimage, 3, 1), "postimage L3");
+        assert_eq!(span_label(Side::Preimage, 3, 3), "preimage L3–5");
         // A zero count can only come from a bad write; still not a range.
-        assert_eq!(span_label(Side::New, 7, 0), "new L7");
+        assert_eq!(span_label(Side::Postimage, 7, 0), "postimage L7");
     }
 
     #[test]
     fn selection_matches_span_by_side_and_inclusive_end() {
         let span = LineSpan { start: 3, count: 3 };
         assert!(selection_matches_span(
-            Some((Side::New, 3, 5)),
-            Side::New,
+            Some((Side::Postimage, 3, 5)),
+            Side::Postimage,
             span
         ));
         assert!(!selection_matches_span(
-            Some((Side::Old, 3, 5)),
-            Side::New,
+            Some((Side::Preimage, 3, 5)),
+            Side::Postimage,
             span
         ));
         assert!(!selection_matches_span(
-            Some((Side::New, 3, 4)),
-            Side::New,
+            Some((Side::Postimage, 3, 4)),
+            Side::Postimage,
             span
         ));
-        assert!(!selection_matches_span(None, Side::New, span));
+        assert!(!selection_matches_span(None, Side::Postimage, span));
     }
 }

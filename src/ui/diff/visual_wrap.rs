@@ -33,8 +33,8 @@ pub struct AppliedWrap {
 impl AppliedWrap {
     pub fn breaks(&self, side: crate::domain::Side, ln: u32) -> Option<&WrapBreaks> {
         match side {
-            crate::domain::Side::Old => self.old_breaks.get(&ln),
-            crate::domain::Side::New => self.new_breaks.get(&ln),
+            crate::domain::Side::Preimage => self.old_breaks.get(&ln),
+            crate::domain::Side::Postimage => self.new_breaks.get(&ln),
         }
     }
 }
@@ -122,8 +122,8 @@ impl<'a> WrapCtx<'a> {
         which: crate::domain::Side,
     ) -> u32 {
         let (width, store) = match which {
-            crate::domain::Side::Old => (self.old_w, &mut self.old_breaks),
-            crate::domain::Side::New => (self.new_w, &mut self.new_breaks),
+            crate::domain::Side::Preimage => (self.old_w, &mut self.old_breaks),
+            crate::domain::Side::Postimage => (self.new_w, &mut self.new_breaks),
         };
         let n = line_visual_rows(side_text, &bytes, width, ln, store, self.cw, None);
         push_wrapped_rows(side, ln, kind, bytes, block, n, 0);

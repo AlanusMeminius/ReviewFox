@@ -158,7 +158,7 @@ pub struct LineSpan {
     pub count: u32,
 }
 
-/// How old and new lines correspond for one file under ViewOptions.
+/// How preimage and postimage lines correspond for one file under ViewOptions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AlignmentOp {
     Equal {
@@ -235,12 +235,12 @@ pub fn hunk_jump_target(alignment: &Alignment, index: usize) -> Option<HunkJumpT
     let hunk = alignment.hunks().into_iter().nth(index)?;
     if hunk.old.count > 0 {
         Some(HunkJumpTarget {
-            side: Side::Old,
+            side: Side::Preimage,
             ln: hunk.old.start,
         })
     } else if hunk.new.count > 0 {
         Some(HunkJumpTarget {
-            side: Side::New,
+            side: Side::Postimage,
             ln: hunk.new.start,
         })
     } else {
@@ -270,8 +270,8 @@ impl FoldState {
 /// Which side(s) Diff find inspects (§3.5). Orthogonal to [`SearchFiles`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchSide {
-    Old,
-    New,
+    Preimage,
+    Postimage,
     Both,
 }
 
@@ -386,8 +386,8 @@ pub struct SearchFileText<'a> {
 }
 
 /// Case-insensitive occurrence search over one file's old and/or new text.
-/// Empty / whitespace-only query yields no matches. Order: Side (Old before
-/// New when Both) → line number → byte start.
+/// Empty / whitespace-only query yields no matches. Order: Side (Preimage before
+/// Postimage when Both) → line number → byte start.
 pub fn search_file(
     old_text: &str,
     new_text: &str,
@@ -441,22 +441,22 @@ fn search_file_inner(
         }
     };
     match side {
-        SearchSide::Old => take(Side::Old, old_text, &mut out),
-        SearchSide::New => take(Side::New, new_text, &mut out),
+        SearchSide::Preimage => take(Side::Preimage, old_text, &mut out),
+        SearchSide::Postimage => take(Side::Postimage, new_text, &mut out),
         SearchSide::Both => {
-            take(Side::Old, old_text, &mut out);
-            take(Side::New, new_text, &mut out);
+            take(Side::Preimage, old_text, &mut out);
+            take(Side::Postimage, new_text, &mut out);
         }
     }
     out
 }
 
-/// Next Side in Tab cycle: Old → New → Both → Old.
+/// Next Side in Tab cycle: Preimage → Postimage → Both → Preimage.
 pub fn next_search_side(side: SearchSide) -> SearchSide {
     match side {
-        SearchSide::Old => SearchSide::New,
-        SearchSide::New => SearchSide::Both,
-        SearchSide::Both => SearchSide::Old,
+        SearchSide::Preimage => SearchSide::Postimage,
+        SearchSide::Postimage => SearchSide::Both,
+        SearchSide::Both => SearchSide::Preimage,
     }
 }
 
@@ -515,8 +515,8 @@ fn collapsed_equal_containing(
             continue;
         }
         let start = match side {
-            Side::Old => old.start,
-            Side::New => new.start,
+            Side::Preimage => old.start,
+            Side::Postimage => new.start,
         };
         let from = start + EQUAL_CONTEXT;
         let to = start + n - EQUAL_CONTEXT - 1;
@@ -582,15 +582,15 @@ impl Default for DiffFontSize {
 /// Which side of a Comparison a line Anchor refers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Side {
-    Old,
-    New,
+    Preimage,
+    Postimage,
 }
 
 impl Side {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Old => "old",
-            Self::New => "new",
+            Self::Preimage => "preimage",
+            Self::Postimage => "postimage",
         }
     }
 }
@@ -903,13 +903,13 @@ mod tests {
     #[test]
     fn review_adds_line_comment() {
         let mut review = Review::new(fake_comparison());
-        review.add_line_comment("src/a.rs", Side::New, 12, "nits");
+        review.add_line_comment("src/a.rs", Side::Postimage, 12, "nits");
         let c = review.comments_for_path("src/a.rs").next().unwrap();
         assert_eq!(c.body, "nits");
         assert!(matches!(
             &c.anchor,
             Anchor::Line {
-                side: Side::New,
+                side: Side::Postimage,
                 span: LineSpan {
                     start: 12,
                     count: 1
@@ -922,21 +922,21 @@ mod tests {
     #[test]
     fn review_adds_line_span_comment() {
         let mut review = Review::new(fake_comparison());
-        let c = review.add_line_span_comment("src/a.rs", Side::Old, 3, 2, "span nits");
+        let c = review.add_line_span_comment("src/a.rs", Side::Preimage, 3, 2, "span nits");
         assert_eq!(c.id, 1);
         assert_eq!(c.body, "span nits");
         assert_eq!(
             c.anchor,
             Anchor::Line {
                 path: "src/a.rs".into(),
-                side: Side::Old,
+                side: Side::Preimage,
                 span: LineSpan { start: 3, count: 2 },
                 hunk: None,
             }
         );
         assert_eq!(
             c.anchor.lines(),
-            Some((Side::Old, 3..5)),
+            Some((Side::Preimage, 3..5)),
             "span round-trips through Anchor::lines"
         );
     }
@@ -944,10 +944,10 @@ mod tests {
     #[test]
     fn review_add_line_comment_is_count_one_span() {
         let mut review = Review::new(fake_comparison());
-        let via_wrapper = review.add_line_comment("b.rs", Side::New, 9, "one").id;
+        let via_wrapper = review.add_line_comment("b.rs", Side::Postimage, 9, "one").id;
         let mut review2 = Review::new(fake_comparison());
         let via_span = review2
-            .add_line_span_comment("b.rs", Side::New, 9, 1, "one")
+            .add_line_span_comment("b.rs", Side::Postimage, 9, 1, "one")
             .id;
         assert_eq!(
             review.comments[0].anchor, review2.comments[0].anchor,
@@ -961,7 +961,7 @@ mod tests {
     fn review_updates_comment_body_by_id() {
         let mut review = Review::new(fake_comparison());
         let id = review
-            .add_line_span_comment("a.rs", Side::New, 1, 3, "first")
+            .add_line_span_comment("a.rs", Side::Postimage, 1, 3, "first")
             .id;
         let anchor_before = review.comments[0].anchor.clone();
         assert!(review.update_comment_body(id, "second"));
@@ -972,7 +972,7 @@ mod tests {
     #[test]
     fn review_update_comment_body_unknown_id_is_noop() {
         let mut review = Review::new(fake_comparison());
-        review.add_line_comment("a.rs", Side::New, 1, "x");
+        review.add_line_comment("a.rs", Side::Postimage, 1, "x");
         assert!(!review.update_comment_body(99, "nope"));
         assert_eq!(review.comments[0].body, "x");
     }
@@ -981,7 +981,7 @@ mod tests {
     fn review_deletes_comment_by_id() {
         let mut review = Review::new(fake_comparison());
         let id = review
-            .add_line_span_comment("a.rs", Side::New, 1, 2, "gone")
+            .add_line_span_comment("a.rs", Side::Postimage, 1, 2, "gone")
             .id;
         assert!(review.delete_comment(id));
         assert!(review.comments.is_empty());
@@ -990,7 +990,7 @@ mod tests {
     #[test]
     fn review_delete_comment_unknown_id_is_noop() {
         let mut review = Review::new(fake_comparison());
-        review.add_line_comment("a.rs", Side::New, 1, "x");
+        review.add_line_comment("a.rs", Side::Postimage, 1, "x");
         assert!(!review.delete_comment(99));
         assert_eq!(review.comments.len(), 1);
         assert_eq!(review.comments[0].body, "x");
@@ -1000,13 +1000,13 @@ mod tests {
     fn review_delete_comment_leaves_remaining_ids_and_anchors() {
         let mut review = Review::new(fake_comparison());
         let keep_a = review
-            .add_line_span_comment("a.rs", Side::Old, 3, 2, "keep a")
+            .add_line_span_comment("a.rs", Side::Preimage, 3, 2, "keep a")
             .id;
         let drop = review
-            .add_line_span_comment("b.rs", Side::New, 5, 1, "drop")
+            .add_line_span_comment("b.rs", Side::Postimage, 5, 1, "drop")
             .id;
         let keep_b = review
-            .add_line_span_comment("c.rs", Side::New, 7, 3, "keep b")
+            .add_line_span_comment("c.rs", Side::Postimage, 7, 3, "keep b")
             .id;
         let anchor_a = review.comments[0].anchor.clone();
         let anchor_b = review.comments[2].anchor.clone();
@@ -1024,7 +1024,7 @@ mod tests {
     #[test]
     fn review_resets_on_comparison_change() {
         let mut review = Review::new(fake_comparison());
-        review.add_line_comment("a.rs", Side::Old, 1, "x");
+        review.add_line_comment("a.rs", Side::Preimage, 1, "x");
         let mut other = fake_comparison();
         other.head_oid = Oid::from_bytes([3; 20]);
         review.ensure_comparison(other.clone());
@@ -1050,7 +1050,7 @@ mod tests {
         assert_eq!(
             land,
             HunkJumpTarget {
-                side: Side::New,
+                side: Side::Postimage,
                 ln: 3,
             }
         );
@@ -1074,7 +1074,7 @@ mod tests {
         assert_eq!(
             land,
             HunkJumpTarget {
-                side: Side::Old,
+                side: Side::Preimage,
                 ln: 2,
             }
         );
@@ -1227,16 +1227,16 @@ mod tests {
         let new = "alpha\nbeta\nother NEEDLE\n";
 
         assert_eq!(
-            search_file(old, new, "needle", SearchSide::Old),
+            search_file(old, new, "needle", SearchSide::Preimage),
             vec![
                 SearchMatch {
-                    side: Side::Old,
+                    side: Side::Preimage,
                     ln: 2,
                     bytes: 0..6,
                     path: None,
                 },
                 SearchMatch {
-                    side: Side::Old,
+                    side: Side::Preimage,
                     ln: 2,
                     bytes: 12..18,
                     path: None,
@@ -1244,9 +1244,9 @@ mod tests {
             ]
         );
         assert_eq!(
-            search_file(old, new, "needle", SearchSide::New),
+            search_file(old, new, "needle", SearchSide::Postimage),
             vec![SearchMatch {
-                side: Side::New,
+                side: Side::Postimage,
                 ln: 3,
                 bytes: 6..12,
                 path: None,
@@ -1256,19 +1256,19 @@ mod tests {
             search_file(old, new, "needle", SearchSide::Both),
             vec![
                 SearchMatch {
-                    side: Side::Old,
+                    side: Side::Preimage,
                     ln: 2,
                     bytes: 0..6,
                     path: None,
                 },
                 SearchMatch {
-                    side: Side::Old,
+                    side: Side::Preimage,
                     ln: 2,
                     bytes: 12..18,
                     path: None,
                 },
                 SearchMatch {
-                    side: Side::New,
+                    side: Side::Postimage,
                     ln: 3,
                     bytes: 6..12,
                     path: None,
@@ -1280,7 +1280,7 @@ mod tests {
 
     #[test]
     fn search_file_both_orders_old_before_new_then_line_then_byte() {
-        // New has an earlier line hit; Both still lists all Old before all New.
+        // Postimage has an earlier line hit; Both still lists all Preimage before all Postimage.
         let old = "zzz\nx needle\n";
         let new = "needle top\nother\n";
         let hits = search_file(old, new, "needle", SearchSide::Both);
@@ -1288,7 +1288,7 @@ mod tests {
             hits.iter()
                 .map(|m| (m.side, m.ln, m.bytes.start))
                 .collect::<Vec<_>>(),
-            vec![(Side::Old, 2, 2), (Side::New, 1, 0),]
+            vec![(Side::Preimage, 2, 2), (Side::Postimage, 1, 0),]
         );
     }
 
@@ -1311,15 +1311,15 @@ mod tests {
             hits.iter()
                 .map(|m| (m.path.as_deref(), m.side, m.ln))
                 .collect::<Vec<_>>(),
-            vec![(Some("b.rs"), Side::New, 1), (Some("a.rs"), Side::Old, 1),]
+            vec![(Some("b.rs"), Side::Postimage, 1), (Some("a.rs"), Side::Preimage, 1),]
         );
     }
 
     #[test]
     fn search_side_and_files_cycle_helpers() {
-        assert_eq!(next_search_side(SearchSide::Old), SearchSide::New);
-        assert_eq!(next_search_side(SearchSide::New), SearchSide::Both);
-        assert_eq!(next_search_side(SearchSide::Both), SearchSide::Old);
+        assert_eq!(next_search_side(SearchSide::Preimage), SearchSide::Postimage);
+        assert_eq!(next_search_side(SearchSide::Postimage), SearchSide::Both);
+        assert_eq!(next_search_side(SearchSide::Both), SearchSide::Preimage);
         assert_eq!(toggle_search_files(SearchFiles::File), SearchFiles::All);
         assert_eq!(toggle_search_files(SearchFiles::All), SearchFiles::File);
     }
@@ -1364,11 +1364,11 @@ mod tests {
         };
         let mut fold = FoldState::collapsed();
 
-        let plan = match_jump_plan(&alignment, &fold, Side::Old, 5);
+        let plan = match_jump_plan(&alignment, &fold, Side::Preimage, 5);
         assert_eq!(
             plan.target,
             HunkJumpTarget {
-                side: Side::Old,
+                side: Side::Preimage,
                 ln: 5
             }
         );
@@ -1377,7 +1377,7 @@ mod tests {
         // Once expanded, nothing hides the line. Landing row: ui::diff::layout tests.
         fold.expand(0);
         assert_eq!(
-            match_jump_plan(&alignment, &fold, Side::Old, 5).expand,
+            match_jump_plan(&alignment, &fold, Side::Preimage, 5).expand,
             None
         );
     }

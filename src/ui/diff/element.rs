@@ -42,7 +42,7 @@ const ICON_COL: f32 = 18.;
 const ICON_GLYPH: f32 = 12.;
 /// Code text inset from the pane's inner edge.
 pub(super) const TEXT_PAD: f32 = 12.;
-/// Comment marker bar width; hugs the center gutter (Old right / New left).
+/// Comment marker bar width; hugs the center gutter (Preimage right / Postimage left).
 pub(super) const COMMENT_BAR: f32 = 2.;
 const SEAM_H: f32 = 2.;
 const DRAFTING_BG: u32 = 0xdbe4ff;
@@ -181,8 +181,8 @@ impl Geom {
 
     pub fn pane(&self, side: Side) -> Bounds<Pixels> {
         match side {
-            Side::Old => self.old,
-            Side::New => self.new,
+            Side::Preimage => self.old,
+            Side::Postimage => self.new,
         }
     }
 
@@ -195,11 +195,11 @@ impl Geom {
     /// Line-number column of `side`, as window `(left, right)`.
     fn ln_col(&self, side: Side) -> (f32, f32) {
         match side {
-            Side::Old => {
+            Side::Preimage => {
                 let l = f32::from(self.gutter.left());
                 (l, l + self.ln_w)
             }
-            Side::New => {
+            Side::Postimage => {
                 let r = f32::from(self.gutter.right());
                 (r - self.ln_w, r)
             }
@@ -210,11 +210,11 @@ impl Geom {
     /// and starts a comment line-selection drag.
     pub(super) fn gutter_band(&self, side: Side) -> (f32, f32) {
         match side {
-            Side::Old => {
+            Side::Preimage => {
                 let l = f32::from(self.gutter.left());
                 (l, l + self.flat_w())
             }
-            Side::New => {
+            Side::Postimage => {
                 let r = f32::from(self.gutter.right());
                 (r - self.flat_w(), r)
             }
@@ -224,11 +224,11 @@ impl Geom {
     /// Icon slot of `side` over the row band `y0..y1`.
     fn icon_slot(&self, side: Side, y0: f32, y1: f32) -> Bounds<Pixels> {
         let (a, b) = match side {
-            Side::Old => {
+            Side::Preimage => {
                 let x = f32::from(self.gutter.left()) + self.ln_w;
                 (x, x + ICON_COL)
             }
-            Side::New => {
+            Side::Postimage => {
                 let x = f32::from(self.gutter.right()) - self.flat_w();
                 (x, x + ICON_COL)
             }
@@ -241,8 +241,8 @@ impl Geom {
         let pane = self.pane(side);
         let h = (f32::from(pane.size.height) - scrollbar::PAD * 2.).max(0.);
         let x = match side {
-            Side::Old => f32::from(pane.left()),
-            Side::New => f32::from(pane.right()) - scrollbar::TRACK_WIDTH,
+            Side::Preimage => f32::from(pane.left()),
+            Side::Postimage => f32::from(pane.right()) - scrollbar::TRACK_WIDTH,
         };
         Bounds::new(
             point(px(x), pane.top() + px(scrollbar::PAD)),
@@ -275,11 +275,11 @@ pub(super) fn top_at(geom: &ThumbGeom, thumb_top: f32) -> f32 {
 }
 
 /// COMMENT_BAR x range and left text inset when the bar is shown.
-/// Old hugs the pane's right (gutter) edge; New hugs the left (gutter) edge.
+/// Preimage hugs the pane's right (gutter) edge; Postimage hugs the left (gutter) edge.
 pub(super) fn comment_bar_layout(side: Side, pane_left: f32, pane_right: f32) -> (f32, f32, f32) {
     match side {
-        Side::Old => (pane_right - COMMENT_BAR, pane_right, 0.),
-        Side::New => (pane_left, pane_left + COMMENT_BAR, COMMENT_BAR),
+        Side::Preimage => (pane_right - COMMENT_BAR, pane_right, 0.),
+        Side::Postimage => (pane_left, pane_left + COMMENT_BAR, COMMENT_BAR),
     }
 }
 
@@ -453,7 +453,7 @@ pub(super) fn build_frame(
     let view_h = f32::from(geom.bounds.size.height);
     let screen = (view_h / row_h).ceil() as usize;
     let mut keep = [0..0, 0..0];
-    let sides = [Side::Old, Side::New].map(|side| {
+    let sides = [Side::Preimage, Side::Postimage].map(|side| {
         let rows = layout.side(side);
         let visible = vp.visible_rows(side);
         stats.rows[side_ix(side)] = visible.len();
@@ -470,8 +470,8 @@ pub(super) fn build_frame(
         let active_match = decorations.active_match.as_ref();
         let side_spans = highlights[side_ix(side)].as_deref();
         let side_ok = match search_side {
-            crate::domain::SearchSide::Old => side == Side::Old,
-            crate::domain::SearchSide::New => side == Side::New,
+            crate::domain::SearchSide::Preimage => side == Side::Preimage,
+            crate::domain::SearchSide::Postimage => side == Side::Postimage,
             crate::domain::SearchSide::Both => true,
         };
         let mut out = Vec::with_capacity(visible.len());
@@ -660,9 +660,9 @@ pub(super) fn build_frame(
     };
 
     let hitbox = window.insert_hitbox(geom.bounds, HitboxBehavior::Normal);
-    let code = [Side::Old, Side::New]
+    let code = [Side::Preimage, Side::Postimage]
         .map(|side| window.insert_hitbox(geom.pane(side), HitboxBehavior::Normal));
-    let icons = [Side::Old, Side::New]
+    let icons = [Side::Preimage, Side::Postimage]
         .into_iter()
         .flat_map(|side| {
             sides[side_ix(side)]
@@ -938,8 +938,8 @@ fn icon_mark_for(
 
 fn side_ix(side: Side) -> usize {
     match side {
-        Side::Old => 0,
-        Side::New => 1,
+        Side::Preimage => 0,
+        Side::Postimage => 1,
     }
 }
 
@@ -954,8 +954,8 @@ fn kind_bg(kind: Option<LineKind>) -> Rgba {
 
 fn seam_color(side: Side) -> Rgba {
     match side {
-        Side::Old => theme::add_bg(),
-        Side::New => theme::del_bg(),
+        Side::Preimage => theme::add_bg(),
+        Side::Postimage => theme::del_bg(),
     }
 }
 
@@ -995,7 +995,7 @@ impl Frame {
     fn paint(&self, window: &mut Window, cx: &mut App) {
         let geom = self.geom;
         window.paint_quad(fill(geom.bounds, theme::white()));
-        for side in [Side::Old, Side::New] {
+        for side in [Side::Preimage, Side::Postimage] {
             self.paint_code(side, window, cx);
         }
         window.with_content_mask(
@@ -1110,7 +1110,7 @@ impl Frame {
     fn paint_gutter(&self, window: &mut Window, cx: &mut App) {
         let g = self.geom.gutter;
         window.paint_quad(fill(g, theme::white()));
-        for side in [Side::Old, Side::New] {
+        for side in [Side::Preimage, Side::Postimage] {
             // The kind tint runs under the icon slot as well, so the bridge
             // leaves a flat edge past both.
             let (c0, c1) = self.geom.gutter_band(side);
@@ -1126,7 +1126,7 @@ impl Frame {
         }
         paint_bridges(window, &self.bridges, self.geom.flat_w());
         let row_h = px(self.row_h);
-        for side in [Side::Old, Side::New] {
+        for side in [Side::Preimage, Side::Postimage] {
             let (c0, c1) = self.geom.ln_col(side);
             for row in &self.sides[side_ix(side)].rows {
                 if !row.show_label {
@@ -1136,8 +1136,8 @@ impl Frame {
                 // Old numbers hug the gutter's inner edge from the left column's
                 // right; new numbers start at the right column's left.
                 let x = match side {
-                    Side::Old => c1 - LN_PAD - f32::from(label.width),
-                    Side::New => c0 + LN_PAD,
+                    Side::Preimage => c1 - LN_PAD - f32::from(label.width),
+                    Side::Postimage => c0 + LN_PAD,
                 };
                 label
                     .paint(point(px(x), px(row.y0)), row_h, window, cx)
@@ -1533,11 +1533,11 @@ pub(super) fn insert_scrollbar_hitboxes(
     h_tracks: [bool; 2],
     window: &mut Window,
 ) -> ([Option<Hitbox>; 2], [Option<Hitbox>; 2]) {
-    let tracks = [Side::Old, Side::New].map(|side| {
+    let tracks = [Side::Preimage, Side::Postimage].map(|side| {
         v_tracks[side_ix(side)]
             .then(|| window.insert_hitbox(geom.track(side), HitboxBehavior::Normal))
     });
-    let h_tracks = [Side::Old, Side::New].map(|side| {
+    let h_tracks = [Side::Preimage, Side::Postimage].map(|side| {
         h_tracks[side_ix(side)]
             .then(|| window.insert_hitbox(geom.h_track(side), HitboxBehavior::Normal))
     });
@@ -1572,7 +1572,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
         } else if dx != 0. {
             // Horizontal input moves only the pane under the pointer; over
             // the gutter it does nothing.
-            let side = [Side::Old, Side::New]
+            let side = [Side::Preimage, Side::Postimage]
                 .into_iter()
                 .find(|&side| wheel_code[side_ix(side)].is_hovered(window));
             if let Some(side) = side {
@@ -1605,7 +1605,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
             entity.update(cx, |pane, cx| pane.click_comment_icon(mark, cx));
             return;
         }
-        for side in [Side::Old, Side::New] {
+        for side in [Side::Preimage, Side::Postimage] {
             let ix = side_ix(side);
             if down_tracks[ix]
                 .as_ref()
@@ -1617,7 +1617,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                 return;
             }
         }
-        for side in [Side::Old, Side::New] {
+        for side in [Side::Preimage, Side::Postimage] {
             let ix = side_ix(side);
             if down_h_tracks[ix]
                 .as_ref()
@@ -1639,7 +1639,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
         // Comment line selection: center gutter band (ln + icon) only.
         if down_hitbox.is_hovered(window) {
             let x = f32::from(event.position.x);
-            for side in [Side::Old, Side::New] {
+            for side in [Side::Preimage, Side::Postimage] {
                 let (l, r) = geom.gutter_band(side);
                 if x >= l && x < r {
                     entity.update(cx, |pane, cx| pane.press_gutter_select(side, y, cx));
@@ -1648,7 +1648,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
             }
         }
         // Code column: omit-expand click only — never starts a line selection.
-        for side in [Side::Old, Side::New] {
+        for side in [Side::Preimage, Side::Postimage] {
             if down_code[side_ix(side)].is_hovered(window) {
                 entity.update(cx, |pane, cx| pane.press_code(side, y, cx));
                 return;
@@ -1662,7 +1662,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
             return;
         }
         let y = f32::from(event.position.y) - geom.top();
-        let side = [Side::Old, Side::New]
+        let side = [Side::Preimage, Side::Postimage]
             .into_iter()
             .find(|&side| code[side_ix(side)].is_hovered(window));
         entity.update(cx, |pane, cx| pane.release(side, y, cx));
@@ -1674,21 +1674,21 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
             return;
         }
         let pos = event.position;
-        let hovered = [Side::Old, Side::New].map(|side| {
+        let hovered = [Side::Preimage, Side::Postimage].map(|side| {
             tracks[side_ix(side)]
                 .as_ref()
                 .is_some_and(|t| t.is_hovered(window))
         });
-        let h_hovered = [Side::Old, Side::New].map(|side| {
+        let h_hovered = [Side::Preimage, Side::Postimage].map(|side| {
             h_tracks[side_ix(side)]
                 .as_ref()
                 .is_some_and(|t| t.is_hovered(window))
         });
         let in_gutter = hitbox.is_hovered(window) && geom.gutter.contains(&pos);
         let y = f32::from(pos.y) - geom.top();
-        let track_y = [Side::Old, Side::New].map(|side| f32::from(pos.y - geom.track(side).top()));
+        let track_y = [Side::Preimage, Side::Postimage].map(|side| f32::from(pos.y - geom.track(side).top()));
         let h_track_x =
-            [Side::Old, Side::New].map(|side| f32::from(pos.x - geom.h_track(side).left()));
+            [Side::Preimage, Side::Postimage].map(|side| f32::from(pos.x - geom.h_track(side).left()));
         entity.update(cx, |pane, cx| {
             pane.mouse_moved(
                 PointerMove {
@@ -1712,17 +1712,17 @@ mod tests {
     #[test]
     fn comment_bar_hugs_the_center_gutter() {
         let (left, right) = (100., 400.);
-        let (old_x0, old_x1, old_inset) = comment_bar_layout(Side::Old, left, right);
+        let (old_x0, old_x1, old_inset) = comment_bar_layout(Side::Preimage, left, right);
         assert_eq!((old_x0, old_x1), (right - COMMENT_BAR, right));
         assert_eq!(
             old_inset, 0.,
-            "Old bar is on the right; text needs no left inset"
+            "Preimage bar is on the right; text needs no left inset"
         );
-        let (new_x0, new_x1, new_inset) = comment_bar_layout(Side::New, left, right);
+        let (new_x0, new_x1, new_inset) = comment_bar_layout(Side::Postimage, left, right);
         assert_eq!((new_x0, new_x1), (left, left + COMMENT_BAR));
         assert_eq!(
             new_inset, COMMENT_BAR,
-            "New bar is on the left; text clears it"
+            "Postimage bar is on the left; text clears it"
         );
     }
 
@@ -1751,44 +1751,44 @@ mod tests {
     #[test]
     fn filled_icon_belongs_to_the_comment_starting_on_the_line() {
         // Two comments on `new`, one on `old`; the middle one spans 8..=10.
-        let starts = [(Side::New, 3, 1), (Side::New, 8, 2), (Side::Old, 3, 3)];
-        assert_eq!(comment_start_id(&starts, Side::New, 3), Some(1));
-        assert_eq!(comment_start_id(&starts, Side::Old, 3), Some(3));
-        assert_eq!(comment_start_id(&starts, Side::New, 8), Some(2));
+        let starts = [(Side::Postimage, 3, 1), (Side::Postimage, 8, 2), (Side::Preimage, 3, 3)];
+        assert_eq!(comment_start_id(&starts, Side::Postimage, 3), Some(1));
+        assert_eq!(comment_start_id(&starts, Side::Preimage, 3), Some(3));
+        assert_eq!(comment_start_id(&starts, Side::Postimage, 8), Some(2));
         // Inside a span but not its start: no icon, only the COMMENT_BAR.
-        assert_eq!(comment_start_id(&starts, Side::New, 9), None);
-        assert_eq!(comment_start_id(&starts, Side::Old, 8), None);
-        assert_eq!(comment_start_id(&[], Side::New, 3), None);
+        assert_eq!(comment_start_id(&starts, Side::Postimage, 9), None);
+        assert_eq!(comment_start_id(&starts, Side::Preimage, 8), None);
+        assert_eq!(comment_start_id(&[], Side::Postimage, 3), None);
     }
 
     #[test]
     fn overlapping_starts_pick_the_first_comment() {
-        let starts = [(Side::New, 4, 7), (Side::New, 4, 9)];
-        assert_eq!(comment_start_id(&starts, Side::New, 4), Some(7));
+        let starts = [(Side::Postimage, 4, 7), (Side::Postimage, 4, 9)];
+        assert_eq!(comment_start_id(&starts, Side::Postimage, 4), Some(7));
     }
 
     #[test]
     fn one_slot_per_line_goes_to_the_comment_over_the_selection() {
-        let starts = [(Side::New, 5, 1)];
+        let starts = [(Side::Postimage, 5, 1)];
         // Selection start with nothing on it: the offer to create one.
         assert_eq!(
-            icon_mark_for(&starts, Side::New, 9, true),
+            icon_mark_for(&starts, Side::Postimage, 9, true),
             Some(IconMark::Empty)
         );
         // A comment's start line keeps its filled bubble, selection or not.
         assert_eq!(
-            icon_mark_for(&starts, Side::New, 5, false),
+            icon_mark_for(&starts, Side::Postimage, 5, false),
             Some(IconMark::Filled(1))
         );
         assert_eq!(
-            icon_mark_for(&starts, Side::New, 5, true),
+            icon_mark_for(&starts, Side::Postimage, 5, true),
             Some(IconMark::Filled(1)),
             "filled wins the slot when the selection starts on a comment's start"
         );
         // Neither: an ordinary line has no icon at all.
-        assert_eq!(icon_mark_for(&starts, Side::New, 9, false), None);
+        assert_eq!(icon_mark_for(&starts, Side::Postimage, 9, false), None);
         // Same line number on the other side is a different place.
-        assert_eq!(icon_mark_for(&starts, Side::Old, 5, false), None);
+        assert_eq!(icon_mark_for(&starts, Side::Preimage, 5, false), None);
     }
 
     #[test]

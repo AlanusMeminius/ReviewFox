@@ -129,7 +129,7 @@ pub const FIND_CONTENT_PAD: f32 = FIND_BAR_INSET + FIND_BAR_HEIGHT;
 // shadow / translucent fill); only its height differs, because it stacks a
 // meta row over a taller body field.
 
-/// Meta row above the draft field: `DraftComment · new L3–5` plus the key hints.
+/// Meta row above the draft field: `DraftComment · postimage L3–5` plus the key hints.
 pub const DRAFT_META_HEIGHT: f32 = 22.;
 /// Gap between the dock's meta row and its field.
 pub const DRAFT_DOCK_GAP: f32 = 6.;

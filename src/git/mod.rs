@@ -673,8 +673,8 @@ fn open_repo(comparison: &Comparison) -> Result<git2::Repository> {
 pub fn side_lines(comparison: &Comparison, side: Side, path: &str) -> Result<Vec<String>> {
     let repo = open_repo(comparison)?;
     let oid = match side {
-        Side::Old => comparison.base_oid,
-        Side::New => Some(comparison.head_oid),
+        Side::Preimage => comparison.base_oid,
+        Side::Postimage => Some(comparison.head_oid),
     };
     let bytes = blob_text_at(&repo, oid, path)?.unwrap_or_default();
     if is_binary(&bytes) {
@@ -1178,12 +1178,12 @@ mod tests {
             other => panic!("expected text diff, got {other:?}"),
         }
         assert!(
-            side_lines(&bb.comparison, Side::Old, "a.txt")
+            side_lines(&bb.comparison, Side::Preimage, "a.txt")
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            side_lines(&bb.comparison, Side::New, "a.txt").unwrap(),
+            side_lines(&bb.comparison, Side::Postimage, "a.txt").unwrap(),
             vec!["one".to_string()]
         );
 

@@ -309,7 +309,7 @@ fn frame(layout: &Layout, scroll_s: &mut f32, dy: f32) -> usize {
     *scroll_s = viewport::clamp_s(layout, *scroll_s + dy, VIEW_H, ROW_H);
     let vp = Viewport::new(layout, *scroll_s, VIEW_H, ROW_H).snapped(SCALE);
     let mut visible = 0;
-    for side in [Side::Old, Side::New] {
+    for side in [Side::Preimage, Side::Postimage] {
         let rows = layout.side(side);
         let range = vp.visible_rows(side);
         visible += range.len();

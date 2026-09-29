@@ -161,31 +161,31 @@ impl Bridge {
     /// A seam is `(seam, seam)`.
     pub fn rows(&self, side: Side) -> (u32, u32) {
         match (*self, side) {
-            (Self::Insert { old_seam, .. }, Side::Old) => (old_seam, old_seam),
+            (Self::Insert { old_seam, .. }, Side::Preimage) => (old_seam, old_seam),
             (
                 Self::Insert {
                     new_from, new_to, ..
                 },
-                Side::New,
+                Side::Postimage,
             ) => (new_from, new_to),
             (
                 Self::Delete {
                     old_from, old_to, ..
                 },
-                Side::Old,
+                Side::Preimage,
             ) => (old_from, old_to),
-            (Self::Delete { new_seam, .. }, Side::New) => (new_seam, new_seam),
+            (Self::Delete { new_seam, .. }, Side::Postimage) => (new_seam, new_seam),
             (
                 Self::Replace {
                     old_from, old_to, ..
                 },
-                Side::Old,
+                Side::Preimage,
             ) => (old_from, old_to),
             (
                 Self::Replace {
                     new_from, new_to, ..
                 },
-                Side::New,
+                Side::Postimage,
             ) => (new_from, new_to),
         }
     }
@@ -215,8 +215,8 @@ pub struct ScrollKnot {
 impl ScrollKnot {
     pub fn y(&self, side: Side) -> u32 {
         match side {
-            Side::Old => self.old_y,
-            Side::New => self.new_y,
+            Side::Preimage => self.old_y,
+            Side::Postimage => self.new_y,
         }
     }
 }
@@ -588,7 +588,7 @@ impl Layout {
                         LineKind::Insert,
                         None,
                         wrap.as_deref_mut(),
-                        Side::New,
+                        Side::Postimage,
                     );
                     advance(&mut knots, 0, d_new);
                     old.seams.push(old_seam);
@@ -612,7 +612,7 @@ impl Layout {
                         LineKind::Delete,
                         None,
                         wrap.as_deref_mut(),
-                        Side::Old,
+                        Side::Preimage,
                     );
                     advance(&mut knots, d_old, 0);
                     new.seams.push(new_seam);
@@ -682,8 +682,8 @@ impl Layout {
 
     pub fn side(&self, side: Side) -> &SideLayout {
         match side {
-            Side::Old => &self.old,
-            Side::New => &self.new,
+            Side::Preimage => &self.old,
+            Side::Postimage => &self.new,
         }
     }
 
@@ -714,14 +714,14 @@ impl Layout {
             return None;
         };
         let marks = self.marks[block].get_or_init(|| {
-            let old_texts = self.block_texts(Side::Old, old_from, old_to);
-            let new_texts = self.block_texts(Side::New, new_from, new_to);
+            let old_texts = self.block_texts(Side::Preimage, old_from, old_to);
+            let new_texts = self.block_texts(Side::Postimage, new_from, new_to);
             let (old, new) = replace_marks(&old_texts, &new_texts);
             BlockMarks { old, new }
         });
         let (parts, line_span) = match side {
-            Side::Old => (&marks.old, olds),
-            Side::New => (&marks.new, news),
+            Side::Preimage => (&marks.old, olds),
+            Side::Postimage => (&marks.new, news),
         };
         parts
             .get(line.ln.checked_sub(line_span.start)? as usize)
@@ -758,8 +758,8 @@ impl Layout {
                 continue;
             };
             let set = match side {
-                Side::Old => &mut self.old.commented,
-                Side::New => &mut self.new.commented,
+                Side::Preimage => &mut self.old.commented,
+                Side::Postimage => &mut self.new.commented,
             };
             set.extend(lines);
         }
@@ -888,7 +888,7 @@ fn push_replace_block(
                 ln,
                 LineKind::Replace,
                 block,
-                Side::Old,
+                Side::Preimage,
             );
         }
         for i in 0..news.count {
@@ -900,7 +900,7 @@ fn push_replace_block(
                 ln,
                 LineKind::Replace,
                 block,
-                Side::New,
+                Side::Postimage,
             );
         }
     } else {
@@ -926,11 +926,11 @@ fn advance(knots: &mut Vec<ScrollKnot>, d_old: u32, d_new: u32) {
 
 fn land_from_op(op: &AlignmentOp) -> Option<HunkJumpTarget> {
     let old = |ln| HunkJumpTarget {
-        side: Side::Old,
+        side: Side::Preimage,
         ln,
     };
     let new = |ln| HunkJumpTarget {
-        side: Side::New,
+        side: Side::Postimage,
         ln,
     };
     match *op {
@@ -1425,7 +1425,7 @@ ab	c
             "line 5 hidden while collapsed"
         );
 
-        let plan = crate::domain::match_jump_plan(&alignment, &fold, Side::Old, 5);
+        let plan = crate::domain::match_jump_plan(&alignment, &fold, Side::Preimage, 5);
         assert_eq!(plan.expand, Some(0));
         fold.expand(0);
         let expanded = Layout::build(
@@ -1466,14 +1466,14 @@ ab	c
             vec![
                 HunkLand {
                     target: HunkJumpTarget {
-                        side: Side::New,
+                        side: Side::Postimage,
                         ln: 2
                     },
                     s: 1,
                 },
                 HunkLand {
                     target: HunkJumpTarget {
-                        side: Side::Old,
+                        side: Side::Preimage,
                         ln: 4
                     },
                     s: 5,
@@ -1507,13 +1507,13 @@ ab	c
                 .map(|p| p.text.clone())
                 .collect()
         };
-        assert_eq!(changed(Side::Old), ["10"]);
-        assert_eq!(changed(Side::New), ["40"]);
+        assert_eq!(changed(Side::Preimage), ["10"]);
+        assert_eq!(changed(Side::Postimage), ["40"]);
         assert!(layout.marks[0].get().is_some());
         let old_line = &layout.old.lines()[0];
-        assert_eq!(layout.mark_runs(Side::Old, old_line), Some(vec![(16, 18)]));
+        assert_eq!(layout.mark_runs(Side::Preimage, old_line), Some(vec![(16, 18)]));
         // Equal lines have no marks.
-        assert!(layout.marks(Side::Old, &layout.old.lines()[1]).is_none());
+        assert!(layout.marks(Side::Preimage, &layout.old.lines()[1]).is_none());
     }
 
     #[test]
@@ -1531,7 +1531,7 @@ ab	c
             .old
             .lines()
             .iter()
-            .flat_map(|l| layout.marks(Side::Old, l).unwrap())
+            .flat_map(|l| layout.marks(Side::Preimage, l).unwrap())
             .filter(|p| p.changed)
             .map(|p| p.text.as_str())
             .collect();
@@ -1539,7 +1539,7 @@ ab	c
         let new_line = &layout.new.lines()[0];
         assert_eq!(
             layout
-                .marks(Side::New, new_line)
+                .marks(Side::Postimage, new_line)
                 .unwrap()
                 .iter()
                 .filter(|p| p.changed)
@@ -1556,7 +1556,7 @@ ab	c
         let anchors = [
             Anchor::Line {
                 path: "a".into(),
-                side: Side::New,
+                side: Side::Postimage,
                 span: span(3, 2),
                 hunk: None,
             },
@@ -1646,7 +1646,7 @@ ab	c
     fn row_of_match_byte_picks_visual_row() {
         let text = "a".repeat(25);
         let layout = wrap_layout_unfolded(&text, &text, vec![eq(1, 1, 1)], 100.);
-        assert_eq!(layout.row_of_match_byte(Side::Old, 1, 0), Some(0));
+        assert_eq!(layout.row_of_match_byte(Side::Preimage, 1, 0), Some(0));
         let b = layout
             .wrap
             .as_ref()
@@ -1655,13 +1655,13 @@ ab	c
             .get(&1)
             .unwrap()
             .breaks[0];
-        assert_eq!(layout.row_of_match_byte(Side::Old, 1, b), Some(1));
+        assert_eq!(layout.row_of_match_byte(Side::Preimage, 1, b), Some(1));
     }
 
     #[test]
     fn row_of_match_byte_without_wrap_is_first_row() {
         let layout = build("hello\n", "hello\n", vec![eq(1, 1, 1)], None);
-        assert_eq!(layout.row_of_match_byte(Side::Old, 1, 3), Some(0));
+        assert_eq!(layout.row_of_match_byte(Side::Preimage, 1, 3), Some(0));
         assert!(layout.wrap.is_none());
     }
 
@@ -1677,7 +1677,7 @@ ab	c
             breaks.breaks.iter().any(|&b| display >= b),
             "match should fall on a continuation row"
         );
-        let row = layout.row_of_match_byte(Side::Old, 1, match_at).unwrap();
+        let row = layout.row_of_match_byte(Side::Preimage, 1, match_at).unwrap();
         assert!(row > layout.old.row_of_line(1).unwrap());
     }
 

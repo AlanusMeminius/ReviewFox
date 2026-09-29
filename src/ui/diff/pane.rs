@@ -210,7 +210,7 @@ impl DualPane {
             sync_horizontal: true,
             soft_wrap: false,
             search_query: SharedString::default(),
-            search_side: SearchSide::New,
+            search_side: SearchSide::Postimage,
             active_search: None,
             search_pulse_at: None,
             char_widths: HashMap::new(),
@@ -1293,7 +1293,7 @@ impl DualPane {
         let ln_advance = self.ln_advance(window);
         let ln_w = ln_col_width(line_number_digits(self.layout.as_ref()?), ln_advance);
         let geom = Geom::new(bounds, ln_w, self.scale);
-        for side in [Side::Old, Side::New] {
+        for side in [Side::Preimage, Side::Postimage] {
             self.pane_w[side_ix(side)] = f32::from(geom.pane(side).size.width);
         }
         self.sync_wrap_layout(self.pane_w, window, cx);
@@ -1339,7 +1339,7 @@ impl DualPane {
             self.max_x = [0.; 2];
             self.x_offsets = [0.; 2];
         } else {
-            for side in [Side::Old, Side::New] {
+            for side in [Side::Preimage, Side::Postimage] {
                 let ix = side_ix(side);
                 self.widest_seen[ix] = self.widest_seen[ix].max(frame.widest(side));
                 let longest =
@@ -1351,22 +1351,22 @@ impl DualPane {
                 let x = viewport::clamp_x_synced(self.x_offsets[0], self.max_x);
                 self.x_offsets = [x, x];
             } else {
-                for side in [Side::Old, Side::New] {
+                for side in [Side::Preimage, Side::Postimage] {
                     let ix = side_ix(side);
                     self.x_offsets[ix] = viewport::clamp_x(self.x_offsets[ix], self.max_x[ix]);
                 }
             }
         }
-        for side in [Side::Old, Side::New] {
+        for side in [Side::Preimage, Side::Postimage] {
             let ix = side_ix(side);
             frame.set_x_offset(side, viewport::snap(self.x_offsets[ix], self.scale));
         }
-        let v_tracks = [Side::Old, Side::New]
+        let v_tracks = [Side::Preimage, Side::Postimage]
             .map(|side| thumb_for(self.view_h, vp.max_top(side), vp.top(side)).is_some());
         let h_tracks = if self.soft_wrap {
             [false, false]
         } else {
-            [Side::Old, Side::New].map(|side| self.max_x[side_ix(side)] > 0.)
+            [Side::Preimage, Side::Postimage].map(|side| self.max_x[side_ix(side)] > 0.)
         };
         let (tracks, h_track_boxes) = insert_scrollbar_hitboxes(&geom, v_tracks, h_tracks, window);
         frame.tracks = tracks;
@@ -1377,7 +1377,7 @@ impl DualPane {
             .iter()
             .map(|icon| window.insert_hitbox(icon.slot, gpui::HitboxBehavior::Normal))
             .collect();
-        for side in [Side::Old, Side::New] {
+        for side in [Side::Preimage, Side::Postimage] {
             if let Some(g) = self.h_thumb_geom(side) {
                 frame.set_h_thumb(side, g, &self.bars);
             }
@@ -1671,8 +1671,8 @@ pub fn placeholder(msg: &str, cx: &App) -> gpui::AnyElement {
 
 fn side_ix(side: Side) -> usize {
     match side {
-        Side::Old => 0,
-        Side::New => 1,
+        Side::Preimage => 0,
+        Side::Postimage => 1,
     }
 }
 
