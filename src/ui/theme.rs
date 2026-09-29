@@ -76,6 +76,55 @@ pub fn picker_shadow() -> Vec<BoxShadow> {
     ]
 }
 
+/// Floating Diff find bar (prototype B): shadow-only edge, no border.
+pub fn find_bar_shadow() -> Vec<BoxShadow> {
+    let ink = |a: f32| -> Hsla { hsla(220. / 360., 0.38, 0.14, a) };
+    vec![
+        BoxShadow {
+            color: ink(0.08),
+            offset: point(px(0.), px(2.)),
+            blur_radius: px(6.),
+            spread_radius: px(0.),
+        },
+        BoxShadow {
+            color: ink(0.14),
+            offset: point(px(0.), px(8.)),
+            blur_radius: px(24.),
+            spread_radius: px(0.),
+        },
+    ]
+}
+
+/// Soft accent ring for the find input while searching / focused.
+pub fn find_field_focus_ring() -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color: hsla(220. / 360., 0.55, 0.48, 0.28),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(2.),
+    }]
+}
+
+/// Translucent white fill for the floating find bar.
+pub fn find_bar_bg() -> Rgba {
+    Rgba {
+        r: 1.,
+        g: 1.,
+        b: 1.,
+        a: 0.96,
+    }
+}
+
+/// Find capsule corner radius (island keeps [`CHANGES_RADIUS`]).
+pub const FIND_BAR_RADIUS: f32 = 8.;
+/// Inset of the floating find bar from the pane island edges.
+pub const FIND_BAR_TOP: f32 = 8.;
+pub const FIND_BAR_X: f32 = 10.;
+pub const FIND_BAR_HEIGHT: f32 = 36.;
+/// Body top pad when find is open: clears capsule so line 1 can sit under it
+/// (prototype `--find-pad` = sheet padding-top).
+pub const FIND_CONTENT_PAD: f32 = FIND_BAR_TOP + FIND_BAR_HEIGHT;
+
 #[cfg(target_os = "macos")]
 pub const TRAFFIC_LIGHT_TOP_INSET: f32 = 11.;
 #[cfg(target_os = "macos")]

@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use crate::domain::{
     Anchor, ChangedPath, Comparison, DiffFontSize, PathStatus, Review, SearchMatch, SearchScope,
-    Side, ViewOptions, search_file,
+    Side, ViewOptions, next_match_index, prev_match_index, search_file,
 };
 
 use super::appearance::{self, UiTextSize};
@@ -100,6 +100,8 @@ pub struct DiffView {
     search_scope: SearchScope,
     /// When true, keystrokes edit `search_query` (like the draft bar).
     searching: bool,
+    /// 0-based index into [`Self::current_matches`]; `None` until first jump.
+    search_match_index: Option<usize>,
     bounds_sub: Option<gpui::Subscription>,
 }
 
@@ -165,6 +167,7 @@ impl DiffView {
             search_query: String::new(),
             search_scope: SearchScope::Both,
             searching: false,
+            search_match_index: None,
             bounds_sub: None,
         };
         this.with_pane(cx, |pane, cx| {
@@ -307,12 +310,47 @@ impl DiffView {
         self.with_pane(cx, |pane, cx| pane.jump_match(side, ln, cx));
     }
 
+    fn close_search(&mut self, cx: &mut Context<Self>) {
+        self.searching = false;
+        self.search_query.clear();
+        self.search_match_index = None;
+        self.sync_search_to_pane(cx);
+        cx.notify();
+    }
+
+    fn open_search(&mut self, cx: &mut Context<Self>) {
+        self.searching = true;
+        self.set_drafting(None, cx);
+        cx.notify();
+    }
+
+    /// `dir > 0` next, `dir < 0` prev; wraps. Lands and updates `search_match_index`.
+    fn jump_search(&mut self, dir: i32, cx: &mut Context<Self>) {
+        let matches = self.current_matches();
+        let next = if dir < 0 {
+            prev_match_index(matches.len(), self.search_match_index)
+        } else {
+            next_match_index(matches.len(), self.search_match_index)
+        };
+        let Some(i) = next else {
+            self.search_match_index = None;
+            cx.notify();
+            return;
+        };
+        self.search_match_index = Some(i);
+        if let Some(m) = matches.get(i).copied() {
+            self.jump_match(m.side, m.ln, cx);
+        }
+        cx.notify();
+    }
+
     fn cycle_search_scope(&mut self, cx: &mut Context<Self>) {
         self.search_scope = match self.search_scope {
             SearchScope::Both => SearchScope::Old,
             SearchScope::Old => SearchScope::New,
             SearchScope::New => SearchScope::Both,
         };
+        self.search_match_index = None;
         cx.notify();
     }
 
@@ -437,9 +475,8 @@ impl DiffView {
 
     /// Esc: dismiss Find → cancel draft → else close window.
     fn dismiss_or_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.searching {
-            self.searching = false;
-            cx.notify();
+        if has_search(self) {
+            self.close_search(cx);
             return;
         }
         if self.drafting.is_some() {
@@ -467,12 +504,11 @@ impl DiffView {
         if self.searching {
             match event.keystroke.key.as_str() {
                 "enter" => {
-                    if let Some(m) = self.current_matches().into_iter().next() {
-                        self.jump_match(m.side, m.ln, cx);
-                    }
+                    self.jump_search(if mods.shift { -1 } else { 1 }, cx);
                 }
                 "backspace" => {
                     self.search_query.pop();
+                    self.search_match_index = None;
                     self.sync_search_to_pane(cx);
                     cx.notify();
                 }
@@ -484,6 +520,7 @@ impl DiffView {
                     }
                     if let Some(ch) = &event.keystroke.key_char {
                         self.search_query.push_str(ch);
+                        self.search_match_index = None;
                         self.sync_search_to_pane(cx);
                         cx.notify();
                     }
@@ -501,9 +538,7 @@ impl DiffView {
                 "[" => self.jump_hunk(-1, cx),
                 "/" => {
                     // Focus is already on DiffView; open search mode.
-                    self.searching = true;
-                    self.set_drafting(None, cx);
-                    cx.notify();
+                    self.open_search(cx);
                 }
                 _ => {}
             }
@@ -874,15 +909,12 @@ fn render_titlebar(
                     "Find",
                     Some("/".into()),
                     true,
-                    view.searching,
+                    has_search(view),
                     cx.listener(|this, _, _, cx| {
-                        if this.searching {
-                            this.searching = false;
-                            cx.notify();
+                        if has_search(this) {
+                            this.close_search(cx);
                         } else {
-                            this.searching = true;
-                            this.set_drafting(None, cx);
-                            cx.notify();
+                            this.open_search(cx);
                         }
                     }),
                 )))
@@ -1001,8 +1033,7 @@ fn render_tree_pane(
         })
 }
 
-/// Whether the search bar renders above the pane inside the island. Mirrors the
-/// early return in [`render_search_bar`].
+/// Whether the floating find bar is visible over the pane.
 fn has_search(view: &DiffView) -> bool {
     view.searching || !view.search_query.is_empty()
 }
@@ -1025,8 +1056,10 @@ fn has_footer(view: &DiffView) -> bool {
 }
 
 fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
+    let find_open = has_search(view);
     div()
         .id("diff-main")
+        .relative()
         .flex_1()
         .min_w(px(0.))
         .min_h(px(0.))
@@ -1038,136 +1071,152 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
         // The pane paints at the window root (see `pane::slot`) and gpui clips
         // children to the parent rect, not to its radius, so nothing here can round
         // the pane against this card. Wherever the pane is the first or last child,
-        // hold it one radius clear of that edge and let the card draw its own corner;
-        // the search bar and the footer round themselves when they are present.
-        .when(!has_search(view), |island| {
+        // hold it one radius clear of that edge and let the card draw its own corner.
+        // Find is an absolute overlay (not in flex flow) so open/close never changes
+        // island flow height; when open, body top pad clears the capsule instead.
+        .when(!find_open, |island| {
             island.pt(px(theme::CHANGES_RADIUS))
         })
         .when(!has_footer(view), |island| {
             island.pb(px(theme::CHANGES_RADIUS))
         })
+        .child(render_body(view, find_open, cx))
+        // After the body so the absolute capsule paints above the clearance spacer.
         .child(render_search_bar(view, cx))
-        .child(render_body(view, cx))
         .child(render_comments(view, cx))
         .child(render_draft_bar(view, appearance::code_font(cx), cx))
 }
 
 fn render_search_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     let mono = appearance::code_font(cx);
-    if !view.searching && view.search_query.is_empty() {
+    if !has_search(view) {
         return div().into_any_element();
     }
     let matches = view.current_matches();
-    let (scope_icon, scope_label) = match view.search_scope {
-        SearchScope::Old => ("square_minus.svg", "Search Old Side"),
-        SearchScope::New => ("square_plus.svg", "Search New Side"),
-        SearchScope::Both => ("diff.svg", "Search Both Sides"),
-    };
+    let total = matches.len();
+    let current = view
+        .search_match_index
+        .filter(|&i| i < total)
+        .map(|i| i + 1)
+        .unwrap_or(0);
     let query_display = if view.searching {
         format!("{}▌", view.search_query)
     } else {
         view.search_query.clone()
     };
-    let hint = if view.searching {
-        "Find — type, Tab scope, Enter first hit, Esc close"
-    } else {
-        "Find"
-    };
+    let count = format!("{current}/{total}");
+    let focused = view.searching;
 
+    // Absolute overlay: sits in the body's FIND_CONTENT_PAD band so pane::slot
+    // (painted after the shell) does not cover it. Shadow-only edge, radius 8.
+    // Controls match prototype B: input | Find | n/N | prev | next | close.
+    // Scope still cycles with Tab (no chrome button).
     div()
-        .flex_none()
-        .border_b_1()
-        .border_color(theme::line())
-        .bg(rgb(0xfafbfd))
-        // Always the island's first child; match the card radius.
-        .rounded_t(px(theme::CHANGES_RADIUS))
-        .px_3()
-        .py_1()
+        .absolute()
+        .top(px(theme::FIND_BAR_TOP))
+        .left(px(theme::FIND_BAR_X))
+        .right(px(theme::FIND_BAR_X))
+        .h(px(theme::FIND_BAR_HEIGHT))
         .flex()
-        .flex_col()
-        .gap_1()
+        .items_center()
+        .gap_2()
+        .px(px(10.))
+        .rounded(px(theme::FIND_BAR_RADIUS))
+        .bg(theme::find_bar_bg())
+        .shadow(theme::find_bar_shadow())
         .child(
             div()
+                .flex_1()
+                .min_w(px(0.))
+                .h(px(28.))
+                .px_2()
                 .flex()
                 .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .ui_text_size(12., cx)
-                        .text_color(theme::muted())
-                        .child(hint.to_string()),
-                )
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme::line())
+                .when(focused, |field| field.shadow(theme::find_field_focus_ring()))
                 .child(
                     div()
                         .flex_1()
                         .min_w(px(0.))
-                        .font_family(mono.clone())
+                        .font_family(mono)
                         .text_xs()
                         .text_color(theme::text())
                         .child(query_display),
-                )
-                .child(
-                    IconButton::new("search-scope", scope_icon, scope_label)
-                        .shortcut("Tab")
-                        .pressed(true)
-                        .on_click(cx.listener(|this, _, _, cx| this.cycle_search_scope(cx))),
-                )
-                .child(
-                    div()
-                        .ui_text_size(12., cx)
-                        .text_color(theme::muted())
-                        .child(format!("{} hit{}", matches.len(), if matches.len() == 1 { "" } else { "s" })),
                 ),
         )
-        .when(!matches.is_empty(), |bar| {
-            bar.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .children(matches.into_iter().enumerate().map(|(i, m)| {
-                        let side = m.side;
-                        let ln = m.ln;
-                        let label = format!("{} {ln}", m.side.label());
-                        div()
-                            .id(("hit", i))
-                            .h(theme::TOGGLE_SIZE)
-                            .px_2()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .ui_text_size(12., cx)
-                            .text_color(theme::muted())
-                            .hover(|button| button.bg(theme::hover()))
-                            .active(|button| button.bg(rgb(0xdfe3e9)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.jump_match(side, ln, cx);
-                            }))
-                            .child(label)
-                    })),
-            )
-        })
+        .child(
+            IconButton::new("search-run", "search.svg", "Find")
+                .shortcut("Enter")
+                .disabled(total == 0)
+                .on_click(cx.listener(|this, _, _, cx| this.jump_search(1, cx))),
+        )
+        .child(
+            div()
+                .flex_none()
+                .ui_text_size(12., cx)
+                .text_color(if total == 0 {
+                    theme::faint()
+                } else {
+                    theme::muted()
+                })
+                .child(count),
+        )
+        .child(
+            IconButton::new("search-prev", "chevron_up.svg", "Previous Match")
+                .shortcut("Shift-Enter")
+                .disabled(total == 0)
+                .on_click(cx.listener(|this, _, _, cx| this.jump_search(-1, cx))),
+        )
+        .child(
+            IconButton::new("search-next", "chevron_down.svg", "Next Match")
+                .shortcut("Enter")
+                .disabled(total == 0)
+                .on_click(cx.listener(|this, _, _, cx| this.jump_search(1, cx))),
+        )
+        .child(
+            IconButton::new("search-close", "close.svg", "Close Find")
+                .shortcut("Esc")
+                .on_click(cx.listener(|this, _, _, cx| this.close_search(cx))),
+        )
         .into_any_element()
 }
 
 /// The pane's place in the shell. The pane itself is mounted over it by
 /// `pane::slot`, so a pane frame never re-renders the shell.
-fn render_body(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
+///
+/// When find is open, a leading spacer clears the floating capsule so the
+/// measured slot (and DualPane) starts below the bar. Top lines stay reachable
+/// without putting the find chrome in flex flow (no island height jitter).
+fn render_body(view: &DiffView, find_open: bool, cx: &mut Context<DiffView>) -> impl IntoElement {
     match view.snapshot.as_ref().map(|s| &s.file) {
         Some(FileDiff::Text { .. }) => {
             let slot = view.pane_bounds.clone();
             div()
                 .id("diff-pane-slot")
-                .relative()
                 .flex_1()
                 .min_h(px(0.))
+                .flex()
+                .flex_col()
+                .when(find_open, |body| {
+                    body.child(
+                        div()
+                            .id("diff-find-clearance")
+                            .flex_none()
+                            .h(px(theme::FIND_CONTENT_PAD)),
+                    )
+                })
                 .child(
-                    canvas(move |bounds, _, _| slot.set(Some(bounds)), |_, _, _, _| {})
-                        .absolute()
-                        .size_full(),
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .child(
+                            canvas(move |bounds, _, _| slot.set(Some(bounds)), |_, _, _, _| {})
+                                .absolute()
+                                .size_full(),
+                        ),
                 )
                 .into_any_element()
         }

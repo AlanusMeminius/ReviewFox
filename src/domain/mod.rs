@@ -333,6 +333,28 @@ fn ci_match_range(line: &str, start_byte: usize, needle: &str) -> Option<std::op
     Some(start_byte..end)
 }
 
+/// Next wrap index into a match list of `len`. No current selection → first (0).
+pub fn next_match_index(len: usize, current: Option<usize>) -> Option<usize> {
+    if len == 0 {
+        None
+    } else {
+        Some(current.map(|i| (i + 1) % len).unwrap_or(0))
+    }
+}
+
+/// Previous wrap index into a match list of `len`. No current selection → last.
+pub fn prev_match_index(len: usize, current: Option<usize>) -> Option<usize> {
+    if len == 0 {
+        None
+    } else {
+        Some(
+            current
+                .map(|i| if i == 0 { len - 1 } else { i - 1 })
+                .unwrap_or(len - 1),
+        )
+    }
+}
+
 /// Case-insensitive substring search over old and/or new text.
 /// Empty / whitespace-only query yields no matches.
 pub fn search_file(
@@ -1008,6 +1030,20 @@ mod tests {
             ]
         );
         assert!(search_file(old, new, "  ", SearchScope::Both).is_empty());
+    }
+
+    #[test]
+    fn match_index_nav_wraps_and_handles_empty() {
+        assert_eq!(next_match_index(0, None), None);
+        assert_eq!(prev_match_index(0, Some(0)), None);
+
+        assert_eq!(next_match_index(3, None), Some(0));
+        assert_eq!(next_match_index(3, Some(0)), Some(1));
+        assert_eq!(next_match_index(3, Some(2)), Some(0));
+
+        assert_eq!(prev_match_index(3, None), Some(2));
+        assert_eq!(prev_match_index(3, Some(0)), Some(2));
+        assert_eq!(prev_match_index(3, Some(1)), Some(0));
     }
 
     #[test]
