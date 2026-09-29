@@ -95,16 +95,16 @@ The gutter is the **primary** position UI. It must encode:
 | **Insert** | Postimage line numbers; insertion anchored **between** two preimage lines (or file start / file end). Connector pinches to a point / edge on the preimage side and opens on the postimage side |
 | **Delete** | Preimage line numbers; deletion point on the postimage side. Connector opens on preimage, pinches on postimage |
 | **Replace** | One bridge covering the whole Hunk (olds block ↔ news block). **Not** a stack of implied 1:1 row links |
-| **Equal** | Accurate paired line numbers (old N ↔ new M); stable visual anchors |
+| **Equal** | Accurate paired line numbers (preimage N ↔ postimage M); stable visual anchors |
 | **Pairwise** (optional refinement on Replace) | Only when reliable: thin links or labels `old N → new M` inside the block |
-| **Hover / focus copy** (assist) | Short text restating the same facts, e.g. “Insert new 16–18 after old 15”, “Replace old 20–22 ↔ new 21” — never a second source of truth |
+| **Hover / focus copy** (assist) | Short text restating the same facts, e.g. “Insert postimage 16–18 after preimage 15”, “Replace preimage 20–22 ↔ postimage 21” — never a second source of truth |
 
 Connector ends use each side’s current viewport Y, so a bridge slants while one side waits inside a Hunk’s extra rows.
 
 ### 3.5 Navigation & view options
 
 - **Hunk jump**: previous / next Hunk. The Hunk’s first visual line — on the side that has lines — is placed on the viewport anchor (§3.1, about one third down) and the scroll gap is the gap at that line. The other side shows its corresponding line, or its seam when it has no line there, at that same height. If that line lies in a collapsed Equal span, expand that span on both sides first, then place the line using the row counts after expansion.
-- **In-file search**: find occurrences (byte ranges) in old and/or new text, scoped by two orthogonal factors — **Side** (`Preimage` / `Postimage` / `Both`) and **Files** (`File` = current path only / `All` = every changed path in tree order). Default on open: Postimage + File. Tab cycles Side; Shift-Tab toggles Files. Changing either factor recomputes immediately and selects the first hit. Query edits recompute after ~150ms debounce. Match order: file-tree → (Both: Preimage before Postimage) → line → byte start. Jumping expands a collapsed Equal that hides the line (same as Hunk jump), then lands the match at **viewport center** (Hunk jumps stay on the §3.1 one-third anchor). Non-current hits use a light highlight; the current hit is darker with a selection ring and a short pulse on land. When Files=All and the hit is on another path, select that path and open its diff first.
+- **In-file search**: find occurrences (byte ranges) in old and/or postimage text, scoped by two orthogonal factors — **Side** (`Preimage` / `Postimage` / `Both`) and **Files** (`File` = current path only / `All` = every changed path in tree order). Default on open: Postimage + File. Tab cycles Side; Shift-Tab toggles Files. Changing either factor recomputes immediately and selects the first hit. Query edits recompute after ~150ms debounce. Match order: file-tree → (Both: Preimage before Postimage) → line → byte start. Jumping expands a collapsed Equal that hides the line (same as Hunk jump), then lands the match at **viewport center** (Hunk jumps stay on the §3.1 one-third anchor). Non-current hits use a light highlight; the current hit is darker with a selection ring and a short pulse on land. When Files=All and the hit is on another path, select that path and open its diff first.
 - **Font size**: increase / decrease / reset for the dual-pane mono text. The base size is the persisted Code Font size setting; A−/A+ are session-only per-pane overrides, `A` returns to the setting, and a change of the setting resets every pane to it
 - **Ignore whitespace**: `ViewOptions.ignore_whitespace` wired into `compute_alignment` and a Diff UI toggle; changing it **recomputes Alignment** (same Comparison identity — see CONTEXT ViewOptions)
 
@@ -155,7 +155,7 @@ Diff is a **separate page** from `review-shell.html` (full-width Diff window). P
 - Draw insert wedge / delete wedge / replace trapezoid in `.A-gutter`
 - Hover title or side legend with position copy
 - True diagonal gap hatch (CSS already closer than GPUI)
-- Stop implying 1:1 inside replace blocks (demo includes old 5–7 ↔ new 3)
+- Stop implying 1:1 inside replace blocks (demo includes preimage 5–7 ↔ postimage 3)
 
 ### Wave P2 — Fold + hunk jump
 

@@ -60,7 +60,7 @@ pub struct DiffSnapshot {
 }
 
 /// An open DraftComment: which LineSpan the bottom dock is writing to, and
-/// whether it is a new one or an existing body being edited.
+/// whether it is a postimage one or an existing body being edited.
 struct Drafting {
     side: Side,
     start: u32,
@@ -144,7 +144,7 @@ pub struct DiffView {
     search_match_index: Option<usize>,
     /// Pending query recompute (~150ms). Cancelled by Enter / prev / next / factor change.
     search_debounce: Option<Task<()>>,
-    /// Cached old/new texts for All-files find, in tree order.
+    /// Cached preimage/postimage texts for All-files find, in tree order.
     all_search_texts: Option<Vec<(String, Arc<str>, Arc<str>)>>,
     /// Real IME-capable input (same control as Settings); drives `search_query`.
     search_field: Entity<TextField>,
@@ -335,13 +335,13 @@ impl DiffView {
         };
         let FileDiff::Text {
             alignment,
-            old_text,
-            new_text,
+            preimage_text,
+            postimage_text,
         } = &mut snap.file
         else {
             return;
         };
-        *alignment = git::compute_alignment(old_text, new_text, &opts);
+        *alignment = git::compute_alignment(preimage_text, postimage_text, &opts);
     }
 
     fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
@@ -476,10 +476,10 @@ impl DiffView {
                 .map(|p| p.status)
                 .unwrap_or(PathStatus::Modify);
             if let FileDiff::Text {
-                old_text, new_text, ..
+                preimage_text, postimage_text, ..
             } = git::file_diff(&snap.comparison, &path, status, &opts)
             {
-                out.push((path, old_text, new_text));
+                out.push((path, preimage_text, postimage_text));
             }
         }
         self.all_search_texts = Some(out);
@@ -644,12 +644,12 @@ impl DiffView {
         match self.search_files {
             SearchFiles::File => {
                 let Some(FileDiff::Text {
-                    old_text, new_text, ..
+                    preimage_text, postimage_text, ..
                 }) = self.snapshot.as_ref().map(|s| &s.file)
                 else {
                     return Vec::new();
                 };
-                search_file(old_text, new_text, &self.search_query, self.search_side)
+                search_file(preimage_text, postimage_text, &self.search_query, self.search_side)
             }
             SearchFiles::All => {
                 let Some(files) = &self.all_search_texts else {
@@ -657,10 +657,10 @@ impl DiffView {
                 };
                 let inputs: Vec<SearchFileText<'_>> = files
                     .iter()
-                    .map(|(path, old, new)| SearchFileText {
+                    .map(|(path, preimage, postimage)| SearchFileText {
                         path: path.as_str(),
-                        old_text: old.as_ref(),
-                        new_text: new.as_ref(),
+                        preimage_text: preimage.as_ref(),
+                        postimage_text: postimage.as_ref(),
                     })
                     .collect();
                 search_files(&inputs, &self.search_query, self.search_side)
@@ -765,7 +765,7 @@ impl DiffView {
         cx.notify();
     }
 
-    /// Empty gutter icon: write a new DraftComment on the selected LineSpan.
+    /// Empty gutter icon: write a postimage DraftComment on the selected LineSpan.
     fn begin_draft(
         &mut self,
         side: Side,

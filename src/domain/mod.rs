@@ -162,21 +162,21 @@ pub struct LineSpan {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AlignmentOp {
     Equal {
-        old: LineSpan,
-        new: LineSpan,
+        preimage: LineSpan,
+        postimage: LineSpan,
     },
     Insert {
-        after_old: u32,
-        news: LineSpan,
+        after_preimage: u32,
+        postimages: LineSpan,
     },
     Delete {
-        olds: LineSpan,
-        at_new: u32,
+        preimages: LineSpan,
+        at_postimage: u32,
     },
     /// Many-to-many replace; pairwise maps are optional refinement.
     Replace {
-        olds: LineSpan,
-        news: LineSpan,
+        preimages: LineSpan,
+        postimages: LineSpan,
     },
 }
 
@@ -188,8 +188,8 @@ pub struct Alignment {
 /// Contiguous algorithm-produced change block (non-equal ops).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hunk {
-    pub old: LineSpan,
-    pub new: LineSpan,
+    pub preimage: LineSpan,
+    pub postimage: LineSpan,
 }
 
 impl Alignment {
@@ -198,23 +198,23 @@ impl Alignment {
             .iter()
             .filter_map(|op| match op {
                 AlignmentOp::Equal { .. } => None,
-                AlignmentOp::Insert { after_old, news } => Some(Hunk {
-                    old: LineSpan {
-                        start: *after_old,
+                AlignmentOp::Insert { after_preimage, postimages } => Some(Hunk {
+                    preimage: LineSpan {
+                        start: *after_preimage,
                         count: 0,
                     },
-                    new: *news,
+                    postimage: *postimages,
                 }),
-                AlignmentOp::Delete { olds, at_new } => Some(Hunk {
-                    old: *olds,
-                    new: LineSpan {
-                        start: *at_new,
+                AlignmentOp::Delete { preimages, at_postimage } => Some(Hunk {
+                    preimage: *preimages,
+                    postimage: LineSpan {
+                        start: *at_postimage,
                         count: 0,
                     },
                 }),
-                AlignmentOp::Replace { olds, news } => Some(Hunk {
-                    old: *olds,
-                    new: *news,
+                AlignmentOp::Replace { preimages, postimages } => Some(Hunk {
+                    preimage: *preimages,
+                    postimage: *postimages,
                 }),
             })
             .collect()
@@ -229,19 +229,19 @@ pub struct HunkJumpTarget {
     pub ln: u32,
 }
 
-/// Land point for hunk `index` from [`Alignment::hunks`]: Insert → first new
-/// line; Delete → first old line; Replace → first old line if any, else first new.
+/// Land point for hunk `index` from [`Alignment::hunks`]: Insert → first postimage
+/// line; Delete → first preimage line; Replace → first preimage line if any, else first postimage.
 pub fn hunk_jump_target(alignment: &Alignment, index: usize) -> Option<HunkJumpTarget> {
     let hunk = alignment.hunks().into_iter().nth(index)?;
-    if hunk.old.count > 0 {
+    if hunk.preimage.count > 0 {
         Some(HunkJumpTarget {
             side: Side::Preimage,
-            ln: hunk.old.start,
+            ln: hunk.preimage.start,
         })
-    } else if hunk.new.count > 0 {
+    } else if hunk.postimage.count > 0 {
         Some(HunkJumpTarget {
             side: Side::Postimage,
-            ln: hunk.new.start,
+            ln: hunk.postimage.start,
         })
     } else {
         None
@@ -377,24 +377,24 @@ pub fn prev_match_index(len: usize, current: Option<usize>) -> Option<usize> {
     }
 }
 
-/// One path's old/new text for [`search_files`] (tree order).
+/// One path's preimage/postimage text for [`search_files`] (tree order).
 #[derive(Clone, Copy, Debug)]
 pub struct SearchFileText<'a> {
     pub path: &'a str,
-    pub old_text: &'a str,
-    pub new_text: &'a str,
+    pub preimage_text: &'a str,
+    pub postimage_text: &'a str,
 }
 
-/// Case-insensitive occurrence search over one file's old and/or new text.
+/// Case-insensitive occurrence search over one file's preimage and/or postimage text.
 /// Empty / whitespace-only query yields no matches. Order: Side (Preimage before
 /// Postimage when Both) → line number → byte start.
 pub fn search_file(
-    old_text: &str,
-    new_text: &str,
+    preimage_text: &str,
+    postimage_text: &str,
     query: &str,
     side: SearchSide,
 ) -> Vec<SearchMatch> {
-    search_file_inner(old_text, new_text, query, side, None)
+    search_file_inner(preimage_text, postimage_text, query, side, None)
 }
 
 /// Occurrence search over many files in the given order. Each hit carries
@@ -407,8 +407,8 @@ pub fn search_files(
     let mut out = Vec::new();
     for f in files {
         out.extend(search_file_inner(
-            f.old_text,
-            f.new_text,
+            f.preimage_text,
+            f.postimage_text,
             query,
             side,
             Some(f.path.to_string()),
@@ -418,8 +418,8 @@ pub fn search_files(
 }
 
 fn search_file_inner(
-    old_text: &str,
-    new_text: &str,
+    preimage_text: &str,
+    postimage_text: &str,
     query: &str,
     side: SearchSide,
     path: Option<String>,
@@ -441,11 +441,11 @@ fn search_file_inner(
         }
     };
     match side {
-        SearchSide::Preimage => take(Side::Preimage, old_text, &mut out),
-        SearchSide::Postimage => take(Side::Postimage, new_text, &mut out),
+        SearchSide::Preimage => take(Side::Preimage, preimage_text, &mut out),
+        SearchSide::Postimage => take(Side::Postimage, postimage_text, &mut out),
         SearchSide::Both => {
-            take(Side::Preimage, old_text, &mut out);
-            take(Side::Postimage, new_text, &mut out);
+            take(Side::Preimage, preimage_text, &mut out);
+            take(Side::Postimage, postimage_text, &mut out);
         }
     }
     out
@@ -507,16 +507,16 @@ fn collapsed_equal_containing(
         return None;
     }
     for (op_idx, op) in alignment.ops.iter().enumerate() {
-        let AlignmentOp::Equal { old, new } = *op else {
+        let AlignmentOp::Equal { preimage, postimage } = *op else {
             continue;
         };
-        let n = old.count.min(new.count);
+        let n = preimage.count.min(postimage.count);
         if n <= EQUAL_CONTEXT * 2 || fold.expanded.contains(&op_idx) {
             continue;
         }
         let start = match side {
-            Side::Preimage => old.start,
-            Side::Postimage => new.start,
+            Side::Preimage => preimage.start,
+            Side::Postimage => postimage.start,
         };
         let from = start + EQUAL_CONTEXT;
         let to = start + n - EQUAL_CONTEXT - 1;
@@ -744,12 +744,12 @@ pub struct TokenPart {
 
 /// Intra-line marks for a Replace block. Same-line (1↔1) uses LCS token
 /// pairing; many-to-many uses set membership and does not invent row links.
-pub fn replace_marks(olds: &[&str], news: &[&str]) -> (Vec<Vec<TokenPart>>, Vec<Vec<TokenPart>>) {
-    if olds.len() == 1 && news.len() == 1 {
-        let (o, n) = pair_marks(olds[0], news[0]);
+pub fn replace_marks(preimages: &[&str], postimages: &[&str]) -> (Vec<Vec<TokenPart>>, Vec<Vec<TokenPart>>) {
+    if preimages.len() == 1 && postimages.len() == 1 {
+        let (o, n) = pair_marks(preimages[0], postimages[0]);
         (vec![o], vec![n])
     } else {
-        (block_marks(olds, news), block_marks(news, olds))
+        (block_marks(preimages, postimages), block_marks(postimages, preimages))
     }
 }
 
@@ -805,12 +805,12 @@ fn tokenize(s: &str) -> Vec<&str> {
     out
 }
 
-fn pair_marks(old_text: &str, new_text: &str) -> (Vec<TokenPart>, Vec<TokenPart>) {
-    let a = tokenize(old_text);
-    let b = tokenize(new_text);
+fn pair_marks(preimage_text: &str, postimage_text: &str) -> (Vec<TokenPart>, Vec<TokenPart>) {
+    let a = tokenize(preimage_text);
+    let b = tokenize(postimage_text);
     let ca = lcs_changed(&a, &b);
     let cb = lcs_changed(&b, &a);
-    let old = a
+    let preimage = a
         .into_iter()
         .zip(ca)
         .map(|(t, chg)| TokenPart {
@@ -826,7 +826,7 @@ fn pair_marks(old_text: &str, new_text: &str) -> (Vec<TokenPart>, Vec<TokenPart>
             changed: chg && !t.trim().is_empty(),
         })
         .collect();
-    (old, neu)
+    (preimage, neu)
 }
 
 fn block_marks(lines: &[&str], other_lines: &[&str]) -> Vec<Vec<TokenPart>> {
@@ -1037,12 +1037,12 @@ mod tests {
         let alignment = Alignment {
             ops: vec![
                 AlignmentOp::Equal {
-                    old: LineSpan { start: 1, count: 2 },
-                    new: LineSpan { start: 1, count: 2 },
+                    preimage: LineSpan { start: 1, count: 2 },
+                    postimage: LineSpan { start: 1, count: 2 },
                 },
                 AlignmentOp::Insert {
-                    after_old: 2,
-                    news: LineSpan { start: 3, count: 2 },
+                    after_preimage: 2,
+                    postimages: LineSpan { start: 3, count: 2 },
                 },
             ],
         };
@@ -1061,12 +1061,12 @@ mod tests {
         let alignment = Alignment {
             ops: vec![
                 AlignmentOp::Equal {
-                    old: LineSpan { start: 1, count: 1 },
-                    new: LineSpan { start: 1, count: 1 },
+                    preimage: LineSpan { start: 1, count: 1 },
+                    postimage: LineSpan { start: 1, count: 1 },
                 },
                 AlignmentOp::Delete {
-                    olds: LineSpan { start: 2, count: 2 },
-                    at_new: 2,
+                    preimages: LineSpan { start: 2, count: 2 },
+                    at_postimage: 2,
                 },
             ],
         };
@@ -1092,9 +1092,9 @@ mod tests {
     #[test]
     fn changed_runs_bridge_whitespace_between_changed_words() {
         // "old content 10" vs "completely different 10".
-        let (old, new) = replace_marks(&["old content 10"], &["completely different 10"]);
-        assert_eq!(changed_runs(&old[0]), vec![(0, 11)]);
-        assert_eq!(changed_runs(&new[0]), vec![(0, 20)]);
+        let (preimage, postimage) = replace_marks(&["old content 10"], &["completely different 10"]);
+        assert_eq!(changed_runs(&preimage[0]), vec![(0, 11)]);
+        assert_eq!(changed_runs(&postimage[0]), vec![(0, 20)]);
     }
 
     #[test]
@@ -1130,41 +1130,41 @@ mod tests {
     #[test]
     fn changed_runs_use_byte_offsets_for_cjk() {
         // Many-to-many block: "行" appears on the other side and breaks the run.
-        let olds = ["第21行：代码评审 レビュー length"];
-        let news = ["新插入的中文行一", "新插入的中文行二"];
-        let (old, _) = replace_marks(&olds, &news);
-        let line = olds[0];
-        let runs = changed_runs(&old[0]);
+        let preimages = ["第21行：代码评审 レビュー length"];
+        let postimages = ["新插入的中文行一", "新插入的中文行二"];
+        let (preimage, _) = replace_marks(&preimages, &postimages);
+        let line = preimages[0];
+        let runs = changed_runs(&preimage[0]);
         let texts: Vec<&str> = runs.iter().map(|&(a, b)| &line[a..b]).collect();
         assert_eq!(texts, vec!["第21", "：代码评审 レビュー length"]);
     }
 
     #[test]
     fn same_line_replace_marks_differing_tokens() {
-        let (old_marks, new_marks) =
+        let (preimage_marks, postimage_marks) =
             replace_marks(&["int timeoutMs = 10;"], &["int timeoutMs = 40;"]);
-        assert_eq!(old_marks.len(), 1);
-        assert_eq!(new_marks.len(), 1);
-        let old_changed: Vec<&str> = old_marks[0]
+        assert_eq!(preimage_marks.len(), 1);
+        assert_eq!(postimage_marks.len(), 1);
+        let preimage_changed: Vec<&str> = preimage_marks[0]
             .iter()
             .filter(|p| p.changed)
             .map(|p| p.text.as_str())
             .collect();
-        let new_changed: Vec<&str> = new_marks[0]
+        let postimage_changed: Vec<&str> = postimage_marks[0]
             .iter()
             .filter(|p| p.changed)
             .map(|p| p.text.as_str())
             .collect();
-        assert_eq!(old_changed, vec!["10"]);
-        assert_eq!(new_changed, vec!["40"]);
+        assert_eq!(preimage_changed, vec!["10"]);
+        assert_eq!(postimage_changed, vec!["40"]);
         // Unchanged tokens stay unmarked.
         assert!(
-            old_marks[0]
+            preimage_marks[0]
                 .iter()
                 .any(|p| p.text == "timeoutMs" && !p.changed)
         );
         assert!(
-            new_marks[0]
+            postimage_marks[0]
                 .iter()
                 .any(|p| p.text == "timeoutMs" && !p.changed)
         );
@@ -1172,25 +1172,25 @@ mod tests {
 
     #[test]
     fn many_to_many_replace_marks_keep_block_first_rows() {
-        let olds = ["old-a", "old-b", "old-c"];
-        let news = ["new-a"];
-        let (old_marks, new_marks) = replace_marks(&olds, &news);
-        assert_eq!(old_marks.len(), 3, "one mark row per old line — no padding");
+        let preimages = ["old-a", "old-b", "old-c"];
+        let postimages = ["new-a"];
+        let (preimage_marks, postimage_marks) = replace_marks(&preimages, &postimages);
+        assert_eq!(preimage_marks.len(), 3, "one mark row per old line — no padding");
         assert_eq!(
-            new_marks.len(),
+            postimage_marks.len(),
             1,
             "one mark row per new line — no partner invented"
         );
         // Block marks flag tokens absent from the other side; shared "-" / "a" stay unmarked.
-        let old_changed: Vec<&str> = old_marks
+        let preimage_changed: Vec<&str> = preimage_marks
             .iter()
             .flat_map(|line| line.iter())
             .filter(|p| p.changed)
             .map(|p| p.text.as_str())
             .collect();
-        assert_eq!(old_changed, vec!["old", "old", "b", "old", "c"]);
+        assert_eq!(preimage_changed, vec!["old", "old", "b", "old", "c"]);
         assert_eq!(
-            new_marks[0]
+            postimage_marks[0]
                 .iter()
                 .filter(|p| p.changed)
                 .map(|p| p.text.as_str())
@@ -1223,11 +1223,11 @@ mod tests {
 
     #[test]
     fn search_file_lists_occurrence_matches_by_side() {
-        let old = "alpha\nneedle here needle\nomega\n";
-        let new = "alpha\nbeta\nother NEEDLE\n";
+        let preimage = "alpha\nneedle here needle\nomega\n";
+        let postimage = "alpha\nbeta\nother NEEDLE\n";
 
         assert_eq!(
-            search_file(old, new, "needle", SearchSide::Preimage),
+            search_file(preimage, postimage, "needle", SearchSide::Preimage),
             vec![
                 SearchMatch {
                     side: Side::Preimage,
@@ -1244,7 +1244,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            search_file(old, new, "needle", SearchSide::Postimage),
+            search_file(preimage, postimage, "needle", SearchSide::Postimage),
             vec![SearchMatch {
                 side: Side::Postimage,
                 ln: 3,
@@ -1253,7 +1253,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            search_file(old, new, "needle", SearchSide::Both),
+            search_file(preimage, postimage, "needle", SearchSide::Both),
             vec![
                 SearchMatch {
                     side: Side::Preimage,
@@ -1275,15 +1275,15 @@ mod tests {
                 },
             ]
         );
-        assert!(search_file(old, new, "  ", SearchSide::Both).is_empty());
+        assert!(search_file(preimage, postimage, "  ", SearchSide::Both).is_empty());
     }
 
     #[test]
     fn search_file_both_orders_old_before_new_then_line_then_byte() {
         // Postimage has an earlier line hit; Both still lists all Preimage before all Postimage.
-        let old = "zzz\nx needle\n";
-        let new = "needle top\nother\n";
-        let hits = search_file(old, new, "needle", SearchSide::Both);
+        let preimage = "zzz\nx needle\n";
+        let postimage = "needle top\nother\n";
+        let hits = search_file(preimage, postimage, "needle", SearchSide::Both);
         assert_eq!(
             hits.iter()
                 .map(|m| (m.side, m.ln, m.bytes.start))
@@ -1297,13 +1297,13 @@ mod tests {
         let files = [
             SearchFileText {
                 path: "b.rs",
-                old_text: "nope\n",
-                new_text: "needle in b\n",
+                preimage_text: "nope\n",
+                postimage_text: "needle in b\n",
             },
             SearchFileText {
                 path: "a.rs",
-                old_text: "needle in a\n",
-                new_text: "\n",
+                preimage_text: "needle in a\n",
+                postimage_text: "\n",
             },
         ];
         let hits = search_files(&files, "needle", SearchSide::Both);
@@ -1344,18 +1344,18 @@ mod tests {
         let alignment = Alignment {
             ops: vec![
                 AlignmentOp::Equal {
-                    old: LineSpan {
+                    preimage: LineSpan {
                         start: 1,
                         count: 10,
                     },
-                    new: LineSpan {
+                    postimage: LineSpan {
                         start: 1,
                         count: 10,
                     },
                 },
                 AlignmentOp::Insert {
-                    after_old: 10,
-                    news: LineSpan {
+                    after_preimage: 10,
+                    postimages: LineSpan {
                         start: 11,
                         count: 1,
                     },

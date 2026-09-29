@@ -1,4 +1,4 @@
-//! The dual pane (old | gutter | new) as its own Entity, so wheel, scrollbar
+//! The dual pane (preimage | gutter | postimage) as its own Entity, so wheel, scrollbar
 //! drag and hover notify only this view. Its body is one `DualPaneElement`
 //! (element.rs); this file holds the state and the input handling. See
 //! docs/diffview-architecture.md §4–§5.
@@ -45,7 +45,7 @@ pub enum PaneEvent {
     OpenEdit {
         id: u64,
     },
-    /// A gutter-band drag began a new selection, so any open DraftComment is
+    /// A gutter-band drag began a postimage selection, so any open DraftComment is
     /// no longer the user's target.
     SelectionStarted,
     HunkIndexChanged(Option<usize>),
@@ -93,8 +93,8 @@ pub struct PaneComment {
 
 struct PaneFile {
     alignment: Alignment,
-    old_text: Arc<str>,
-    new_text: Arc<str>,
+    preimage_text: Arc<str>,
+    postimage_text: Arc<str>,
 }
 
 /// Owns the per-file diff state: Alignment, fold, Layout, scroll and caches.
@@ -123,7 +123,7 @@ pub struct DualPane {
     /// source. See docs/dual-pane-diff.md §3.1. Kept inside
     /// `viewport::s_range` from the first measured frame on.
     scroll_s: f32,
-    /// Per-side horizontal scroll of the code text, in pixels, `[old, new]`.
+    /// Per-side horizontal scroll of the code text, in pixels, `[preimage, postimage]`.
     /// When [`Self::sync_horizontal`] is on, both stay equal. Independent of
     /// `scroll_s`; moved by horizontal input over a pane (both panes when
     /// synced). Reset on file open, kept (re-clamped) on fold, Alignment, font
@@ -291,25 +291,25 @@ impl DualPane {
         self.file = match file {
             FileDiff::Text {
                 alignment,
-                old_text,
-                new_text,
+                preimage_text,
+                postimage_text,
             } => Some(PaneFile {
                 alignment: alignment.clone(),
-                old_text: old_text.clone(),
-                new_text: new_text.clone(),
+                preimage_text: preimage_text.clone(),
+                postimage_text: postimage_text.clone(),
             }),
             _ => None,
         };
         // Plain text until the background task finishes (or the size guard skips).
         self.highlights = [None, None];
         if let Some(file) = self.file.as_ref() {
-            let first = first_line(&file.new_text).or_else(|| first_line(&file.old_text));
+            let first = first_line(&file.postimage_text).or_else(|| first_line(&file.preimage_text));
             if let Some(lang) = syntax::detect(Path::new(path), first.unwrap_or("")) {
-                let old_text = file.old_text.clone();
-                let new_text = file.new_text.clone();
+                let preimage_text = file.preimage_text.clone();
+                let postimage_text = file.postimage_text.clone();
                 let any_under_guard =
-                    !syntax::exceeds_size_guard(&old_text, syntax::DEFAULT_SIZE_GUARD)
-                        || !syntax::exceeds_size_guard(&new_text, syntax::DEFAULT_SIZE_GUARD);
+                    !syntax::exceeds_size_guard(&preimage_text, syntax::DEFAULT_SIZE_GUARD)
+                        || !syntax::exceeds_size_guard(&postimage_text, syntax::DEFAULT_SIZE_GUARD);
                 if any_under_guard {
                     cx.spawn(async move |this, cx| {
                         let (sides, took) = cx
@@ -326,7 +326,7 @@ impl DualPane {
                                         Some(Arc::from(syntax::highlight(lang, text)))
                                     }
                                 };
-                                ([side(&old_text), side(&new_text)], t.elapsed())
+                                ([side(&preimage_text), side(&postimage_text)], t.elapsed())
                             })
                             .await;
                         this.update(cx, |this, cx| {
@@ -430,7 +430,7 @@ impl DualPane {
 
     /// Icon click. A filled icon names the DraftComment that starts on its line,
     /// so it reopens that body; an empty one only paints on a selection's start
-    /// line, so there always is a selection to hand over as the new span.
+    /// line, so there always is a selection to hand over as the postimage span.
     pub(super) fn click_comment_icon(&mut self, mark: element::IconMark, cx: &mut Context<Self>) {
         match mark {
             element::IconMark::Filled(id) => cx.emit(PaneEvent::OpenEdit { id }),
@@ -480,8 +480,8 @@ impl DualPane {
         let Some(file) = self.file.as_ref() else {
             return;
         };
-        let old_text = file.old_text.clone();
-        let new_text = file.new_text.clone();
+        let preimage_text = file.preimage_text.clone();
+        let postimage_text = file.postimage_text.clone();
         let alignment = file.alignment.clone();
         let t = trace::start();
         let plan = wrap_plan_for_panes(self.pane_w[0], self.pane_w[1]);
@@ -514,13 +514,13 @@ impl DualPane {
             }
             None
         };
-        let mut layout = Layout::build(old_text, new_text, &alignment, Some(&self.fold), wrap);
+        let mut layout = Layout::build(preimage_text, postimage_text, &alignment, Some(&self.fold), wrap);
         layout.set_comments(self.comments.iter().map(|c| &c.anchor));
         debug_assert!(!soft || !can_wrap || layout.wrap.is_some());
         if t.is_some() {
             trace::layout(
                 trace::since(t),
-                [layout.old.rows(), layout.new.rows()],
+                [layout.preimage.rows(), layout.postimage.rows()],
                 layout.bridges.len(),
                 layout.wrap.is_some(),
             );
@@ -592,8 +592,8 @@ impl DualPane {
 
         let width_mismatch = |layout: &Layout| {
             layout.wrap.as_ref().is_none_or(|applied| {
-                applied.plan.old.width_px != code_wrap_width_px(pane_w[0])
-                    || applied.plan.new.width_px != code_wrap_width_px(pane_w[1])
+                applied.plan.preimage.width_px != code_wrap_width_px(pane_w[0])
+                    || applied.plan.postimage.width_px != code_wrap_width_px(pane_w[1])
             })
         };
 
@@ -1384,7 +1384,7 @@ impl DualPane {
         }
         frame.stats.viewport = viewport_took;
         let index = nearest_hunk_index(self.hunk_s.unwrap_or(s / row_h), &layout.hunk_lands);
-        // A new view_h can re-clamp `scroll_s`.
+        // A postimage view_h can re-clamp `scroll_s`.
         self.scroll_s = s;
         if index != self.hunk_index {
             // Emitting mid-draw would not schedule the shell's redraw.

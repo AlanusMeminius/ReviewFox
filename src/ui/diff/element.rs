@@ -1,4 +1,4 @@
-//! `DualPaneElement`: old pane | gutter | new pane as one GPUI Element. Prepaint
+//! `DualPaneElement`: preimage pane | gutter | postimage pane as one GPUI Element. Prepaint
 //! takes the bounds (so `view_h` is this frame's), builds the Viewport and a
 //! paint list for the visible rows only; paint draws that list and registers
 //! the mouse listeners, which go through Viewport hit tests. See
@@ -36,7 +36,7 @@ const LN_DIGIT_PX: f32 = 8.;
 const LN_PAD: f32 = 4.;
 const BRIDGE_COL: f32 = 24.;
 /// Comment-icon slot beside each line-number column, on the bridge side of it
-/// (`old` = number then icon, `new` = icon then number), per the prototype.
+/// (`preimage` = number then icon, `postimage` = icon then number), per the prototype.
 const ICON_COL: f32 = 18.;
 /// Bubble glyph drawn centred in an [`ICON_COL`] slot.
 const ICON_GLYPH: f32 = 12.;
@@ -147,9 +147,9 @@ impl BarState {
 #[derive(Clone, Copy)]
 pub(super) struct Geom {
     pub bounds: Bounds<Pixels>,
-    pub old: Bounds<Pixels>,
+    pub preimage: Bounds<Pixels>,
     pub gutter: Bounds<Pixels>,
-    pub new: Bounds<Pixels>,
+    pub postimage: Bounds<Pixels>,
     pub ln_w: f32,
 }
 
@@ -168,9 +168,9 @@ impl Geom {
         let g1 = (g0 + gutter_w).min(x1);
         Self {
             bounds: rect(x0, x1),
-            old: rect(x0, g0),
+            preimage: rect(x0, g0),
             gutter: rect(g0, g1),
-            new: rect(g1, x1),
+            postimage: rect(g1, x1),
             ln_w,
         }
     }
@@ -181,8 +181,8 @@ impl Geom {
 
     pub fn pane(&self, side: Side) -> Bounds<Pixels> {
         match side {
-            Side::Preimage => self.old,
-            Side::Postimage => self.new,
+            Side::Preimage => self.preimage,
+            Side::Postimage => self.postimage,
         }
     }
 
@@ -236,7 +236,7 @@ impl Geom {
         Bounds::from_corners(point(px(a), px(y0)), point(px(b), px(y1)))
     }
 
-    /// Scrollbar track: old on the outer left, new on the outer right (ADR-0003).
+    /// Scrollbar track: preimage on the outer left, postimage on the outer right (ADR-0003).
     pub fn track(&self, side: Side) -> Bounds<Pixels> {
         let pane = self.pane(side);
         let h = (f32::from(pane.size.height) - scrollbar::PAD * 2.).max(0.);
@@ -294,13 +294,13 @@ pub(super) fn code_wrap_width_px(pane_w: f32) -> f32 {
     (pane_w - TEXT_PAD * 2. - COMMENT_BAR).max(0.)
 }
 
-pub(super) fn wrap_plan_for_panes(old_w: f32, new_w: f32) -> super::layout::WrapPlan {
+pub(super) fn wrap_plan_for_panes(preimage_w: f32, postimage_w: f32) -> super::layout::WrapPlan {
     super::layout::WrapPlan {
-        old: WrapSide {
-            width_px: code_wrap_width_px(old_w),
+        preimage: WrapSide {
+            width_px: code_wrap_width_px(preimage_w),
         },
-        new: WrapSide {
-            width_px: code_wrap_width_px(new_w),
+        postimage: WrapSide {
+            width_px: code_wrap_width_px(postimage_w),
         },
     }
 }
@@ -407,7 +407,7 @@ pub struct Frame {
     pub(super) icon_hitboxes: Vec<Hitbox>,
     sides: [SideFrame; 2],
     bridges: Vec<WinBridge>,
-    /// Omission separator joins: (old y, new y), window.
+    /// Omission separator joins: (preimage y, postimage y), window.
     waves: Vec<(f32, f32)>,
     /// Frame-trace numbers (zeros unless `REVIEWFOX_FRAME_TRACE=1`).
     pub(super) stats: FrameStats,
@@ -633,8 +633,8 @@ pub(super) fn build_frame(
     });
     shapes.retain(&keep);
 
-    let x_l = f32::from(geom.old.right());
-    let x_r = f32::from(geom.new.left());
+    let x_l = f32::from(geom.preimage.right());
+    let x_r = f32::from(geom.postimage.left());
     let (bridges, waves) = if x_r - x_l >= 4. {
         let y = |v: f32| snap(top + v, scale);
         (
@@ -924,7 +924,7 @@ fn comment_start_id(starts: &[(Side, u32, u64)], side: Side, ln: u32) -> Option<
 
 /// The one bubble `(side, ln)` can show. A line has a single slot, so a comment
 /// starting there takes it: reopening an existing comment must stay reachable
-/// even when a new selection starts on the same line.
+/// even when a postimage selection starts on the same line.
 fn icon_mark_for(
     starts: &[(Side, u32, u64)],
     side: Side,
@@ -1134,7 +1134,7 @@ impl Frame {
                 }
                 let Some(label) = &row.label else { continue };
                 // Old numbers hug the gutter's inner edge from the left column's
-                // right; new numbers start at the right column's left.
+                // right; postimage numbers start at the right column's left.
                 let x = match side {
                     Side::Preimage => c1 - LN_PAD - f32::from(label.width),
                     Side::Postimage => c0 + LN_PAD,
@@ -1325,8 +1325,8 @@ fn paint_omit_waves(window: &mut Window, geom: Geom, folds: &[(f32, f32)]) {
     let bounds = geom.bounds;
     let x0 = f32::from(bounds.left());
     let x1 = f32::from(bounds.right());
-    let gutter_l = f32::from(geom.old.right());
-    let gutter_r = f32::from(geom.new.left());
+    let gutter_l = f32::from(geom.preimage.right());
+    let gutter_r = f32::from(geom.postimage.left());
     window.with_content_mask(Some(ContentMask { bounds }), |window| {
         for &(y_l, y_r) in folds {
             // Bend only in the gap between the line-number columns. A slope
@@ -1750,7 +1750,7 @@ mod tests {
 
     #[test]
     fn filled_icon_belongs_to_the_comment_starting_on_the_line() {
-        // Two comments on `new`, one on `old`; the middle one spans 8..=10.
+        // Two comments on `postimage`, one on `preimage`; the middle one spans 8..=10.
         let starts = [(Side::Postimage, 3, 1), (Side::Postimage, 8, 2), (Side::Preimage, 3, 3)];
         assert_eq!(comment_start_id(&starts, Side::Postimage, 3), Some(1));
         assert_eq!(comment_start_id(&starts, Side::Preimage, 3), Some(3));
