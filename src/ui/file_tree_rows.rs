@@ -1,13 +1,15 @@
 //! Shared ChangedPath tree row chrome for main Changes + Diff file trees.
 
 use gpui::{
-    App, Div, ElementId, FontWeight, InteractiveElement, ParentElement, Rgba, SharedString,
-    Stateful, StatefulInteractiveElement, Styled, div, prelude::FluentBuilder, px, rgb, svg,
+    App, Div, ElementId, FontWeight, InteractiveElement, ObjectFit, ParentElement, Rgba,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, StyledImage, div, img,
+    prelude::FluentBuilder, px, rgb, svg,
 };
 
 use crate::domain::{ChangedPath, PathStatus};
 
 use super::appearance::UiTextSize;
+use super::file_icons::file_icon_for_path;
 use super::theme;
 
 /// Capsule corner on tree rows — tighter than `rounded_lg` on a 22px row.
@@ -73,7 +75,7 @@ pub fn dir_row(
                 .justify_center()
                 .child(
                     svg()
-                        .size(theme::ICON_SIZE)
+                        .size(theme::ICON_SIZE_SM)
                         .path(if collapsed {
                             "folder.svg"
                         } else {
@@ -155,10 +157,13 @@ pub fn file_row(
                 .flex()
                 .items_center()
                 .justify_center()
-                .font_family(mono.clone())
-                .code_label_size(px(12.), mono.clone(), cx)
-                .text_color(status_color)
-                .child(status.letter()),
+                // Material icons are multi-colour: `img` keeps native fills, where
+                // `svg().text_color()` would flatten them to one mask colour.
+                .child(
+                    img(file_icon_for_path(&path.path))
+                        .size(theme::ICON_SIZE_SM)
+                        .object_fit(ObjectFit::Contain),
+                ),
         )
         .child(
             div()
@@ -173,6 +178,18 @@ pub fn file_row(
                 .ui_label_size(12., cx)
                 .text_color(name_color)
                 .child(name),
+        )
+        .child(
+            div()
+                .size(px(16.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .font_family(mono.clone())
+                .code_label_size(px(12.), mono.clone(), cx)
+                .text_color(status_color)
+                .child(status.letter()),
         )
         .child(
             div()
