@@ -87,6 +87,13 @@ fn span_label(side: Side, start: u32, count: u32) -> String {
     }
 }
 
+/// Inclusive `(side, start, end)` wash matches this LineSpan.
+fn selection_matches_span(selection: Option<(Side, u32, u32)>, side: Side, span: LineSpan) -> bool {
+    selection.is_some_and(|(sel_side, start, end)| {
+        sel_side == side && start == span.start && end == span.start + span.count.saturating_sub(1)
+    })
+}
+
 /// The Diff window shell: tree, chrome, search bar, comments, draft dock and
 /// Review. The dual pane is its own Entity (`DualPane`), driven by methods
 /// and heard through `PaneEvent`s, so scrolling notifies only the pane.
@@ -181,8 +188,9 @@ impl DiffView {
                 }
                 PaneEvent::OpenEdit { id } => this.begin_edit(*id, window, cx),
                 PaneEvent::SelectionStarted => {
+                    // New gutter drag already owns the wash — only close the dock.
                     if this.drafting.is_some() {
-                        this.cancel_draft(window, cx);
+                        this.close_dock(window, cx);
                     }
                 }
                 PaneEvent::HunkIndexChanged(index) => {
@@ -733,7 +741,7 @@ impl DiffView {
     /// Open the bottom dock on a LineSpan with `body` loaded. Find and draft are
     /// mutually exclusive, so an open find bar is dismissed first. The dock's
     /// span becomes the selection, so the icon that reopens it stays under the
-    /// pointer after a save.
+    /// pointer after a save. Reveals the span start (expand fold / scroll).
     fn open_dock(
         &mut self,
         drafting: Drafting,
@@ -746,7 +754,10 @@ impl DiffView {
         }
         let (side, start, end) = (drafting.side, drafting.start, drafting.end());
         self.set_drafting(Some(drafting), cx);
-        self.with_pane(cx, |pane, cx| pane.select_span(side, start, end, cx));
+        self.with_pane(cx, |pane, cx| {
+            pane.select_span(side, start, end, cx);
+            pane.reveal_line(side, start, cx);
+        });
         self.draft_field
             .update(cx, |field, cx| field.set_content(body, cx));
         let handle = self.draft_field.read(cx).focus_handle(cx);
@@ -776,7 +787,7 @@ impl DiffView {
         );
     }
 
-    /// Filled gutter icon or comments-list row: reopen an existing DraftComment
+    /// Filled gutter icon or island Edit: reopen an existing DraftComment
     /// with its body loaded. Its Anchor is what the dock names, so the span is
     /// the comment's own rather than whatever was selected.
     fn begin_edit(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -806,8 +817,8 @@ impl DiffView {
         }
     }
 
-    /// Esc / new selection: drop the draft, keeping the selection as-is.
-    fn cancel_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Close the draft dock without touching the pane selection wash.
+    fn close_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_drafting(None, cx);
         self.draft_field
             .update(cx, |field, cx| field.set_content("", cx));
@@ -815,19 +826,63 @@ impl DiffView {
         cx.notify();
     }
 
+    /// Esc / cancel button: drop the draft and clear the selection wash.
+    fn cancel_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_dock(window, cx);
+        self.with_pane(cx, |pane, cx| pane.clear_selection(cx));
+    }
+
+    /// Island row body: selection wash on that comment's span, dock stays closed.
+    /// If a draft is open, cancel it first (clears wash), then select this row.
+    /// Reveals the span start when off-screen or inside a collapsed Equal.
+    fn select_comment(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drafting.is_some() {
+            self.cancel_draft(window, cx);
+        }
+        let Some((side, span, _)) = self.comment_target(id) else {
+            return;
+        };
+        let end = span.start + span.count.saturating_sub(1);
+        self.with_pane(cx, |pane, cx| {
+            pane.select_span(side, span.start, end, cx);
+            pane.reveal_line(side, span.start, cx);
+        });
+        cx.notify();
+    }
+
+    /// Immediate delete. Closes the dock if it was editing this id; clears the
+    /// wash if it pointed at this comment's span.
+    fn delete_comment(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drafting.as_ref().and_then(|d| d.editing) == Some(id) {
+            self.close_dock(window, cx);
+        }
+        let clear_wash = self.comment_target(id).is_some_and(|(side, span, _)| {
+            selection_matches_span(self.pane.read(cx).selection(), side, span)
+        });
+        if clear_wash {
+            self.with_pane(cx, |pane, cx| pane.clear_selection(cx));
+        }
+        if let Some(review) = &mut self.review {
+            review.delete_comment(id);
+        }
+        self.refresh_comments(cx);
+        cx.notify();
+    }
+
     /// Enter in the dock: add the span as a DraftComment, or rewrite the body of
-    /// the one being edited. An empty body just closes the dock, so Enter is
-    /// never a way to make a comment blank.
+    /// the one being edited. An empty body closes without writing and clears the
+    /// wash (same as cancel) so Enter is never a way to make a comment blank.
+    /// A real save keeps the selection wash so the island row stays selected.
     fn commit_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(draft) = self.drafting.take() else {
             return;
         };
         let body = self.draft_field.read(cx).content().trim().to_string();
-        // Leaves the selection on the span, so the icon stays easy to hit again.
-        self.cancel_draft(window, cx);
         if body.is_empty() {
+            self.cancel_draft(window, cx);
             return;
         }
+        self.close_dock(window, cx);
         let path = self
             .snapshot
             .as_ref()
@@ -852,7 +907,7 @@ impl DiffView {
         window.remove_window();
     }
 
-    /// Esc: dismiss Find → cancel draft → else close window.
+    /// Esc: Find → cancel draft (clears wash) → clear selection → close window.
     fn dismiss_or_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if has_search(self) {
             self.close_search(window, cx);
@@ -860,6 +915,11 @@ impl DiffView {
         }
         if self.drafting.is_some() {
             self.cancel_draft(window, cx);
+            return;
+        }
+        if self.pane.read(cx).selection().is_some() {
+            self.with_pane(cx, |pane, cx| pane.clear_selection(cx));
+            cx.notify();
             return;
         }
         window.remove_window();
@@ -1439,7 +1499,6 @@ fn draft_dock_h_for(view: &DiffView, cx: &App) -> f32 {
     theme::draft_dock_height(draft_line_count(view, cx))
 }
 
-
 fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     let find_open = has_search(view);
     div()
@@ -1709,7 +1768,8 @@ fn render_body(view: &DiffView, find_open: bool, cx: &mut Context<DiffView>) -> 
 }
 
 /// Right-hand comment island: only when the selected path has DraftComments.
-/// Click a card to reopen edit in the bottom dock (same path as the filled icon).
+/// Row body selects the span (wash + selected styling); Edit / gutter icons open
+/// the dock; Delete removes immediately.
 fn render_comment_island(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     let mono = appearance::code_font(cx);
     let path = view
@@ -1728,7 +1788,7 @@ fn render_comment_island(view: &DiffView, cx: &mut Context<DiffView>) -> impl In
     }
 
     let n = comments.len();
-    let editing_id = view.drafting.as_ref().and_then(|d| d.editing);
+    let selection = view.pane.read(cx).selection();
     let (scroll, sb) = scrollbar::vertical("diff-comments-sb", cx);
 
     div()
@@ -1748,8 +1808,6 @@ fn render_comment_island(view: &DiffView, cx: &mut Context<DiffView>) -> impl In
                 .px(px(12.))
                 .pt(px(10.))
                 .pb(px(8.))
-                .border_b_1()
-                .border_color(theme::line())
                 .flex()
                 .items_baseline()
                 .gap_2()
@@ -1771,8 +1829,8 @@ fn render_comment_island(view: &DiffView, cx: &mut Context<DiffView>) -> impl In
             div()
                 .id("diff-comments-scroll")
                 .size_full()
-                .px(px(8.))
-                .py(px(8.))
+                .pt_1()
+                .pb_1()
                 .track_scroll(&scroll)
                 .overflow_y_scroll()
                 .children(comments.into_iter().map(|c| {
@@ -1783,37 +1841,80 @@ fn render_comment_island(view: &DiffView, cx: &mut Context<DiffView>) -> impl In
                         Anchor::File { .. } => "file".into(),
                     };
                     let id = c.id;
-                    let active = editing_id == Some(id);
+                    let selected = match &c.anchor {
+                        Anchor::Line { side, span, .. } => {
+                            selection_matches_span(selection, *side, *span)
+                        }
+                        Anchor::File { .. } => false,
+                    };
                     div()
                         .id(("cmt", c.id as usize))
-                        .w_full()
-                        .mb(px(8.))
-                        .px(px(10.))
-                        .py(px(8.))
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(if active {
-                            theme::accent()
-                        } else {
-                            theme::line()
-                        })
-                        .bg(if active {
-                            theme::selection_wash()
-                        } else {
-                            theme::white()
-                        })
+                        .mx_1()
+                        .my_0p5()
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
                         .cursor_pointer()
-                        .hover(|row| row.bg(theme::hover()))
-                        .on_click(
-                            cx.listener(move |this, _, window, cx| this.begin_edit(id, window, cx)),
-                        )
+                        .when(selected, |row| row.bg(theme::range()))
+                        .hover(move |row| {
+                            if selected {
+                                row.bg(theme::range())
+                            } else {
+                                row.bg(theme::hover())
+                            }
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.select_comment(id, window, cx)
+                        }))
                         .child(
                             div()
-                                .font_family(mono.clone())
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme::accent())
-                                .child(label),
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .font_family(mono.clone())
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(theme::accent())
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .id(("cmt-edit", id as usize))
+                                        .flex_none()
+                                        .px(px(6.))
+                                        .py(px(2.))
+                                        .rounded_md()
+                                        .ui_text_size(11., cx)
+                                        .text_color(theme::muted())
+                                        .hover(|b| b.bg(theme::hover()).text_color(theme::text()))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.begin_edit(id, window, cx);
+                                        }))
+                                        .child("Edit"),
+                                )
+                                .child(
+                                    IconButton::new(
+                                        ("cmt-del", id as usize),
+                                        "trash.svg",
+                                        "Delete DraftComment",
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.delete_comment(id, window, cx);
+                                        },
+                                    )),
+                                ),
                         )
                         .child(
                             div()
@@ -1827,7 +1928,6 @@ fn render_comment_island(view: &DiffView, cx: &mut Context<DiffView>) -> impl In
         ))
         .into_any_element()
 }
-
 
 /// Invisible slot where the bottom draft dock will be painted above DualPane.
 /// Bottom-anchored mirror of [`render_find_measure`].
@@ -2148,7 +2248,7 @@ fn traffic_lights_space() -> Option<Div> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Side, span_label};
+    use super::{LineSpan, Side, selection_matches_span, span_label};
 
     #[test]
     fn span_label_names_one_line_and_a_range() {
@@ -2156,5 +2256,26 @@ mod tests {
         assert_eq!(span_label(Side::Old, 3, 3), "old L3–5");
         // A zero count can only come from a bad write; still not a range.
         assert_eq!(span_label(Side::New, 7, 0), "new L7");
+    }
+
+    #[test]
+    fn selection_matches_span_by_side_and_inclusive_end() {
+        let span = LineSpan { start: 3, count: 3 };
+        assert!(selection_matches_span(
+            Some((Side::New, 3, 5)),
+            Side::New,
+            span
+        ));
+        assert!(!selection_matches_span(
+            Some((Side::Old, 3, 5)),
+            Side::New,
+            span
+        ));
+        assert!(!selection_matches_span(
+            Some((Side::New, 3, 4)),
+            Side::New,
+            span
+        ));
+        assert!(!selection_matches_span(None, Side::New, span));
     }
 }

@@ -709,6 +709,14 @@ impl Review {
         }
     }
 
+    /// Remove a DraftComment by id. Returns `false` if no comment with that id
+    /// exists (no-op). Remaining comments keep their ids and Anchors.
+    pub fn delete_comment(&mut self, id: u64) -> bool {
+        let before = self.comments.len();
+        self.comments.retain(|c| c.id != id);
+        self.comments.len() != before
+    }
+
     pub fn comments_for_path<'a>(
         &'a self,
         path: &'a str,
@@ -967,6 +975,50 @@ mod tests {
         review.add_line_comment("a.rs", Side::New, 1, "x");
         assert!(!review.update_comment_body(99, "nope"));
         assert_eq!(review.comments[0].body, "x");
+    }
+
+    #[test]
+    fn review_deletes_comment_by_id() {
+        let mut review = Review::new(fake_comparison());
+        let id = review
+            .add_line_span_comment("a.rs", Side::New, 1, 2, "gone")
+            .id;
+        assert!(review.delete_comment(id));
+        assert!(review.comments.is_empty());
+    }
+
+    #[test]
+    fn review_delete_comment_unknown_id_is_noop() {
+        let mut review = Review::new(fake_comparison());
+        review.add_line_comment("a.rs", Side::New, 1, "x");
+        assert!(!review.delete_comment(99));
+        assert_eq!(review.comments.len(), 1);
+        assert_eq!(review.comments[0].body, "x");
+    }
+
+    #[test]
+    fn review_delete_comment_leaves_remaining_ids_and_anchors() {
+        let mut review = Review::new(fake_comparison());
+        let keep_a = review
+            .add_line_span_comment("a.rs", Side::Old, 3, 2, "keep a")
+            .id;
+        let drop = review
+            .add_line_span_comment("b.rs", Side::New, 5, 1, "drop")
+            .id;
+        let keep_b = review
+            .add_line_span_comment("c.rs", Side::New, 7, 3, "keep b")
+            .id;
+        let anchor_a = review.comments[0].anchor.clone();
+        let anchor_b = review.comments[2].anchor.clone();
+
+        assert!(review.delete_comment(drop));
+        assert_eq!(review.comments.len(), 2);
+        assert_eq!(review.comments[0].id, keep_a);
+        assert_eq!(review.comments[0].anchor, anchor_a);
+        assert_eq!(review.comments[0].body, "keep a");
+        assert_eq!(review.comments[1].id, keep_b);
+        assert_eq!(review.comments[1].anchor, anchor_b);
+        assert_eq!(review.comments[1].body, "keep b");
     }
 
     #[test]

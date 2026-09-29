@@ -23,8 +23,8 @@ use super::layout::{HunkLand, Layout, Row, WrapPlan};
 use super::trace;
 use super::viewport::{self, Viewport};
 use crate::domain::{
-    Alignment, AlignmentOp, Anchor, DiffFontSize, FoldState, SearchSide, Side, first_match_byte,
-    hunk_jump_target, match_jump_plan,
+    Alignment, AlignmentOp, Anchor, DiffFontSize, FoldState, HunkJumpTarget, SearchSide, Side,
+    first_match_byte, hunk_jump_target, match_jump_plan,
 };
 use crate::git::FileDiff;
 use crate::syntax::{self, Span};
@@ -413,6 +413,21 @@ impl DualPane {
         }
     }
 
+    /// Current selection as `(side, start, end)` inclusive, if any.
+    pub fn selection(&self) -> Option<(Side, u32, u32)> {
+        self.selection.map(LineSelection::span)
+    }
+
+    /// Drop the wash without opening or closing the dock.
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selection.is_none() && self.sel_drag.is_none() {
+            return;
+        }
+        self.selection = None;
+        self.sel_drag = None;
+        cx.notify();
+    }
+
     /// Icon click. A filled icon names the DraftComment that starts on its line,
     /// so it reopens that body; an empty one only paints on a selection's start
     /// line, so there always is a selection to hand over as the new span.
@@ -792,32 +807,50 @@ impl DualPane {
         cx.notify();
     }
 
-    pub fn jump_match(&mut self, side: Side, ln: u32, byte: Option<usize>, cx: &mut Context<Self>) {
-        let Some(file) = self.file.as_ref() else {
+    /// Expand a collapsed Equal that hides `ln` (if any) and scroll so the line
+    /// lands on the §3.1 anchor. Used by island select / edit reopen.
+    pub fn reveal_line(&mut self, side: Side, ln: u32, cx: &mut Context<Self>) {
+        let Some(target) = self.expand_for_line_jump(side, ln) else {
             return;
         };
-        let plan = match_jump_plan(&file.alignment, &self.fold, side, ln);
-        if let Some(id) = plan.expand {
-            self.fold.expand(id);
-            self.mark_wrap_dirty();
-            self.rebuild_layout(None);
-        }
         let Some(layout) = self.layout.as_ref() else {
             return;
         };
         let row_h = self.row_h();
-        let line_text = layout.side(plan.target.side).line_text(plan.target.ln);
+        if self.soft_wrap && (self.wrap_layout_dirty || layout.wrap.is_none()) {
+            self.pending_land = Some(PendingLand::Line(target));
+            cx.notify();
+            return;
+        }
+        let s =
+            viewport::s_for_target(layout, target, row_h, self.scroll_s).unwrap_or(self.scroll_s);
+        self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
+        self.hunk_s = Some(s / row_h);
+        self.sync_hunk_index(cx);
+        self.reveal_bars(cx);
+        cx.notify();
+    }
+
+    pub fn jump_match(&mut self, side: Side, ln: u32, byte: Option<usize>, cx: &mut Context<Self>) {
+        let Some(target) = self.expand_for_line_jump(side, ln) else {
+            return;
+        };
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let row_h = self.row_h();
+        let line_text = layout.side(target.side).line_text(target.ln);
         let byte =
             byte.or_else(|| line_text.and_then(|text| first_match_byte(text, &self.search_query)));
         let defer = self.soft_wrap && (self.wrap_layout_dirty || layout.wrap.is_none());
         if defer {
             self.pending_land = Some(match byte {
                 Some(b) => PendingLand::Match {
-                    side: plan.target.side,
-                    ln: plan.target.ln,
+                    side: target.side,
+                    ln: target.ln,
                     byte: b,
                 },
-                None => PendingLand::Line(plan.target),
+                None => PendingLand::Line(target),
             });
             cx.notify();
             return;
@@ -826,21 +859,33 @@ impl DualPane {
             .and_then(|b| {
                 viewport::s_for_match_byte(
                     layout,
-                    plan.target.side,
-                    plan.target.ln,
+                    target.side,
+                    target.ln,
                     b,
                     self.view_h,
                     row_h,
                     self.scroll_s,
                 )
             })
-            .or_else(|| viewport::s_for_target(layout, plan.target, row_h, self.scroll_s))
+            .or_else(|| viewport::s_for_target(layout, target, row_h, self.scroll_s))
             .unwrap_or(self.scroll_s);
         self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
         self.hunk_s = Some(s / row_h);
         self.sync_hunk_index(cx);
         self.reveal_bars(cx);
         cx.notify();
+    }
+
+    /// Apply [`match_jump_plan`]: expand a collapsed Equal hiding `ln`, return the land target.
+    fn expand_for_line_jump(&mut self, side: Side, ln: u32) -> Option<HunkJumpTarget> {
+        let file = self.file.as_ref()?;
+        let plan = match_jump_plan(&file.alignment, &self.fold, side, ln);
+        if let Some(id) = plan.expand {
+            self.fold.expand(id);
+            self.mark_wrap_dirty();
+            self.rebuild_layout(None);
+        }
+        Some(plan.target)
     }
 
     pub fn set_font_size(&mut self, op: FontOp, cx: &mut Context<Self>) {

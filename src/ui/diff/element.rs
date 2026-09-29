@@ -42,7 +42,7 @@ const ICON_COL: f32 = 18.;
 const ICON_GLYPH: f32 = 12.;
 /// Code text inset from the pane's inner edge.
 pub(super) const TEXT_PAD: f32 = 12.;
-/// Left bar on a commented line; the text moves right by the same amount.
+/// Comment marker bar width; hugs the center gutter (Old right / New left).
 pub(super) const COMMENT_BAR: f32 = 2.;
 const SEAM_H: f32 = 2.;
 const DRAFTING_BG: u32 = 0xdbe4ff;
@@ -272,6 +272,15 @@ pub(super) fn thumb_for(view_h: f32, max_top: f32, top: f32) -> Option<ThumbGeom
 /// Side top that puts the thumb's top edge at `thumb_top` in the track.
 pub(super) fn top_at(geom: &ThumbGeom, thumb_top: f32) -> f32 {
     -f32::from(geom.offset_for(px(thumb_top)))
+}
+
+/// COMMENT_BAR x range and left text inset when the bar is shown.
+/// Old hugs the pane's right (gutter) edge; New hugs the left (gutter) edge.
+pub(super) fn comment_bar_layout(side: Side, pane_left: f32, pane_right: f32) -> (f32, f32, f32) {
+    match side {
+        Side::Old => (pane_right - COMMENT_BAR, pane_right, 0.),
+        Side::New => (pane_left, pane_left + COMMENT_BAR, COMMENT_BAR),
+    }
 }
 
 /// Width a code pane needs to show a line `line_w` wide without clipping:
@@ -1036,9 +1045,10 @@ impl Frame {
                         theme::selection_wash(),
                     ));
                 }
+                let (bar_x0, bar_x1, bar_text_inset) = comment_bar_layout(side, x0, x1);
                 let mut text_x = x0 + TEXT_PAD - frame.x_offset + row.text_leading;
                 if row.commented {
-                    text_x += COMMENT_BAR;
+                    text_x += bar_text_inset;
                 }
                 for &(a, b, is_cur) in &row.search {
                     let y = row.y0 + (self.row_h - mark_h) / 2.;
@@ -1074,10 +1084,10 @@ impl Frame {
                     text.paint(point(px(text_x), px(row.y0)), row_h, window, cx)
                         .ok();
                 }
-                // Row marker, pinned to the pane edge above scrolled text.
+                // Row marker, pinned to the gutter-facing pane edge above scrolled text.
                 if row.commented {
                     window.paint_quad(fill(
-                        hline(x0, x0 + COMMENT_BAR, row.y0, row.y1 - row.y0),
+                        hline(bar_x0, bar_x1, row.y0, row.y1 - row.y0),
                         theme::accent(),
                     ));
                 }
@@ -1698,6 +1708,23 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comment_bar_hugs_the_center_gutter() {
+        let (left, right) = (100., 400.);
+        let (old_x0, old_x1, old_inset) = comment_bar_layout(Side::Old, left, right);
+        assert_eq!((old_x0, old_x1), (right - COMMENT_BAR, right));
+        assert_eq!(
+            old_inset, 0.,
+            "Old bar is on the right; text needs no left inset"
+        );
+        let (new_x0, new_x1, new_inset) = comment_bar_layout(Side::New, left, right);
+        assert_eq!((new_x0, new_x1), (left, left + COMMENT_BAR));
+        assert_eq!(
+            new_inset, COMMENT_BAR,
+            "New bar is on the left; text clears it"
+        );
+    }
 
     #[test]
     fn thumb_drag_round_trips_the_side_top() {
