@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Settled: one omission sine. Each side stays horizontal through its code and line numbers. A height change is a cubic Bézier in the gutter, met at a crest. No fill, no label. -->
+<!-- Settled: one omission sine. Each side stays horizontal through its code and line numbers. A height change eases across the gutter; the sine rides that centerline (phase from x only). No fill, no label. -->
 <!-- Visual mirror of theme.rs + diff_window (frost desk + white island, IBM Plex). -->
 <html lang="en">
 <head>
@@ -765,37 +765,27 @@
       return '<path d="' + d + '" fill="none" stroke="#b5b5b5" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>';
     }
 
-    function waveY(x, base, crestAt) {
-      const phase = crestAt == null
-        ? (x / 16) * Math.PI * 2
-        : ((x - crestAt) / 16) * Math.PI * 2 + Math.PI / 2;
-      return base + Math.sin(phase) * 3.5;
-    }
-
-    function traceWave(x0, x1, base, crestAt) {
-      let d = '';
-      for (let x = x0; x <= x1 + 0.01; x += 2) {
-        const xx = Math.min(x, x1);
-        d += (d ? ' L ' : '') + xx.toFixed(1) + ' ' + waveY(xx, base, crestAt).toFixed(1);
-        if (xx >= x1) break;
-      }
-      return d;
-    }
-
-    // Mirrors joined_wave in src/ui/diff_window.rs. Each sine meets the gutter
-    // cubic at a crest, so the tangent is horizontal on both sides of the join.
+    // Mirrors joined_wave in src/ui/diff/element.rs. Centerline eases in the
+    // gutter (smoothstep); sine rides it with phase from x only.
     function joinedWave(x0, x1, yL, gapL, gapR, yR) {
+      const period = 16, amp = 3.5, step = 2;
       gapL = Math.max(x0, Math.min(gapL, x1));
       gapR = Math.max(gapL + 8, Math.min(gapR, x1));
-      if (Math.abs(yR - yL) < 0.5) return 'M ' + traceWave(x0, x1, yL, null);
-      const y0 = yL + 3.5;
-      const y1 = yR + 3.5;
-      const dx = (gapR - gapL) * 0.45;
-      let d = 'M ' + traceWave(x0, gapL, yL, gapL);
-      d += ' C ' + (gapL + dx).toFixed(1) + ' ' + y0.toFixed(1)
-        + ', ' + (gapR - dx).toFixed(1) + ' ' + y1.toFixed(1)
-        + ', ' + gapR.toFixed(1) + ' ' + y1.toFixed(1);
-      if (gapR < x1) d += ' L ' + traceWave(gapR, x1, yR, gapR);
+      const flat = Math.abs(yR - yL) < 0.5;
+      const yAt = (x) => {
+        if (flat || x <= gapL) return yL;
+        if (x >= gapR) return yR;
+        const t = (x - gapL) / (gapR - gapL);
+        const s = t * t * t * (t * (t * 6 - 15) + 10);
+        return yL + (yR - yL) * s;
+      };
+      let d = '';
+      for (let x = x0; x <= x1 + 0.01; x += step) {
+        const xx = Math.min(x, x1);
+        const y = yAt(xx) + Math.sin((xx / period) * Math.PI * 2) * amp;
+        d += (d ? ' L ' : 'M ') + xx.toFixed(1) + ' ' + y.toFixed(1);
+        if (xx >= x1) break;
+      }
       return d;
     }
 

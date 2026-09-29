@@ -18,7 +18,7 @@
 - **GitLab Phase D** (2026-09-26): On MR select, fetch detail + `diff_refs` (base/head/start SHA); pipeline / approval check state; MR Entry chrome shows loaded detail and short SHAs.
 - **GitLab MR activate** (2026-09-27): Hide MR + connection chrome unless a remote host matches Settings; on MR select load GitLab MR commits (web-parity set, newest-first), `git fetch` SHAs from matching remote, replace commit list, set Comparison to `diff_refs`; clear MR / switch branch restores Branch Browser (E+F slice).
 - **GitLab Phase G** (2026-09-27): Persist MR Entry label (`project` + `iid`) on Workspace; restore + refetch on launch / repo select; clear label when clearing MR or switching branch.
-- **Dual-pane Diff** (2026-09-27): block-first Replace, fold, hunk jump, ignore-whitespace, word highlight, search, font size, bezier ribbons. Omission separator is one gray sine (no fill, no label). A height change is a cubic Bézier between the line-number columns; each sine meets it at a crest. Design: `docs/dual-pane-diff.md` §3.3. Prototype variants: branch `throwaway/diff-omit-wave`.
+- **Dual-pane Diff** (2026-09-27): block-first Replace, fold, hunk jump, ignore-whitespace, word highlight, search, font size, bezier ribbons. Omission separator is one gray sine (no fill, no label). A height change eases between the line-number columns; the sine rides that centerline. Design: `docs/dual-pane-diff.md` §3.3. Prototype variants: branch `throwaway/diff-omit-wave`.
 
 ## Still deferred
 

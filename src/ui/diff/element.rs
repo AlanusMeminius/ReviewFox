@@ -1094,49 +1094,10 @@ const WAVE_PERIOD: f32 = 16.;
 const WAVE_AMP: f32 = 3.5;
 const WAVE_STEP: f32 = 2.;
 
-fn wave_y(x: f32, base: f32, crest_at: Option<f32>) -> f32 {
-    let phase = match crest_at {
-        Some(lock) => {
-            (x - lock) / WAVE_PERIOD * std::f32::consts::TAU + std::f32::consts::FRAC_PI_2
-        }
-        None => x / WAVE_PERIOD * std::f32::consts::TAU,
-    };
-    base + phase.sin() * WAVE_AMP
-}
-
-fn trace_wave(
-    path: &mut PathBuilder,
-    x0: f32,
-    x1: f32,
-    base: f32,
-    crest_at: Option<f32>,
-    first_move: bool,
-) {
-    if x1 < x0 {
-        return;
-    }
-    let mut x = x0;
-    let mut moved = !first_move;
-    loop {
-        let xx = x.min(x1);
-        let p = point(px(xx), px(wave_y(xx, base, crest_at)));
-        if moved {
-            path.line_to(p);
-        } else {
-            path.move_to(p);
-            moved = true;
-        }
-        if xx >= x1 - 0.01 {
-            break;
-        }
-        x += WAVE_STEP;
-    }
-}
-
-/// One stroke. Each side is a horizontal sine through its code and line numbers.
-/// A height change is a cubic Bézier in the gap between the line-number columns.
-/// Each sine meets that curve at a crest, so both tangents are horizontal, the
-/// same way the change ribbons leave a flat edge.
+/// One stroke. Code and line-number columns stay on a horizontal centerline;
+/// only the gap between the columns eases height (smoothstep, zero slope at
+/// both ends). A sine rides that centerline with phase from x alone, so the
+/// wave never stops oscillating through the height change.
 fn joined_wave(x0: f32, x1: f32, y_l: f32, gap_l: f32, gap_r: f32, y_r: f32) -> PathBuilder {
     let mut path = PathBuilder::stroke(px(1.25));
     if x1 - x0 < 2. {
@@ -1144,21 +1105,32 @@ fn joined_wave(x0: f32, x1: f32, y_l: f32, gap_l: f32, gap_r: f32, y_r: f32) -> 
     }
     let gap_l = gap_l.clamp(x0, x1);
     let gap_r = (gap_l + 8.).max(gap_r).min(x1);
-    if (y_r - y_l).abs() < 0.5 {
-        trace_wave(&mut path, x0, x1, y_l, None, true);
-        return path;
-    }
-    trace_wave(&mut path, x0, gap_l, y_l, Some(gap_l), true);
-    let y0 = y_l + WAVE_AMP;
-    let y1 = y_r + WAVE_AMP;
-    let dx = (gap_r - gap_l) * 0.45;
-    path.cubic_bezier_to(
-        point(px(gap_r), px(y1)),
-        point(px(gap_l + dx), px(y0)),
-        point(px(gap_r - dx), px(y1)),
-    );
-    if gap_r < x1 {
-        trace_wave(&mut path, gap_r, x1, y_r, Some(gap_r), false);
+    let flat = (y_r - y_l).abs() < 0.5;
+    let mut x = x0;
+    let mut first = true;
+    loop {
+        let xx = x.min(x1);
+        let base = if flat || xx <= gap_l {
+            y_l
+        } else if xx >= gap_r {
+            y_r
+        } else {
+            let t = (xx - gap_l) / (gap_r - gap_l);
+            let s = t * t * t * (t * (t * 6. - 15.) + 10.);
+            y_l + (y_r - y_l) * s
+        };
+        let y = base + (xx / WAVE_PERIOD * std::f32::consts::TAU).sin() * WAVE_AMP;
+        let p = point(px(xx), px(y));
+        if first {
+            path.move_to(p);
+            first = false;
+        } else {
+            path.line_to(p);
+        }
+        if xx >= x1 - 0.01 {
+            break;
+        }
+        x += WAVE_STEP;
     }
     path
 }
