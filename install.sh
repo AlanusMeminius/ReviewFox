@@ -3,10 +3,10 @@
 # target/release/bundle/, then install it into /Applications and relaunch.
 # Run from the repo root: ./install.sh
 #
-# Set REVIEWFOX_SIGN_ID (e.g. "ReviewFox Dev") to a stable codesigning
-# certificate so Keychain ACL for the GitLab PAT survives rebuilds.
-# Unset falls back to ad-hoc (-), which re-prompts after each rebuild.
+# REVIEWFOX_TEAM_ID selects an Apple Development cert (tools/sign-identity.sh).
+# Unset, the bundle is self-signed.
 set -euo pipefail
+source "$(cd "$(dirname "$0")" && pwd)/tools/sign-identity.sh"
 
 APP_NAME="ReviewFox"
 BUNDLE="target/release/bundle/$APP_NAME.app"
@@ -21,7 +21,7 @@ mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
 sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$BUNDLE/Contents/Info.plist"
 cp assets/icon.icns "$BUNDLE/Contents/Resources/icon.icns"
 cp target/release/reviewfox "$BUNDLE/Contents/MacOS/reviewfox"
-codesign --force --sign "${REVIEWFOX_SIGN_ID:--}" --identifier com.reviewfox.app "$BUNDLE" >/dev/null
+codesign --force --sign "$(reviewfox_sign_id)" --identifier com.reviewfox.app "$BUNDLE"
 
 # Install: quit the running app, then replace the bundle wholesale.
 osascript -e "quit app \"$APP_NAME\"" 2>/dev/null || true

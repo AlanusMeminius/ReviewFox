@@ -20,17 +20,19 @@ Or build only:
 cargo build --release
 ```
 
-To avoid Keychain password prompts on every rebuild when reading the GitLab
-PAT, create a local self-signed **Code Signing** certificate named
-`ReviewFox Dev` in Keychain Access, then:
+The GitLab PAT lives in the login keychain. `cargo run` (via
+`.cargo/config.toml`) and `./install.sh` sign the build, bundle id
+`com.reviewfox.app`.
 
-```bash
-export REVIEWFOX_SIGN_ID="ReviewFox Dev"
-```
+Set `REVIEWFOX_TEAM_ID` to the Apple Development certificate OU (Team ID).
+The private key stays in the login keychain; do not commit a `.p12`. The
+first time the app reads the token, click **Always Allow**. Later rebuilds
+signed by that certificate should not prompt.
 
-`cargo run` (via `.cargo/config.toml`) and `./install.sh` both use this
-identity with bundle id `com.reviewfox.app`. On first run, click **Always
-Allow**; later rebuilds should not prompt.
+Leave `REVIEWFOX_TEAM_ID` unset to self-sign (`REVIEWFOX_SIGN_ID`, or ad-hoc
+`-`). A self-signed build asks for the keychain password again after each
+rebuild. If `REVIEWFOX_TEAM_ID` is set but no matching certificate exists,
+signing fails.
 
 ## License
 
