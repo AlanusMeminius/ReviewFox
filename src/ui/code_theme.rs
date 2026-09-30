@@ -256,7 +256,12 @@ pub fn builtin_catalog() -> &'static [CodeTheme] {
     CATALOG.as_slice()
 }
 
-const FALLBACK_ID: &str = "one-light";
+pub fn default_id(mode: SoftwareThemeMode) -> &'static str {
+    match mode {
+        SoftwareThemeMode::Light => crate::theme_defaults::LIGHT_CODE_THEME_ID,
+        SoftwareThemeMode::Dark => crate::theme_defaults::DARK_CODE_THEME_ID,
+    }
+}
 
 /// Derived roles of the authored slots. Does not branch on theme id.
 ///
@@ -313,8 +318,8 @@ pub fn resolve(
     };
     let entry = choice
         .and_then(|id| catalog.iter().find(|theme| theme.id == id))
-        .or_else(|| catalog.iter().find(|theme| theme.id == FALLBACK_ID))
-        .expect("catalog includes one-light");
+        .or_else(|| catalog.iter().find(|theme| theme.id == default_id(mode)))
+        .expect("catalog includes each Software Theme default");
     ResolvedCodeTheme {
         id: entry.id.clone(),
         label: entry.label.clone(),
@@ -330,8 +335,7 @@ static REMEMBERED: Mutex<CodeThemePairing> = Mutex::new(CodeThemePairing {
 });
 static ACTIVE_MODE: Mutex<SoftwareThemeMode> = Mutex::new(SoftwareThemeMode::Light);
 
-/// Remember the Code Theme Pairing. The dark choice stays here while production
-/// still resolves in Software Theme mode light.
+/// Remember the Code Theme Pairing for active Diff rendering.
 pub fn remember_pairing(pairing: CodeThemePairing) {
     *REMEMBERED.lock().unwrap_or_else(|err| err.into_inner()) = pairing;
 }
@@ -679,8 +683,8 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_choice_resolves_to_one_light_not_the_first_catalog_entry() {
-        let catalog = [fixture("fixture-first", 0x333333), one_light()];
+    fn absent_choices_resolve_to_their_modes_defaults() {
+        let catalog = [fixture("fixture-first", 0x333333), one_light(), one_dark()];
         let light = resolve(
             SoftwareThemeMode::Light,
             &CodeThemePairing::default(),
@@ -693,8 +697,8 @@ mod tests {
         );
         assert_eq!(light.id, "one-light");
         assert_hex(light.slots.paper, 0xffffff);
-        assert_eq!(dark.id, "one-light");
-        assert_hex(dark.slots.paper, 0xffffff);
+        assert_eq!(dark.id, "one-dark");
+        assert_hex(dark.slots.paper, 0x282c34);
     }
 
     #[test]
@@ -710,5 +714,30 @@ mod tests {
         );
         assert_eq!(palette.id, "one-light");
         assert_hex(palette.slots.paper, 0xffffff);
+    }
+
+    #[test]
+    fn dark_unknown_falls_back_but_explicit_one_light_remains_valid() {
+        let catalog = builtin_catalog();
+        let pairing = CodeThemePairing {
+            light: Some("one-dark".into()),
+            dark: Some("future-theme".into()),
+        };
+        assert_eq!(
+            resolve(SoftwareThemeMode::Dark, &pairing, catalog).id,
+            "one-dark"
+        );
+        assert_eq!(
+            resolve(SoftwareThemeMode::Light, &pairing, catalog).id,
+            "one-dark"
+        );
+        let explicit = CodeThemePairing {
+            dark: Some("one-light".into()),
+            ..pairing
+        };
+        assert_eq!(
+            resolve(SoftwareThemeMode::Dark, &explicit, catalog).id,
+            "one-light"
+        );
     }
 }

@@ -21,6 +21,7 @@ use super::{
     NumberFieldEvent, SectionHeader, SettingRow,
 };
 use crate::ui::appearance::{self, Appearance, FontRole, UiTextSize};
+use crate::ui::code_theme::SoftwareThemeMode;
 use crate::ui::gitlab_connection::{self, GitLabConnection};
 #[cfg(target_os = "macos")]
 use crate::ui::mac_column_vibrancy::ColumnVibrancy;
@@ -65,7 +66,8 @@ const TAB_UI_FONT_SIZE: isize = TAB_UI_FONT_FAMILY + 1;
 const TAB_CODE_FONT_FAMILY: isize = TAB_UI_FONT_SIZE + 1;
 const TAB_CODE_FONT_SIZE: isize = TAB_CODE_FONT_FAMILY + 1;
 const TAB_THEME: isize = TAB_CODE_FONT_SIZE + 1;
-const TAB_CODE_THEME: isize = TAB_THEME + 1;
+const TAB_CODE_THEME_LIGHT: isize = TAB_THEME + 1;
+const TAB_CODE_THEME_DARK: isize = TAB_CODE_THEME_LIGHT + 1;
 
 const URL_TITLE: &str = "GitLab URL";
 const URL_DESCRIPTION: &str = "Your self-hosted GitLab address. Leave empty for gitlab.com.";
@@ -128,7 +130,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
     .into_iter()
     .chain(number_field::key_bindings())
     .chain(font_picker::key_bindings())
-    .chain(code_theme_picker::key_bindings("settings-code-theme"))
+    .chain(code_theme_picker::key_bindings("settings-code-theme-light"))
+    .chain(code_theme_picker::key_bindings("settings-code-theme-dark"))
     .chain(code_theme_picker::key_bindings("settings-software-theme"))
     .collect()
 }
@@ -194,7 +197,8 @@ pub struct SettingsView {
     gitlab_connection: Rc<RefCell<GitLabConnection>>,
     /// One per [`FONT_GROUPS`] entry, same order.
     font_controls: [FontControls; 2],
-    code_theme: Entity<code_theme_picker::OptionsPicker>,
+    code_theme_light: Entity<code_theme_picker::OptionsPicker>,
+    code_theme_dark: Entity<code_theme_picker::OptionsPicker>,
     theme: Entity<code_theme_picker::OptionsPicker>,
     nav_focus: FocusHandle,
     nav: NavState,
@@ -284,21 +288,38 @@ impl SettingsView {
                 ));
                 FontControls { family, size }
             });
-        let code_theme = cx.new(|cx| {
+        let code_theme_light = cx.new(|cx| {
             code_theme_picker::OptionsPicker::new(
-                "settings-code-theme",
+                "settings-code-theme-light",
                 code_theme_picker::code_theme_options(),
-                code_theme_picker::resolved_code_theme_id(cx),
-                TAB_CODE_THEME,
+                code_theme_picker::resolved_code_theme_id(cx, SoftwareThemeMode::Light),
+                TAB_CODE_THEME_LIGHT,
                 window,
                 cx,
             )
         });
         subscriptions.push(cx.subscribe(
-            &code_theme,
+            &code_theme_light,
             |_, _, event: &code_theme_picker::OptionsPickerEvent, cx| {
                 let code_theme_picker::OptionsPickerEvent::Confirm(id) = event;
-                appearance::set_code_theme_light(cx, id);
+                appearance::set_code_theme(cx, SoftwareThemeMode::Light, id);
+            },
+        ));
+        let code_theme_dark = cx.new(|cx| {
+            code_theme_picker::OptionsPicker::new(
+                "settings-code-theme-dark",
+                code_theme_picker::code_theme_options(),
+                code_theme_picker::resolved_code_theme_id(cx, SoftwareThemeMode::Dark),
+                TAB_CODE_THEME_DARK,
+                window,
+                cx,
+            )
+        });
+        subscriptions.push(cx.subscribe(
+            &code_theme_dark,
+            |_, _, event: &code_theme_picker::OptionsPickerEvent, cx| {
+                let code_theme_picker::OptionsPickerEvent::Confirm(id) = event;
+                appearance::set_code_theme(cx, SoftwareThemeMode::Dark, id);
             },
         ));
         let theme = cx.new(|cx| {
@@ -337,7 +358,8 @@ impl SettingsView {
             keychain_error: None,
             gitlab_connection,
             font_controls,
-            code_theme,
+            code_theme_light,
+            code_theme_dark,
             theme,
             nav_focus: cx.focus_handle().tab_index(TAB_NAV).tab_stop(true),
             nav: NavState::new(PAGES),
@@ -599,7 +621,7 @@ impl SettingsView {
                         Section::GitLab => self.render_gitlab_section(cx),
                         Section::Fonts => self.render_fonts_section(cx),
                         Section::Theme => self.render_theme_section(cx),
-                        Section::CodeTheme => self.render_code_theme_section(),
+                        Section::CodeTheme => self.render_code_theme_section(cx),
                     })
             })
             .collect();
@@ -759,12 +781,32 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// Appearance › Code Theme: the light choice only. No dark row, no Software
-    /// Theme switch. Choosing One Light clears the stored field.
-    fn render_code_theme_section(&self) -> AnyElement {
-        SettingRow::new("settings-code-theme-light", "Light")
-            .last(true)
-            .control(self.code_theme.clone())
+    /// Appearance › Code Theme: one independently stored choice per Software
+    /// Theme mode. The active marker follows the current appearance live.
+    fn render_code_theme_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let active = cx.global::<Appearance>().software_theme;
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                SettingRow::new("settings-code-theme-light", "Light Code Theme")
+                    .description(if active == SoftwareThemeMode::Light {
+                        "Active in current appearance"
+                    } else {
+                        "Used with Light Software Theme"
+                    })
+                    .control(self.code_theme_light.clone()),
+            )
+            .child(
+                SettingRow::new("settings-code-theme-dark", "Dark Code Theme")
+                    .description(if active == SoftwareThemeMode::Dark {
+                        "Active in current appearance"
+                    } else {
+                        "Used with Dark Software Theme"
+                    })
+                    .last(true)
+                    .control(self.code_theme_dark.clone()),
+            )
             .into_any_element()
     }
 }

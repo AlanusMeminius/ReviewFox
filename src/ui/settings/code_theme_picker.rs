@@ -1,5 +1,5 @@
 //! A small options dropdown: outlined trigger + list of (id, label) rows.
-//! Used for the Software Theme choice and the light Code Theme choice.
+//! Used for the Software Theme choice and both Code Theme pairing choices.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -286,7 +286,7 @@ impl Render for OptionsPicker {
     }
 }
 
-/// Options for the light Code Theme choice: every built-in theme by label.
+/// Options for either Code Theme choice: every built-in theme by label.
 pub fn code_theme_options() -> Vec<(SharedString, SharedString)> {
     code_theme::builtin_catalog()
         .iter()
@@ -294,13 +294,13 @@ pub fn code_theme_options() -> Vec<(SharedString, SharedString)> {
         .collect()
 }
 
-/// The stored light choice resolved to a catalog id (unknown ids fall back).
-pub fn resolved_code_theme_id(cx: &App) -> SharedString {
+/// One stored choice resolved to a catalog id (unknown ids fall back by mode).
+pub fn resolved_code_theme_id(cx: &App, mode: SoftwareThemeMode) -> SharedString {
     code_theme::resolve(
-        SoftwareThemeMode::Light,
+        mode,
         &CodeThemePairing {
             light: cx.global::<Appearance>().code_theme_light.clone(),
-            dark: None,
+            dark: cx.global::<Appearance>().code_theme_dark.clone(),
         },
         code_theme::builtin_catalog(),
     )

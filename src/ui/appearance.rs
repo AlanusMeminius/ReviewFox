@@ -24,7 +24,8 @@ pub struct Family {
 
 /// Resolved UI Font, Code Font, and stored Code Theme Pairing.
 ///
-/// Each Code Theme id is `None` when unset (One Light). An unknown id is kept.
+/// Each Code Theme id is `None` when unset (One Light or One Dark by mode).
+/// An unknown id is kept for forward compatibility.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Appearance {
     pub software_theme: code_theme::SoftwareThemeMode,
@@ -170,7 +171,7 @@ pub fn update(cx: &mut App, edit: impl FnOnce(&mut SettingsFile)) {
     edit(&mut file);
     settings_store::save_file(&file).ok();
     let next = resolve(&file, &cx.global::<InstalledFonts>().0);
-    // Publish before the Global swap so a refresh paints the new light choice.
+    // Publish before the Global swap so refreshed windows paint the new choice.
     remember(&next);
     if &next != cx.global::<Appearance>() {
         cx.set_global(next);
@@ -190,11 +191,20 @@ pub fn set_software_theme(cx: &mut App, mode: code_theme::SoftwareThemeMode) {
     });
 }
 
-/// Code Theme for the light Software Theme. The id `one-light` clears the field.
-pub fn set_code_theme_light(cx: &mut App, id: &str) {
-    update(cx, |file| {
-        file.code_theme_light = settings_store::code_theme_choice(Some(id.to_string()));
-    });
+/// Change one Code Theme pairing slot; selecting that mode's default clears it.
+pub fn set_code_theme(cx: &mut App, mode: code_theme::SoftwareThemeMode, id: &str) {
+    update(cx, |file| set_code_theme_choice(file, mode, id));
+}
+
+fn set_code_theme_choice(file: &mut SettingsFile, mode: code_theme::SoftwareThemeMode, id: &str) {
+    match mode {
+        code_theme::SoftwareThemeMode::Light => {
+            file.code_theme_light = settings_store::code_theme_choice_light(Some(id.to_string()));
+        }
+        code_theme::SoftwareThemeMode::Dark => {
+            file.code_theme_dark = settings_store::code_theme_choice_dark(Some(id.to_string()));
+        }
+    }
 }
 
 fn remember(appearance: &Appearance) {
@@ -324,8 +334,8 @@ pub fn resolve(file: &SettingsFile, installed: &[SharedString]) -> Appearance {
             round_size(file.code_font_size).unwrap_or(DiffFontSize::DEFAULT),
         )
         .base(),
-        code_theme_light: settings_store::code_theme_choice(file.code_theme_light.clone()),
-        code_theme_dark: settings_store::code_theme_choice(file.code_theme_dark.clone()),
+        code_theme_light: settings_store::code_theme_choice_light(file.code_theme_light.clone()),
+        code_theme_dark: settings_store::code_theme_choice_dark(file.code_theme_dark.clone()),
     }
 }
 
@@ -421,6 +431,42 @@ mod tests {
             "IBM Plex Mono"
         };
         assert_eq!(without_plex.code_font.name, system_mono);
+    }
+
+    #[test]
+    fn code_theme_choices_edit_only_their_mode_and_preserve_opposite_themes() {
+        let mut file = SettingsFile::default();
+        set_code_theme_choice(&mut file, code_theme::SoftwareThemeMode::Light, "one-dark");
+        assert_eq!(file.code_theme_light.as_deref(), Some("one-dark"));
+        assert_eq!(file.code_theme_dark, None);
+
+        set_code_theme_choice(&mut file, code_theme::SoftwareThemeMode::Dark, "one-light");
+        assert_eq!(file.code_theme_light.as_deref(), Some("one-dark"));
+        assert_eq!(file.code_theme_dark.as_deref(), Some("one-light"));
+
+        set_code_theme_choice(&mut file, code_theme::SoftwareThemeMode::Light, "one-light");
+        assert_eq!(file.code_theme_light, None);
+        assert_eq!(file.code_theme_dark.as_deref(), Some("one-light"));
+
+        set_code_theme_choice(&mut file, code_theme::SoftwareThemeMode::Dark, "one-dark");
+        assert_eq!(file.code_theme_dark, None);
+    }
+
+    #[test]
+    fn unknown_code_theme_ids_remain_in_appearance_for_later_versions() {
+        let file = SettingsFile {
+            software_theme: Some("dark".into()),
+            code_theme_light: Some("future-light".into()),
+            code_theme_dark: Some("future-dark".into()),
+            ..Default::default()
+        };
+        let appearance = resolve(&file, &installed(&[]));
+        assert_eq!(
+            appearance.software_theme,
+            code_theme::SoftwareThemeMode::Dark
+        );
+        assert_eq!(appearance.code_theme_light.as_deref(), Some("future-light"));
+        assert_eq!(appearance.code_theme_dark.as_deref(), Some("future-dark"));
     }
 
     #[test]
