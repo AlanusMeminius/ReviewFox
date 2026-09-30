@@ -322,10 +322,12 @@ mod tests {
         let still = open.begin_edit(file_id);
         assert!(still.body.is_none());
         assert_eq!(still.dock, drafted.dock);
-        assert!(still
-            .comments
-            .iter()
-            .any(|c| matches!(c.anchor, Anchor::File { .. })));
+        assert!(
+            still
+                .comments
+                .iter()
+                .any(|c| matches!(c.anchor, Anchor::File { .. }))
+        );
 
         let saved = open.commit("line");
         assert!(saved.dock.is_none());

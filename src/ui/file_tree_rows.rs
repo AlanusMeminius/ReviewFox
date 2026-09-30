@@ -114,12 +114,7 @@ fn ellipsize(text: &str, max_width: Pixels, weight: FontWeight, cx: &App) -> Sha
         .truncate_line(shared, max_width, "…", &mut runs)
 }
 
-fn name_cell(
-    label: SharedString,
-    color: Rgba,
-    weight: Option<FontWeight>,
-    cx: &App,
-) -> Div {
+fn name_cell(label: SharedString, color: Rgba, weight: Option<FontWeight>, cx: &App) -> Div {
     div()
         .w(px(0.))
         .flex_1()

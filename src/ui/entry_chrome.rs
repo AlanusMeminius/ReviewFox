@@ -127,12 +127,7 @@ pub fn restore_failure_action(from_kind_switch: bool) -> RestoreFailureAction {
 }
 
 /// Value-hit label for the active kind.
-pub fn value_label(
-    kind: EntryKind,
-    branch: &str,
-    mr_iid: Option<u64>,
-    checkout: &str,
-) -> String {
+pub fn value_label(kind: EntryKind, branch: &str, mr_iid: Option<u64>, checkout: &str) -> String {
     match kind {
         EntryKind::Branch => branch.to_string(),
         EntryKind::Worktree => checkout.to_string(),

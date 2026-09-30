@@ -90,14 +90,12 @@ pub fn flatten_query(
     collapsed: &HashSet<String>,
     query: &str,
 ) -> Vec<TreeRow> {
-    let q = query.trim();
-    if q.is_empty() {
+    let Some(q) = normalized_query(query) else {
         return flatten(paths, collapsed);
-    }
-    let q = q.to_lowercase();
+    };
     let matched: Vec<ChangedPath> = paths
         .iter()
-        .filter(|p| p.path.to_lowercase().contains(&q))
+        .filter(|p| path_matches(&p.path, &q))
         .cloned()
         .collect();
     flatten(&matched, collapsed)
@@ -112,6 +110,54 @@ pub fn file_order(paths: &[ChangedPath]) -> Vec<String> {
             TreeRow::Dir { .. } => None,
         })
         .collect()
+}
+
+/// [`file_order`] limited to paths that contain `query`.
+/// Empty `query` is the full order. Collapse is ignored: a folded directory
+/// still leaves its files in the nav list.
+pub fn file_order_query(paths: &[ChangedPath], query: &str) -> Vec<String> {
+    let order = file_order(paths);
+    let Some(q) = normalized_query(query) else {
+        return order;
+    };
+    order.into_iter().filter(|p| path_matches(p, &q)).collect()
+}
+
+/// Neighbour of `selected` in `order`.
+/// When `selected` is absent, forward lands on the first path and backward on the last.
+/// Present `selected` stops at either end.
+pub fn step_file(order: &[String], selected: &str, dir: i32) -> Option<String> {
+    match order.iter().position(|p| p == selected) {
+        Some(index) => {
+            let target = if dir < 0 {
+                index.checked_sub(1)
+            } else {
+                index.checked_add(1)
+            };
+            target.and_then(|i| order.get(i).cloned())
+        }
+        None if dir < 0 => order.last().cloned(),
+        None => order.first().cloned(),
+    }
+}
+
+/// Trimmed query, lowercased. `None` means "no filter".
+fn normalized_query(query: &str) -> Option<String> {
+    let q = query.trim();
+    if q.is_empty() {
+        None
+    } else {
+        Some(q.to_lowercase())
+    }
+}
+
+/// Whether a path contains a non-empty query, case-insensitively.
+pub fn path_matches_query(path: &str, query: &str) -> bool {
+    normalized_query(query).is_some_and(|q| path_matches(path, &q))
+}
+
+fn path_matches(path: &str, q: &str) -> bool {
+    path.to_lowercase().contains(q)
 }
 
 #[cfg(test)]
@@ -184,5 +230,37 @@ mod tests {
     fn file_order_follows_tree_not_input() {
         let paths = vec![cp("z.rs"), cp("a/y.rs"), cp("a/b/x.rs")];
         assert_eq!(file_order(&paths), ["a/b/x.rs", "a/y.rs", "z.rs"]);
+    }
+
+    #[test]
+    fn path_query_trims_and_matches_case_insensitively() {
+        assert!(path_matches_query("src/Ä.rs", " ä.RS "));
+        assert!(!path_matches_query("src/Ä.rs", "missing"));
+        assert!(!path_matches_query("src/Ä.rs", "  "));
+    }
+
+    #[test]
+    fn file_order_query_keeps_tree_order() {
+        let paths = vec![cp("z.rs"), cp("a/y.rs"), cp("a/b/x.rs")];
+        assert_eq!(file_order_query(&paths, "  "), file_order(&paths));
+        assert_eq!(file_order_query(&paths, "Y"), ["a/y.rs"]);
+        assert_eq!(
+            file_order_query(&paths, ".rs"),
+            ["a/b/x.rs", "a/y.rs", "z.rs"]
+        );
+    }
+
+    #[test]
+    fn step_file_stops_at_ends_and_enters_from_outside() {
+        let order = vec!["a/y.rs".into(), "z.rs".into()];
+        assert_eq!(step_file(&order, "a/y.rs", 1).as_deref(), Some("z.rs"));
+        assert_eq!(step_file(&order, "z.rs", 1), None);
+        assert_eq!(step_file(&order, "a/y.rs", -1), None);
+        assert_eq!(
+            step_file(&order, "missing.rs", 1).as_deref(),
+            Some("a/y.rs")
+        );
+        assert_eq!(step_file(&order, "missing.rs", -1).as_deref(), Some("z.rs"));
+        assert_eq!(step_file(&[], "missing.rs", 1), None);
     }
 }

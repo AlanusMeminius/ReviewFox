@@ -728,8 +728,11 @@ impl Element for TextElement {
             }
         }
         let left = bounds.left() - scroll_x;
-        let chrome_top = bounds.top() + px(CARET_INSET);
-        let chrome_bottom = bounds.bottom() - px(CARET_INSET);
+        // Same vertical span as the painted em box, including the ink shift,
+        // so the caret stays centred on the glyphs inside a taller field.
+        let em = line.ascent + line.descent;
+        let chrome_top = bounds.top() + (line_height - em) / 2. + ink_nudge;
+        let chrome_bottom = chrome_top + em;
         let (selection, cursor_quad) = if selected_range.is_empty() {
             (
                 Vec::new(),
@@ -955,10 +958,7 @@ fn cursor_line_local(
         return (0, 0);
     }
     for (ix, (start, line)) in lines.iter().enumerate() {
-        let next_start = lines
-            .get(ix + 1)
-            .map(|(s, _)| *s)
-            .unwrap_or(usize::MAX);
+        let next_start = lines.get(ix + 1).map(|(s, _)| *s).unwrap_or(usize::MAX);
         if offset < next_start || ix + 1 == lines.len() {
             let local = offset.saturating_sub(*start).min(line.len());
             return (ix, local);

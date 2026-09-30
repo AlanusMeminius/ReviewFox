@@ -227,7 +227,7 @@ impl DiffView {
             ),
         ];
         let tree_filter = cx.new(|cx| {
-            TextField::new("Filter files…", false, cx).with_style(TextFieldStyle::Search)
+            TextField::new("search", false, cx).with_style(TextFieldStyle::Search)
         });
         let tree_filter_sub = cx.observe(&tree_filter, |this, field, cx| {
             let q = field.read(cx).content().to_string();
@@ -533,35 +533,30 @@ impl DiffView {
         self.with_pane(cx, |pane, cx| pane.jump_hunk(dir, cx));
     }
 
-    /// Selected path's position in tree order, as `(index, total)`.
-    fn file_position(&self) -> (usize, usize) {
+    /// Open file's place in the nav order: `(Some(index), total)` when it is in
+    /// the list, `(None, total)` when a filter has excluded it. Empty query uses
+    /// every changed file. Collapse does not affect this list.
+    fn file_position(&self) -> (Option<usize>, usize) {
         let Some(snap) = &self.snapshot else {
-            return (0, 0);
+            return (None, 0);
         };
-        let order = file_tree::file_order(&snap.changed_paths);
-        let index = order
-            .iter()
-            .position(|p| *p == snap.selected_path)
-            .unwrap_or(0);
+        let order = file_tree::file_order_query(&snap.changed_paths, &self.tree_query);
+        let index = order.iter().position(|p| *p == snap.selected_path);
         (index, order.len())
     }
 
-    /// Steps to the neighbouring file in tree order; stops at either end.
+    /// Steps to the neighbouring file in nav order. Stops at either end.
+    /// An open file outside the list moves to the first match forward, or the last backward.
     fn jump_file(&mut self, dir: i32, cx: &mut Context<Self>) {
         let Some(snap) = &self.snapshot else {
             return;
         };
-        let order = file_tree::file_order(&snap.changed_paths);
-        let (index, _) = self.file_position();
-        let target = if dir < 0 {
-            index.checked_sub(1)
-        } else {
-            Some(index + 1)
+        let order = file_tree::file_order_query(&snap.changed_paths, &self.tree_query);
+        let Some(path) = file_tree::step_file(&order, &snap.selected_path, dir) else {
+            return;
         };
-        if let Some(path) = target.and_then(|i| order.get(i).cloned()) {
-            self.select_path(path, cx);
-            cx.notify();
-        }
+        self.select_path(path, cx);
+        cx.notify();
     }
 
     fn jump_to_search_match(&mut self, m: SearchMatch, cx: &mut Context<Self>) {
@@ -920,8 +915,7 @@ impl DiffView {
     }
 
     fn expand_dirs_for_tree_query(&mut self) {
-        let q = self.tree_query.trim().to_lowercase();
-        if q.is_empty() {
+        if self.tree_query.trim().is_empty() {
             return;
         }
         let Some(paths) = self.snapshot.as_ref().map(|s| s.changed_paths.clone()) else {
@@ -929,7 +923,7 @@ impl DiffView {
         };
         self.collapsed_dirs.retain(|dir| {
             !paths.iter().any(|p| {
-                p.path.to_lowercase().contains(&q)
+                file_tree::path_matches_query(&p.path, &self.tree_query)
                     && (p.path == *dir || p.path.starts_with(&format!("{dir}/")))
             })
         });
@@ -1715,7 +1709,7 @@ fn render_tree_pane(
                 .flex()
                 .flex_col()
                 .gap_1()
-                .px_1()
+                .px_2()
                 .pt_1()
                 .child(
                     div()
@@ -1731,7 +1725,7 @@ fn render_tree_pane(
                         } else {
                             theme::line()
                         })
-                        .bg(theme::white())
+                        .bg(theme::sidebar_row_selected())
                         .child(
                             svg()
                                 .ml_2()
@@ -1746,7 +1740,40 @@ fn render_tree_pane(
                                 .min_w(px(0.))
                                 .h_full()
                                 .child(view.tree_filter.clone()),
-                        ),
+                        )
+                        .when(!view.tree_query.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .id("diff-tree-filter-clear")
+                                    .mr_1()
+                                    .size(px(18.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(4.))
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(theme::hover()))
+                                    .tooltip(Tooltip::text("Clear", None))
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                                        window.prevent_default();
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.tree_filter.update(cx, |field, cx| {
+                                            field.set_content("", cx);
+                                        });
+                                        let handle = this.tree_filter.read(cx).focus_handle(cx);
+                                        window.focus(&handle);
+                                    }))
+                                    .child(
+                                        svg()
+                                            .size(px(12.))
+                                            .flex_none()
+                                            .path("close.svg")
+                                            .text_color(theme::faint()),
+                                    ),
+                            )
+                        }),
                 )
                 .child(
                     div()
@@ -2477,10 +2504,18 @@ const NAV_BUTTON_RADIUS: f32 = 5.;
 /// Sized to `TOGGLE_SIZE` so it sits in the toolbar like any other button.
 fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     let (index, total) = view.file_position();
-    let file = if total == 0 {
-        "—".to_string()
-    } else {
-        format!("{}/{total}", index + 1)
+    let file = match index {
+        Some(i) => format!("{}/{total}", i + 1),
+        None if total == 0 => "—".to_string(),
+        None => format!("—/{total}"),
+    };
+    let prev_file = match index {
+        Some(i) => i > 0,
+        None => total > 0,
+    };
+    let next_file = match index {
+        Some(i) => i + 1 < total,
+        None => total > 0,
     };
     let hunk_count = view.pane.read(cx).hunk_count().unwrap_or(0);
     let hunk = if hunk_count == 0 {
@@ -2494,7 +2529,7 @@ fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoE
             "chevrons_left.svg",
             "Previous File",
             Some("{".into()),
-            index > 0,
+            prev_file,
             false,
             cx.listener(|this, _, _, cx| this.jump_file(-1, cx)),
         ))
@@ -2536,7 +2571,7 @@ fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoE
             "chevrons_right.svg",
             "Next File",
             Some("}".into()),
-            index + 1 < total,
+            next_file,
             false,
             cx.listener(|this, _, _, cx| this.jump_file(1, cx)),
         ))
