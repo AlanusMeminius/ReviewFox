@@ -1,5 +1,5 @@
-//! Settings: GitLab base URL and Appearance fonts in `settings.json`, PAT in
-//! OS keychain only (read once per process; see [`load_pat`]).
+//! Settings: GitLab base URL, Appearance fonts, and the Code Theme Pairing in
+//! `settings.json`, PAT in OS keychain only (read once per process; see [`load_pat`]).
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::path::PathBuf;
@@ -62,6 +62,41 @@ pub struct SettingsFile {
         skip_serializing_if = "Option::is_none"
     )]
     pub soft_wrap: Option<bool>,
+    /// Code Theme while the Software Theme is light. Missing means One Light.
+    /// `one-light` is omitted on save; any other id, including an unknown one,
+    /// is kept.
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "omit_code_theme_id"
+    )]
+    pub code_theme_light: Option<String>,
+    /// Code Theme while the Software Theme is dark. Same storage rules. Ignored
+    /// while the Software Theme stays light.
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "omit_code_theme_id"
+    )]
+    pub code_theme_dark: Option<String>,
+}
+
+/// Default Code Theme id (`ui::code_theme`'s fallback). Omitted on save so a
+/// later default still applies.
+const DEFAULT_CODE_THEME_ID: &str = "one-light";
+
+fn is_default_code_theme(id: &str) -> bool {
+    id == DEFAULT_CODE_THEME_ID
+}
+
+/// `None` and [`DEFAULT_CODE_THEME_ID`] are not written.
+fn omit_code_theme_id(id: &Option<String>) -> bool {
+    id.as_deref().is_none_or(is_default_code_theme)
+}
+
+/// Store `id`, or clear it when it is the default Code Theme.
+pub fn code_theme_choice(id: Option<String>) -> Option<String> {
+    id.filter(|id| !is_default_code_theme(id))
 }
 
 /// Whether horizontal input moves both diff panes together.
@@ -291,13 +326,42 @@ mod tests {
     }
 
     #[test]
+    fn code_theme_ids_roundtrip_and_one_light_is_omitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path_for_tests(dir.path());
+        let file = SettingsFile {
+            code_theme_light: Some("kept-light".into()),
+            code_theme_dark: Some("kept-dark".into()),
+            ..Default::default()
+        };
+        save_file_at(&path, &file).unwrap();
+        assert_eq!(load_file_at(&path), file);
+
+        let defaults = SettingsFile {
+            code_theme_light: Some("one-light".into()),
+            code_theme_dark: Some("one-light".into()),
+            ..Default::default()
+        };
+        save_file_at(&path, &defaults).unwrap();
+        let json = fs::read_to_string(&path).unwrap();
+        assert!(
+            !json.contains("one-light") && !json.contains("code_theme"),
+            "the default Code Theme id is omitted on save: {json}"
+        );
+        let loaded = load_file_at(&path);
+        assert_eq!(loaded.code_theme_light, None);
+        assert_eq!(loaded.code_theme_dark, None);
+        fs::remove_dir_all(dir.path()).ok();
+    }
+
+    #[test]
     fn a_malformed_field_is_dropped_and_the_rest_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = store_path_for_tests(dir.path());
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            r#"{ "gitlab_base_url": "https://gitlab.example.com", "ui_font_size": "14", "code_font_family": 7, "code_font_size": 16 }"#,
+            r#"{ "gitlab_base_url": "https://gitlab.example.com", "ui_font_size": "14", "code_font_family": 7, "code_font_size": 16, "code_theme_light": 42, "code_theme_dark": ["one-light"] }"#,
         )
         .unwrap();
         let loaded = load_file_at(&path);

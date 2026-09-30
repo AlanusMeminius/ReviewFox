@@ -182,6 +182,9 @@ pub struct DualPane {
     font_size: DiffFontSize,
     /// Code Font family the caches were shaped with.
     code_font: SharedString,
+    /// Code Theme id the shape cache was colored with. A change reshapes;
+    /// highlight spans stay capture ids.
+    code_theme_id: String,
     _appearance: Subscription,
     /// Bumped on every [`Self::open`]; background highlight results with a
     /// different generation are dropped.
@@ -233,6 +236,7 @@ impl DualPane {
             hunk_s: Some(0.),
             font_size,
             code_font,
+            code_theme_id: String::new(),
             _appearance: cx.observe_global::<Appearance>(Self::apply_appearance),
             open_generation: 0,
         }
@@ -318,7 +322,8 @@ impl DualPane {
                             .spawn(async move {
                                 let t = std::time::Instant::now();
                                 // Query compile + palette resolve stay off the UI thread.
-                                let _ = theme::syntax_colors();
+                                let code_theme = crate::ui::code_theme::active();
+                                let _ = crate::ui::code_theme::capture_colors(&code_theme);
                                 let side = |text: &str| {
                                     if syntax::exceeds_size_guard(text, syntax::DEFAULT_SIZE_GUARD)
                                     {
@@ -1305,6 +1310,11 @@ impl DualPane {
         }
         self.sync_wrap_layout(self.pane_w, window, cx);
         let comment_starts = self.comment_starts();
+        let code_theme = crate::ui::code_theme::active();
+        if code_theme.id != self.code_theme_id {
+            self.invalidate_shapes();
+            self.code_theme_id = code_theme.id.clone();
+        }
         let layout = self.layout.as_ref()?;
         let t_vp = trace::start();
         let vp = Viewport::new(layout, self.scroll_s, self.view_h, row_h).snapped(self.scale);
@@ -1334,6 +1344,7 @@ impl DualPane {
                     }),
                 },
                 bars: &self.bars,
+                code_theme,
             },
             &mut self.shapes,
             window,

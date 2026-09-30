@@ -1,13 +1,13 @@
-//! UI Font and Code Font: what `settings.json` stores, resolved against the
-//! installed fonts and held in the [`Appearance`] Global. Rendering reads the
-//! Global; [`update`] writes the file and replaces it, which re-renders every
-//! window.
+//! UI Font, Code Font, and the Code Theme Pairing: what `settings.json` stores,
+//! resolved into the [`Appearance`] Global. Rendering reads the Global;
+//! [`update`] writes the file and replaces it, which re-renders every window.
 
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use gpui::{App, Global, Pixels, SharedString, Styled, px};
 
+use super::code_theme::{self, CodeThemePairing};
 use crate::domain::DiffFontSize;
 use crate::settings_store::{self, SettingsFile};
 
@@ -22,13 +22,17 @@ pub struct Family {
     pub not_installed: bool,
 }
 
-/// Resolved UI Font and Code Font.
+/// Resolved UI Font, Code Font, and stored Code Theme Pairing.
+///
+/// Each Code Theme id is `None` when unset (One Light). An unknown id is kept.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Appearance {
     pub ui_font: Family,
     pub ui_font_size: u32,
     pub code_font: Family,
     pub code_font_size: u32,
+    pub code_theme_light: Option<String>,
+    pub code_theme_dark: Option<String>,
 }
 
 impl Global for Appearance {}
@@ -148,7 +152,9 @@ pub fn init(cx: &mut App) {
         .into_iter()
         .map(SharedString::from)
         .collect();
-    cx.set_global(resolve(&settings_store::load_file(), &installed));
+    let appearance = resolve(&settings_store::load_file(), &installed);
+    remember(&appearance);
+    cx.set_global(appearance);
     cx.set_global(InstalledFonts(installed));
     // Views cached with `AnyView::cached` re-render only on a refresh.
     cx.observe_global::<Appearance>(|cx| cx.refresh_windows())
@@ -163,9 +169,25 @@ pub fn update(cx: &mut App, edit: impl FnOnce(&mut SettingsFile)) {
     edit(&mut file);
     settings_store::save_file(&file).ok();
     let next = resolve(&file, &cx.global::<InstalledFonts>().0);
+    // Publish before the Global swap so a refresh paints the new light choice.
+    remember(&next);
     if &next != cx.global::<Appearance>() {
         cx.set_global(next);
     }
+}
+
+/// Code Theme for the light Software Theme. The id `one-light` clears the field.
+pub fn set_code_theme_light(cx: &mut App, id: &str) {
+    update(cx, |file| {
+        file.code_theme_light = settings_store::code_theme_choice(Some(id.to_string()));
+    });
+}
+
+fn remember(appearance: &Appearance) {
+    code_theme::remember_pairing(CodeThemePairing {
+        light: appearance.code_theme_light.clone(),
+        dark: appearance.code_theme_dark.clone(),
+    });
 }
 
 /// The installed font names, cached since startup.
@@ -283,6 +305,8 @@ pub fn resolve(file: &SettingsFile, installed: &[SharedString]) -> Appearance {
             round_size(file.code_font_size).unwrap_or(DiffFontSize::DEFAULT),
         )
         .base(),
+        code_theme_light: settings_store::code_theme_choice(file.code_theme_light.clone()),
+        code_theme_dark: settings_store::code_theme_choice(file.code_theme_dark.clone()),
     }
 }
 
