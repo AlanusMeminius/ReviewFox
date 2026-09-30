@@ -1195,7 +1195,9 @@ fn paint_comment_icon(window: &mut Window, icon: &IconSlot) {
     let y0 = f32::from(slot.top()) + (f32::from(slot.size.height) - ICON_GLYPH) / 2.;
     let at = |x: f32, y: f32| point(px(x0 + x * unit), px(y0 + y * unit));
     if icon.open {
-        let wash = ICON_WASH.min(f32::from(slot.size.width)).min(f32::from(slot.size.height));
+        let wash = ICON_WASH
+            .min(f32::from(slot.size.width))
+            .min(f32::from(slot.size.height));
         let wx = x0 - (wash - ICON_GLYPH) / 2.;
         let wy = y0 - (wash - ICON_GLYPH) / 2.;
         let wash_bounds =
@@ -1687,9 +1689,10 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
         });
         let in_gutter = hitbox.is_hovered(window) && geom.gutter.contains(&pos);
         let y = f32::from(pos.y) - geom.top();
-        let track_y = [Side::Preimage, Side::Postimage].map(|side| f32::from(pos.y - geom.track(side).top()));
-        let h_track_x =
-            [Side::Preimage, Side::Postimage].map(|side| f32::from(pos.x - geom.h_track(side).left()));
+        let track_y =
+            [Side::Preimage, Side::Postimage].map(|side| f32::from(pos.y - geom.track(side).top()));
+        let h_track_x = [Side::Preimage, Side::Postimage]
+            .map(|side| f32::from(pos.x - geom.h_track(side).left()));
         entity.update(cx, |pane, cx| {
             pane.mouse_moved(
                 PointerMove {
@@ -1752,7 +1755,11 @@ mod tests {
     #[test]
     fn filled_icon_belongs_to_the_comment_starting_on_the_line() {
         // Two comments on `postimage`, one on `preimage`; the middle one spans 8..=10.
-        let starts = [(Side::Postimage, 3, 1), (Side::Postimage, 8, 2), (Side::Preimage, 3, 3)];
+        let starts = [
+            (Side::Postimage, 3, 1),
+            (Side::Postimage, 8, 2),
+            (Side::Preimage, 3, 3),
+        ];
         assert_eq!(comment_start_id(&starts, Side::Postimage, 3), Some(1));
         assert_eq!(comment_start_id(&starts, Side::Preimage, 3), Some(3));
         assert_eq!(comment_start_id(&starts, Side::Postimage, 8), Some(2));

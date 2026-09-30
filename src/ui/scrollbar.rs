@@ -377,21 +377,6 @@ pub fn overlay_flex(content: impl IntoElement, scrollbar: Entity<VerticalScrollb
         .child(div().absolute().inset_0().child(scrollbar))
 }
 
-/// Cap height (comments): shrink-to-fit up to `max_h`, overlay thumb on top.
-pub fn overlay_max(
-    max_height: Pixels,
-    content: impl IntoElement,
-    scrollbar: Entity<VerticalScrollbar>,
-) -> Div {
-    div()
-        .relative()
-        .w_full()
-        .max_h(max_height)
-        // Content stays in-flow so the shell can shrink-wrap; only the thumb overlays.
-        .child(content)
-        .child(div().absolute().inset_0().child(scrollbar))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

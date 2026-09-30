@@ -2486,18 +2486,20 @@ fn render_mr_entry_detail(
                 .gap_1p5()
                 .children(match &entry.detail {
                     MrDetailState::Loading => {
-                        vec![div()
-                            .flex_1()
-                            .size_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(loading_row(
-                                "mr-detail-loading-spin",
-                                "Loading MR detail…",
-                                cx,
-                            ))
-                            .into_any_element()]
+                        vec![
+                            div()
+                                .flex_1()
+                                .size_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(loading_row(
+                                    "mr-detail-loading-spin",
+                                    "Loading MR detail…",
+                                    cx,
+                                ))
+                                .into_any_element(),
+                        ]
                     }
                     MrDetailState::Failed(note) => {
                         vec![render_error_note(

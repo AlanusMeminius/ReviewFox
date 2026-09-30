@@ -980,14 +980,22 @@ fn alignment_from_diff_ops(ops: &[DiffOp]) -> Alignment {
     Alignment { ops: out }
 }
 
-pub fn compute_alignment(preimage_text: &str, postimage_text: &str, options: &ViewOptions) -> Alignment {
+pub fn compute_alignment(
+    preimage_text: &str,
+    postimage_text: &str,
+    options: &ViewOptions,
+) -> Alignment {
     let preimage_lines = split_lines(preimage_text);
     let postimage_lines = split_lines(postimage_text);
 
     if options.ignore_whitespace {
         // Diff on whitespace-stripped keys; indices still map to original lines.
-        let preimage_keys: Vec<String> = preimage_lines.iter().map(|l| strip_whitespace(l)).collect();
-        let postimage_keys: Vec<String> = postimage_lines.iter().map(|l| strip_whitespace(l)).collect();
+        let preimage_keys: Vec<String> =
+            preimage_lines.iter().map(|l| strip_whitespace(l)).collect();
+        let postimage_keys: Vec<String> = postimage_lines
+            .iter()
+            .map(|l| strip_whitespace(l))
+            .collect();
         let old_refs: Vec<&str> = preimage_keys.iter().map(|s| s.as_str()).collect();
         let new_refs: Vec<&str> = postimage_keys.iter().map(|s| s.as_str()).collect();
         let diff = TextDiff::from_slices(&old_refs, &new_refs);
@@ -1436,7 +1444,9 @@ mod tests {
             &ViewOptions::default(),
         ) {
             FileDiff::Text {
-                preimage_text, postimage_text, ..
+                preimage_text,
+                postimage_text,
+                ..
             } => {
                 assert!(preimage_text.is_empty());
                 assert_eq!(

@@ -104,7 +104,6 @@ pub enum Axis {
     VerticalNorth,
 }
 
-pub const MIN_SIDEBAR_WIDTH: f32 = 140.;
 pub const MAX_SIDEBAR_WIDTH: f32 = 360.;
 pub const MIN_COMMITS_WIDTH: f32 = 280.;
 pub const MIN_FILES_WIDTH: f32 = 200.;
@@ -150,12 +149,6 @@ pub fn default_head_meta_height(available: f32) -> f32 {
     clamp_height(available * 0.4, available)
 }
 
-/// Changes floats over commits — sidebar only needs to leave a readable commits strip.
-pub fn clamp_sidebar_width(requested: f32, available: f32) -> f32 {
-    let maximum = MAX_SIDEBAR_WIDTH.min((available - MIN_COMMITS_WIDTH).max(MIN_SIDEBAR_WIDTH));
-    requested.clamp(MIN_SIDEBAR_WIDTH, maximum)
-}
-
 /// Floating Changes width: leave `MIN_COMMITS_WIDTH` for the Commit capsule,
 /// plus the right inset and the Commit|Changes gap.
 ///
@@ -174,13 +167,6 @@ pub fn clamp_files_width(requested: f32, available: f32, sidebar_width: f32) -> 
     let clear = left_inset + theme::CHANGES_INSET + theme::CHANGES_SHADOW_GAP;
     let maximum = MAX_FILES_WIDTH.min((stage - MIN_COMMITS_WIDTH - clear).max(MIN_FILES_WIDTH));
     requested.clamp(MIN_FILES_WIDTH, maximum)
-}
-
-/// Diff window tree|dual only — same sidebar min/max, no main commits reservation.
-pub fn clamp_diff_tree_width(requested: f32, available: f32) -> f32 {
-    let maximum =
-        MAX_SIDEBAR_WIDTH.min((available - MIN_DIFF_CONTENT_WIDTH).max(MIN_SIDEBAR_WIDTH));
-    requested.clamp(MIN_SIDEBAR_WIDTH, maximum)
 }
 
 pub fn clamp_height(requested: f32, available: f32) -> f32 {
@@ -452,17 +438,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sidebar_clamp_keeps_commits_strip() {
-        assert_eq!(clamp_sidebar_width(100., 1280.), 140.);
-        assert_eq!(clamp_sidebar_width(220., 1280.), 220.);
-        assert_eq!(clamp_sidebar_width(500., 1280.), 360.);
-        // 720 − 280 commits = 440, but MAX_SIDEBAR caps at 360
-        assert_eq!(clamp_sidebar_width(400., 720.), 360.);
-        // tight window: 400 − 280 = 120 → floor at MIN_SIDEBAR
-        assert_eq!(clamp_sidebar_width(220., 400.), 140.);
-    }
-
-    #[test]
     fn files_clamp_keeps_commits_strip_beside_float() {
         assert_eq!(clamp_files_width(100., 1280., 220.), 200.);
         assert_eq!(clamp_files_width(280., 1280., 220.), 280.);
@@ -472,15 +447,6 @@ mod tests {
         // collapsed rail: left inset is back inside the stage
         assert_eq!(clamp_files_width(600., 1280., 0.), 480.);
         assert_eq!(clamp_files_width(400., 400., 0.), 200.);
-    }
-
-    #[test]
-    fn diff_tree_clamp_keeps_dual_pane() {
-        assert_eq!(clamp_diff_tree_width(100., 1280.), 140.);
-        assert_eq!(clamp_diff_tree_width(200., 1280.), 200.);
-        assert_eq!(clamp_diff_tree_width(500., 1280.), 360.);
-        // 560 − 400 content = 160 max
-        assert_eq!(clamp_diff_tree_width(300., 560.), 160.);
     }
 
     #[test]

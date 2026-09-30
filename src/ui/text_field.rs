@@ -955,10 +955,7 @@ fn cursor_line_local(
         return (0, 0);
     }
     for (ix, (start, line)) in lines.iter().enumerate() {
-        let next_start = lines
-            .get(ix + 1)
-            .map(|(s, _)| *s)
-            .unwrap_or(usize::MAX);
+        let next_start = lines.get(ix + 1).map(|(s, _)| *s).unwrap_or(usize::MAX);
         if offset < next_start || ix + 1 == lines.len() {
             let local = offset.saturating_sub(*start).min(line.len());
             return (ix, local);

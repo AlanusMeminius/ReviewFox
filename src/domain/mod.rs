@@ -209,21 +209,30 @@ impl Alignment {
             .iter()
             .filter_map(|op| match op {
                 AlignmentOp::Equal { .. } => None,
-                AlignmentOp::Insert { after_preimage, postimages } => Some(Hunk {
+                AlignmentOp::Insert {
+                    after_preimage,
+                    postimages,
+                } => Some(Hunk {
                     preimage: LineSpan {
                         start: *after_preimage,
                         count: 0,
                     },
                     postimage: *postimages,
                 }),
-                AlignmentOp::Delete { preimages, at_postimage } => Some(Hunk {
+                AlignmentOp::Delete {
+                    preimages,
+                    at_postimage,
+                } => Some(Hunk {
                     preimage: *preimages,
                     postimage: LineSpan {
                         start: *at_postimage,
                         count: 0,
                     },
                 }),
-                AlignmentOp::Replace { preimages, postimages } => Some(Hunk {
+                AlignmentOp::Replace {
+                    preimages,
+                    postimages,
+                } => Some(Hunk {
                     preimage: *preimages,
                     postimage: *postimages,
                 }),
@@ -518,7 +527,11 @@ fn collapsed_equal_containing(
         return None;
     }
     for (op_idx, op) in alignment.ops.iter().enumerate() {
-        let AlignmentOp::Equal { preimage, postimage } = *op else {
+        let AlignmentOp::Equal {
+            preimage,
+            postimage,
+        } = *op
+        else {
             continue;
         };
         let n = preimage.count.min(postimage.count);
@@ -755,12 +768,18 @@ pub struct TokenPart {
 
 /// Intra-line marks for a Replace block. Same-line (1↔1) uses LCS token
 /// pairing; many-to-many uses set membership and does not invent row links.
-pub fn replace_marks(preimages: &[&str], postimages: &[&str]) -> (Vec<Vec<TokenPart>>, Vec<Vec<TokenPart>>) {
+pub fn replace_marks(
+    preimages: &[&str],
+    postimages: &[&str],
+) -> (Vec<Vec<TokenPart>>, Vec<Vec<TokenPart>>) {
     if preimages.len() == 1 && postimages.len() == 1 {
         let (o, n) = pair_marks(preimages[0], postimages[0]);
         (vec![o], vec![n])
     } else {
-        (block_marks(preimages, postimages), block_marks(postimages, preimages))
+        (
+            block_marks(preimages, postimages),
+            block_marks(postimages, preimages),
+        )
     }
 }
 
@@ -962,7 +981,9 @@ mod tests {
     #[test]
     fn review_add_line_comment_is_count_one_span() {
         let mut review = Review::new(fake_comparison());
-        let via_wrapper = review.add_line_comment("b.rs", Side::Postimage, 9, "one").id;
+        let via_wrapper = review
+            .add_line_comment("b.rs", Side::Postimage, 9, "one")
+            .id;
         let mut review2 = Review::new(fake_comparison());
         let via_span = review2
             .add_line_span_comment("b.rs", Side::Postimage, 9, 1, "one")
@@ -1110,7 +1131,8 @@ mod tests {
     #[test]
     fn changed_runs_bridge_whitespace_between_changed_words() {
         // "old content 10" vs "completely different 10".
-        let (preimage, postimage) = replace_marks(&["old content 10"], &["completely different 10"]);
+        let (preimage, postimage) =
+            replace_marks(&["old content 10"], &["completely different 10"]);
         assert_eq!(changed_runs(&preimage[0]), vec![(0, 11)]);
         assert_eq!(changed_runs(&postimage[0]), vec![(0, 20)]);
     }
@@ -1193,7 +1215,11 @@ mod tests {
         let preimages = ["old-a", "old-b", "old-c"];
         let postimages = ["new-a"];
         let (preimage_marks, postimage_marks) = replace_marks(&preimages, &postimages);
-        assert_eq!(preimage_marks.len(), 3, "one mark row per old line — no padding");
+        assert_eq!(
+            preimage_marks.len(),
+            3,
+            "one mark row per old line — no padding"
+        );
         assert_eq!(
             postimage_marks.len(),
             1,
@@ -1329,13 +1355,19 @@ mod tests {
             hits.iter()
                 .map(|m| (m.path.as_deref(), m.side, m.ln))
                 .collect::<Vec<_>>(),
-            vec![(Some("b.rs"), Side::Postimage, 1), (Some("a.rs"), Side::Preimage, 1),]
+            vec![
+                (Some("b.rs"), Side::Postimage, 1),
+                (Some("a.rs"), Side::Preimage, 1),
+            ]
         );
     }
 
     #[test]
     fn search_side_and_files_cycle_helpers() {
-        assert_eq!(next_search_side(SearchSide::Preimage), SearchSide::Postimage);
+        assert_eq!(
+            next_search_side(SearchSide::Preimage),
+            SearchSide::Postimage
+        );
         assert_eq!(next_search_side(SearchSide::Postimage), SearchSide::Both);
         assert_eq!(next_search_side(SearchSide::Both), SearchSide::Preimage);
         assert_eq!(toggle_search_files(SearchFiles::File), SearchFiles::All);

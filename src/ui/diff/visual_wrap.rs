@@ -147,7 +147,11 @@ impl<'a> WrapCtx<'a> {
             && preimage_text[preimage_bytes.clone()] == postimage_text[postimage_bytes.clone()]
         {
             let display = display_line(&preimage_text[preimage_bytes.clone()]);
-            Some(wrap_breaks_for_line(display.as_ref(), self.preimage_w, self.cw))
+            Some(wrap_breaks_for_line(
+                display.as_ref(),
+                self.preimage_w,
+                self.cw,
+            ))
         } else {
             None
         };

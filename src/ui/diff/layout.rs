@@ -127,7 +127,9 @@ impl Bridge {
     pub fn position_copy(&self) -> String {
         match *self {
             Self::Insert {
-                after_preimage, postimages, ..
+                after_preimage,
+                postimages,
+                ..
             } => {
                 let after = if after_preimage == 0 {
                     "file start".to_string()
@@ -136,13 +138,21 @@ impl Bridge {
                 };
                 format!("Insert postimage {} after {after}", span_label(postimages))
             }
-            Self::Delete { preimages, at_postimage, .. } => {
+            Self::Delete {
+                preimages,
+                at_postimage,
+                ..
+            } => {
                 format!(
                     "Delete preimage {} at postimage {at_postimage}",
                     span_label(preimages)
                 )
             }
-            Self::Replace { preimages, postimages, .. } => {
+            Self::Replace {
+                preimages,
+                postimages,
+                ..
+            } => {
                 format!(
                     "Replace preimage {} ↔ postimage {}",
                     span_label(preimages),
@@ -167,26 +177,36 @@ impl Bridge {
             (Self::Insert { preimage_seam, .. }, Side::Preimage) => (preimage_seam, preimage_seam),
             (
                 Self::Insert {
-                    postimage_from, postimage_to, ..
+                    postimage_from,
+                    postimage_to,
+                    ..
                 },
                 Side::Postimage,
             ) => (postimage_from, postimage_to),
             (
                 Self::Delete {
-                    preimage_from, preimage_to, ..
+                    preimage_from,
+                    preimage_to,
+                    ..
                 },
                 Side::Preimage,
             ) => (preimage_from, preimage_to),
-            (Self::Delete { postimage_seam, .. }, Side::Postimage) => (postimage_seam, postimage_seam),
+            (Self::Delete { postimage_seam, .. }, Side::Postimage) => {
+                (postimage_seam, postimage_seam)
+            }
             (
                 Self::Replace {
-                    preimage_from, preimage_to, ..
+                    preimage_from,
+                    preimage_to,
+                    ..
                 },
                 Side::Preimage,
             ) => (preimage_from, preimage_to),
             (
                 Self::Replace {
-                    postimage_from, postimage_to, ..
+                    postimage_from,
+                    postimage_to,
+                    ..
                 },
                 Side::Postimage,
             ) => (postimage_from, postimage_to),
@@ -523,7 +543,10 @@ impl Layout {
                 hunk_lands.push(HunkLand { target, s });
             }
             match *op {
-                AlignmentOp::Equal { preimage: o, postimage: n } => {
+                AlignmentOp::Equal {
+                    preimage: o,
+                    postimage: n,
+                } => {
                     let count = o.count.min(n.count);
                     max_ln = max_ln.max(span_end(o, count)).max(span_end(n, count));
                     let collapse = fold.is_some_and(|f| {
@@ -579,7 +602,10 @@ impl Layout {
                         );
                     }
                 }
-                AlignmentOp::Insert { after_preimage, postimages } => {
+                AlignmentOp::Insert {
+                    after_preimage,
+                    postimages,
+                } => {
                     max_ln = max_ln.max(span_end(postimages, postimages.count));
                     let preimage_seam = preimage.rows() as u32;
                     let postimage_from = postimage.rows() as u32;
@@ -603,7 +629,10 @@ impl Layout {
                         postimage_to: postimage.rows() as u32,
                     });
                 }
-                AlignmentOp::Delete { preimages, at_postimage } => {
+                AlignmentOp::Delete {
+                    preimages,
+                    at_postimage,
+                } => {
                     max_ln = max_ln.max(span_end(preimages, preimages.count));
                     let preimage_from = preimage.rows() as u32;
                     let postimage_seam = postimage.rows() as u32;
@@ -627,7 +656,10 @@ impl Layout {
                         postimage_seam,
                     });
                 }
-                AlignmentOp::Replace { preimages, postimages } => {
+                AlignmentOp::Replace {
+                    preimages,
+                    postimages,
+                } => {
                     max_ln = max_ln
                         .max(span_end(preimages, preimages.count))
                         .max(span_end(postimages, postimages.count));
@@ -720,7 +752,10 @@ impl Layout {
             let preimage_texts = self.block_texts(Side::Preimage, preimage_from, preimage_to);
             let postimage_texts = self.block_texts(Side::Postimage, postimage_from, postimage_to);
             let (preimage, postimage) = replace_marks(&preimage_texts, &postimage_texts);
-            BlockMarks { preimage, postimage }
+            BlockMarks {
+                preimage,
+                postimage,
+            }
         });
         let (parts, line_span) = match side {
             Side::Preimage => (&marks.preimage, preimages),
@@ -831,7 +866,12 @@ fn push_equal_span(
         }
     } else {
         preimage.push_lines(preimage_ranges, span(o_start, count), LineKind::Equal, None);
-        postimage.push_lines(postimage_ranges, span(n_start, count), LineKind::Equal, None);
+        postimage.push_lines(
+            postimage_ranges,
+            span(n_start, count),
+            LineKind::Equal,
+            None,
+        );
         advance(knots, count, count);
     }
 }
@@ -938,9 +978,16 @@ fn land_from_op(op: &AlignmentOp) -> Option<HunkJumpTarget> {
     };
     match *op {
         AlignmentOp::Equal { .. } => None,
-        AlignmentOp::Insert { postimages, .. } => (postimages.count > 0).then(|| postimage_land(postimages.start)),
-        AlignmentOp::Delete { preimages, .. } => (preimages.count > 0).then(|| preimage_land(preimages.start)),
-        AlignmentOp::Replace { preimages, postimages } => {
+        AlignmentOp::Insert { postimages, .. } => {
+            (postimages.count > 0).then(|| postimage_land(postimages.start))
+        }
+        AlignmentOp::Delete { preimages, .. } => {
+            (preimages.count > 0).then(|| preimage_land(preimages.start))
+        }
+        AlignmentOp::Replace {
+            preimages,
+            postimages,
+        } => {
             if preimages.count > 0 {
                 Some(preimage_land(preimages.start))
             } else if postimages.count > 0 {
@@ -963,7 +1010,13 @@ pub(crate) mod tests {
         ops: Vec<AlignmentOp>,
         fold: Option<&FoldState>,
     ) -> Layout {
-        Layout::build(preimage.into(), postimage.into(), &Alignment { ops }, fold, None)
+        Layout::build(
+            preimage.into(),
+            postimage.into(),
+            &Alignment { ops },
+            fold,
+            None,
+        )
     }
 
     pub(crate) fn eq(preimage: u32, postimage: u32, count: u32) -> AlignmentOp {
@@ -1124,7 +1177,13 @@ ab	c
             None,
         );
         assert_eq!(layout.preimage.rows(), 15);
-        assert!(layout.preimage.lines().iter().all(|l| l.kind == LineKind::Equal));
+        assert!(
+            layout
+                .preimage
+                .lines()
+                .iter()
+                .all(|l| l.kind == LineKind::Equal)
+        );
         assert_eq!(layout.preimage.lines()[0].ln, 1);
         assert_eq!(layout.preimage.lines()[14].ln, 15);
         assert_eq!(
@@ -1514,9 +1573,16 @@ ab	c
         assert_eq!(changed(Side::Postimage), ["40"]);
         assert!(layout.marks[0].get().is_some());
         let old_line = &layout.preimage.lines()[0];
-        assert_eq!(layout.mark_runs(Side::Preimage, old_line), Some(vec![(16, 18)]));
+        assert_eq!(
+            layout.mark_runs(Side::Preimage, old_line),
+            Some(vec![(16, 18)])
+        );
         // Equal lines have no marks.
-        assert!(layout.marks(Side::Preimage, &layout.preimage.lines()[1]).is_none());
+        assert!(
+            layout
+                .marks(Side::Preimage, &layout.preimage.lines()[1])
+                .is_none()
+        );
     }
 
     #[test]
@@ -1601,7 +1667,12 @@ ab	c
         )
     }
 
-    fn wrap_layout_unfolded(preimage: &str, postimage: &str, ops: Vec<AlignmentOp>, width: f32) -> Layout {
+    fn wrap_layout_unfolded(
+        preimage: &str,
+        postimage: &str,
+        ops: Vec<AlignmentOp>,
+        width: f32,
+    ) -> Layout {
         wrap_layout(preimage, postimage, ops, width, None)
     }
 
@@ -1615,7 +1686,10 @@ ab	c
         assert!(wrapped.postimage.lines()[2].is_equal_padding());
         assert!(wrapped.preimage.lines()[0].shows_line_number());
         let end = wrapped.knots.last().unwrap();
-        assert_eq!(end.preimage_y, end.postimage_y, "Equal pair stays collinear");
+        assert_eq!(
+            end.preimage_y, end.postimage_y,
+            "Equal pair stays collinear"
+        );
     }
 
     #[test]
@@ -1675,12 +1749,20 @@ ab	c
         let tabs = TabExpansion::new(&line);
         let match_at = crate::domain::first_match_byte(&line, "aaaa").unwrap();
         let display = tabs.display_offset(match_at);
-        let breaks = layout.wrap.as_ref().unwrap().preimage_breaks.get(&1).unwrap();
+        let breaks = layout
+            .wrap
+            .as_ref()
+            .unwrap()
+            .preimage_breaks
+            .get(&1)
+            .unwrap();
         assert!(
             breaks.breaks.iter().any(|&b| display >= b),
             "match should fall on a continuation row"
         );
-        let row = layout.row_of_match_byte(Side::Preimage, 1, match_at).unwrap();
+        let row = layout
+            .row_of_match_byte(Side::Preimage, 1, match_at)
+            .unwrap();
         assert!(row > layout.preimage.row_of_line(1).unwrap());
     }
 
@@ -1707,7 +1789,12 @@ ab	c
         );
         let omit_key = |o: &OmitRow| (o.id, o.from, o.to);
         assert_eq!(
-            folded.preimage.omits().iter().map(omit_key).collect::<Vec<_>>(),
+            folded
+                .preimage
+                .omits()
+                .iter()
+                .map(omit_key)
+                .collect::<Vec<_>>(),
             reference
                 .preimage
                 .omits()
@@ -1715,7 +1802,10 @@ ab	c
                 .map(omit_key)
                 .collect::<Vec<_>>()
         );
-        assert_eq!(folded.preimage.seams().len(), reference.preimage.seams().len());
+        assert_eq!(
+            folded.preimage.seams().len(),
+            reference.preimage.seams().len()
+        );
         let omit_rows: Vec<_> = dump(&folded.preimage)
             .into_iter()
             .filter(|s| s.starts_with('~'))
@@ -1724,6 +1814,10 @@ ab	c
         assert_eq!(folded.preimage.omits()[0].row, 24);
         assert_eq!(folded.preimage.seams(), [50]);
         assert!(dump(&folded.preimage).iter().any(|s| s.starts_with("8 L8")));
-        assert!(dump(&folded.preimage).iter().any(|s| s.starts_with("10 L10")));
+        assert!(
+            dump(&folded.preimage)
+                .iter()
+                .any(|s| s.starts_with("10 L10"))
+        );
     }
 }

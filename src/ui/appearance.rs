@@ -205,12 +205,7 @@ pub fn ui_text(cx: &App, design: f32) -> Pixels {
 /// Downward shift that centres glyph ink in its line box: gpui centres
 /// ascent + descent, but ink only spans `ink_below` below the baseline to
 /// `ink_above` above it (both distances ≥ 0).
-pub(crate) fn ink_center_nudge(
-    ascent: f32,
-    descent: f32,
-    ink_above: f32,
-    ink_below: f32,
-) -> f32 {
+pub(crate) fn ink_center_nudge(ascent: f32, descent: f32, ink_above: f32, ink_below: f32) -> f32 {
     (ink_above - ink_below + descent.abs() - ascent) / 2.
 }
 

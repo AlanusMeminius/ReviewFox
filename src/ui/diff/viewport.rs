@@ -151,7 +151,8 @@ impl<'a> Viewport<'a> {
         for i in self.bridge_window() {
             let bridge = &self.layout.bridges[i];
             let from_other = match (bridge, side) {
-                (Bridge::Insert { .. }, Side::Preimage) | (Bridge::Delete { .. }, Side::Postimage) => true,
+                (Bridge::Insert { .. }, Side::Preimage)
+                | (Bridge::Delete { .. }, Side::Postimage) => true,
                 _ => false,
             };
             if !from_other {
@@ -180,7 +181,10 @@ impl<'a> Viewport<'a> {
         self.bridge_window()
             .filter_map(|i| self.place(i))
             .filter_map(|mut p| {
-                p.tab_side = match (off_pane(p.ends(Side::Preimage)), off_pane(p.ends(Side::Postimage))) {
+                p.tab_side = match (
+                    off_pane(p.ends(Side::Preimage)),
+                    off_pane(p.ends(Side::Postimage)),
+                ) {
                     (false, false) => None,
                     (false, true) => Some(Side::Preimage),
                     (true, false) => Some(Side::Postimage),
@@ -280,11 +284,13 @@ impl<'a> Viewport<'a> {
             bridges.len(),
             |i| {
                 let b = &bridges[i];
-                y(b.rows(Side::Preimage).0, Side::Preimage).min(y(b.rows(Side::Postimage).0, Side::Postimage))
+                y(b.rows(Side::Preimage).0, Side::Preimage)
+                    .min(y(b.rows(Side::Postimage).0, Side::Postimage))
             },
             |i| {
                 let b = &bridges[i];
-                y(b.rows(Side::Preimage).1, Side::Preimage).max(y(b.rows(Side::Postimage).1, Side::Postimage))
+                y(b.rows(Side::Preimage).1, Side::Preimage)
+                    .max(y(b.rows(Side::Postimage).1, Side::Postimage))
             },
             self.view_h,
         )
@@ -471,7 +477,11 @@ pub fn s_for_content(
 ) -> f32 {
     let knots = &layout.knots;
     let (cur_old, cur_new) = interp(current_s, knots, row_h);
-    let cur = if side == Side::Preimage { cur_old } else { cur_new };
+    let cur = if side == Side::Preimage {
+        cur_old
+    } else {
+        cur_new
+    };
     if (cur - content_px).abs() < 0.5 {
         return current_s;
     }
@@ -557,13 +567,7 @@ pub fn s_for_match_byte(
     let anchor = anchor_of(view_h);
     // top ≈ content_y − anchor; want row·row_h − top = view_h/2
     let content_px = row as f32 * row_h - view_h / 2. + anchor;
-    Some(s_for_content(
-        layout,
-        side,
-        content_px,
-        row_h,
-        current_s,
-    ))
+    Some(s_for_content(layout, side, content_px, row_h, current_s))
 }
 
 pub fn clamp_s(layout: &Layout, s: f32, view_h: f32, row_h: f32) -> f32 {
@@ -735,7 +739,10 @@ fn interp(s: f32, knots: &[ScrollKnot], row_h: f32) -> (f32, f32) {
         (s - a_s) / (b_s - a_s)
     };
     let lerp = |a: u32, b: u32| (a as f32 + t * (b as f32 - a as f32)) * row_h;
-    (lerp(ka.preimage_y, kb.preimage_y), lerp(ka.postimage_y, kb.postimage_y))
+    (
+        lerp(ka.preimage_y, kb.preimage_y),
+        lerp(ka.postimage_y, kb.postimage_y),
+    )
 }
 
 fn subtract_span(span: (f32, f32), cover: (f32, f32)) -> Vec<(f32, f32)> {
@@ -1122,7 +1129,12 @@ mod tests {
     #[test]
     fn anchor_on_a_separator_holds_the_line_above_it() {
         let (preimage, postimage, ops) = folded_case();
-        let collapsed = build(&preimage, &postimage, ops.clone(), Some(&FoldState::collapsed()));
+        let collapsed = build(
+            &preimage,
+            &postimage,
+            ops.clone(),
+            Some(&FoldState::collapsed()),
+        );
         // Old row 10 is the second separator.
         let s = s_for_content(&collapsed, Side::Preimage, 10.5 * ROW_H, ROW_H, 0.);
         let vp = Viewport::new(&collapsed, s, VIEW_H, ROW_H);
@@ -1209,7 +1221,10 @@ mod tests {
     fn stretched_case(old_long: bool, second: AlignmentOp) -> Layout {
         let (o, n) = if old_long { (40, 1) } else { (1, 40) };
         let second_rows = |s: &AlignmentOp| match s {
-            AlignmentOp::Replace { preimages, postimages } => (preimages.count, postimages.count),
+            AlignmentOp::Replace {
+                preimages,
+                postimages,
+            } => (preimages.count, postimages.count),
             AlignmentOp::Insert { postimages, .. } => (0, postimages.count),
             _ => unreachable!(),
         };
@@ -1353,8 +1368,14 @@ mod tests {
     #[test]
     fn enabling_sync_picks_last_scrolled_side_or_old() {
         assert_eq!(shared_x_on_sync_enable([10., 90.], None), 10.);
-        assert_eq!(shared_x_on_sync_enable([10., 90.], Some(Side::Preimage)), 10.);
-        assert_eq!(shared_x_on_sync_enable([10., 90.], Some(Side::Postimage)), 90.);
+        assert_eq!(
+            shared_x_on_sync_enable([10., 90.], Some(Side::Preimage)),
+            10.
+        );
+        assert_eq!(
+            shared_x_on_sync_enable([10., 90.], Some(Side::Postimage)),
+            90.
+        );
     }
 
     #[test]
@@ -1443,7 +1464,13 @@ mod tests {
         assert!(layout.preimage.rows() >= 4);
         let first = layout.preimage.row_of_line(2).unwrap();
         assert!(first > 0, "wrapped line not at content y 0");
-        let s = s_for_content(&layout, Side::Preimage, (first + 1) as f32 * ROW_H, ROW_H, 0.);
+        let s = s_for_content(
+            &layout,
+            Side::Preimage,
+            (first + 1) as f32 * ROW_H,
+            ROW_H,
+            0.,
+        );
         let cap = Viewport::new(&layout, s, H, ROW_H)
             .capture_anchor()
             .expect("anchor on continuation");
@@ -1484,7 +1511,13 @@ mod tests {
         // Enough equal lines that a mid-file wrapped continuation can scroll to center.
         let long = "a".repeat(25);
         let text: String = (0..30)
-            .map(|i| if i == 14 { long.clone() } else { format!("L{i}") })
+            .map(|i| {
+                if i == 14 {
+                    long.clone()
+                } else {
+                    format!("L{i}")
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let layout = wrap_layout(&text, &text, vec![eq(1, 1, 30)], 100., None);

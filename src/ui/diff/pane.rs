@@ -303,7 +303,8 @@ impl DualPane {
         // Plain text until the background task finishes (or the size guard skips).
         self.highlights = [None, None];
         if let Some(file) = self.file.as_ref() {
-            let first = first_line(&file.postimage_text).or_else(|| first_line(&file.preimage_text));
+            let first =
+                first_line(&file.postimage_text).or_else(|| first_line(&file.preimage_text));
             if let Some(lang) = syntax::detect(Path::new(path), first.unwrap_or("")) {
                 let preimage_text = file.preimage_text.clone();
                 let postimage_text = file.postimage_text.clone();
@@ -514,7 +515,13 @@ impl DualPane {
             }
             None
         };
-        let mut layout = Layout::build(preimage_text, postimage_text, &alignment, Some(&self.fold), wrap);
+        let mut layout = Layout::build(
+            preimage_text,
+            postimage_text,
+            &alignment,
+            Some(&self.fold),
+            wrap,
+        );
         layout.set_comments(self.comments.iter().map(|c| &c.anchor));
         debug_assert!(!soft || !can_wrap || layout.wrap.is_some());
         if t.is_some() {

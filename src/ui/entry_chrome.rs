@@ -1,9 +1,9 @@
 //! Exclusive Entry chrome decisions (ADR-0011, prototype A; open restore ADR-0012).
 //!
 //! Pure seam: which Entry kind is active, what a kind hit does, empty-MR /
-//! open-picker-on-enter, what opening a Workspace does with its stored `mr`
-//! label, and whether titlebar shows the two-piece GitLab chrome (kind track +
-//! value pill) vs the Branch-only pill. Rendering stays in `app_view`.
+//! open-picker-on-enter, and what opening a Workspace does with its stored `mr`
+//! label. The kind track is always shown; the value pill hides only while a
+//! picker is open. Rendering stays in `app_view`.
 
 use crate::workspace_store::MrEntryLabel;
 
@@ -13,13 +13,6 @@ pub enum EntryKind {
     Branch,
     Mr,
     Worktree,
-}
-
-/// Titlebar Entry chrome layout when a Workspace is open.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EntryChromeMode {
-    /// Kind track + value pill. Shown with or without GitLab (ADR-0013).
-    KindTrackAndValuePill,
 }
 
 /// Result of clicking a kind hit on the kind track.
@@ -56,11 +49,6 @@ pub fn active_entry_kind(mr_selected: bool, empty_mr: bool, worktree: bool) -> E
     } else {
         EntryKind::Branch
     }
-}
-
-/// Chrome layout. The kind track is always on so Worktree is reachable without GitLab.
-pub fn chrome_mode(_gitlab_visible: bool) -> EntryChromeMode {
-    EntryChromeMode::KindTrackAndValuePill
 }
 
 /// While a picker is open, hide only the value pill (kind track stays usable).
@@ -127,12 +115,7 @@ pub fn restore_failure_action(from_kind_switch: bool) -> RestoreFailureAction {
 }
 
 /// Value-hit label for the active kind.
-pub fn value_label(
-    kind: EntryKind,
-    branch: &str,
-    mr_iid: Option<u64>,
-    checkout: &str,
-) -> String {
+pub fn value_label(kind: EntryKind, branch: &str, mr_iid: Option<u64>, checkout: &str) -> String {
     match kind {
         EntryKind::Branch => branch.to_string(),
         EntryKind::Worktree => checkout.to_string(),
@@ -161,12 +144,6 @@ mod tests {
         assert_eq!(active_entry_kind(false, true, false), EntryKind::Mr);
         assert_eq!(active_entry_kind(true, true, false), EntryKind::Mr);
         assert_eq!(active_entry_kind(true, true, true), EntryKind::Worktree);
-    }
-
-    #[test]
-    fn kind_track_shows_with_or_without_gitlab() {
-        assert_eq!(chrome_mode(true), EntryChromeMode::KindTrackAndValuePill);
-        assert_eq!(chrome_mode(false), EntryChromeMode::KindTrackAndValuePill);
     }
 
     #[test]
