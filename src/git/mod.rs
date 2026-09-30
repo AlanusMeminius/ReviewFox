@@ -744,8 +744,7 @@ pub struct WorktreeEntry {
     pub checkout_label: String,
 }
 
-pub fn load_worktree(repository: &Repository) -> Result<WorktreeEntry> {
-    let repo = git2::Repository::open(repository.path()).map_err(map_git)?;
+fn checkout_identity(repo: &git2::Repository) -> Result<(Oid, String)> {
     let head_ref = repo.head().map_err(map_git)?;
     let oid = oid_from_git(head_ref.peel_to_commit().map_err(map_git)?.id());
     let checkout_label = if repo.head_detached().unwrap_or(false) {
@@ -753,12 +752,33 @@ pub fn load_worktree(repository: &Repository) -> Result<WorktreeEntry> {
     } else {
         head_ref.shorthand().unwrap_or("HEAD").to_string()
     };
-    let comparison = Comparison {
+    Ok((oid, checkout_label))
+}
+
+fn worktree_comparison(repository: &Repository, oid: Oid) -> Comparison {
+    Comparison {
         repository: repository.clone(),
         base_oid: Some(oid),
         head_oid: oid,
         worktree: true,
-    };
+    }
+}
+
+/// HEAD identity only. Path scan is `load_worktree` and must not run on the UI thread.
+pub fn worktree_head(repository: &Repository) -> Result<WorktreeEntry> {
+    let repo = git2::Repository::open(repository.path()).map_err(map_git)?;
+    let (oid, checkout_label) = checkout_identity(&repo)?;
+    Ok(WorktreeEntry {
+        comparison: worktree_comparison(repository, oid),
+        changed_paths: Vec::new(),
+        checkout_label,
+    })
+}
+
+pub fn load_worktree(repository: &Repository) -> Result<WorktreeEntry> {
+    let repo = git2::Repository::open(repository.path()).map_err(map_git)?;
+    let (oid, checkout_label) = checkout_identity(&repo)?;
+    let comparison = worktree_comparison(repository, oid);
     let changed_paths = list_changed_paths(&repo, &comparison)?;
     Ok(WorktreeEntry {
         comparison,
@@ -1144,7 +1164,11 @@ mod tests {
         std::fs::write(dir.join("b.txt"), "new\n").unwrap();
 
         let bb = BranchBrowser::open(&dir).expect("open");
+        let shell = worktree_head(&bb.comparison.repository).expect("head");
+        assert!(shell.changed_paths.is_empty());
         let wt = load_worktree(&bb.comparison.repository).expect("worktree");
+        assert_eq!(shell.comparison, wt.comparison);
+        assert_eq!(shell.checkout_label, wt.checkout_label);
         let paths: Vec<&str> = wt.changed_paths.iter().map(|p| p.path.as_str()).collect();
         assert!(paths.contains(&"a.txt"));
         assert!(paths.contains(&"new.txt"));

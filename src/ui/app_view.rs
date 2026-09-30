@@ -3,7 +3,8 @@ use gpui::{
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, ParentElement, Pixels, Point, Render, Size, StatefulInteractiveElement, Styled,
     TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowDecorations, WindowHandle,
-    WindowOptions, anchored, canvas, deferred, div, ease_out_quint, prelude::*, px, rgb, svg,
+    WindowOptions, Transformation, anchored, canvas, deferred, div, ease_out_quint, percentage,
+    prelude::*, px, rgb, svg,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -57,6 +58,12 @@ pub struct AppView {
     mr_entry: Option<MrEntry>,
     /// Checkout vs HEAD while the Worktree kind is selected. Branch Browser stays put.
     worktree: Option<git::WorktreeEntry>,
+    /// Bumped on every scan start and every leave, so a late scan cannot repaint.
+    worktree_generation: u64,
+    /// Path scan is in flight. An empty list is not yet "clean checkout".
+    worktree_paths_pending: bool,
+    /// Refresh scan failed. The previous path list stays on the island.
+    worktree_scan_error: Option<String>,
     /// MR kind held with no selected Entry (`Select MR…`); Comparison stays on Branch Browser.
     empty_mr: bool,
     /// Kind-switch restore in flight — failure clears to empty MR + picker.
@@ -135,6 +142,9 @@ impl AppView {
             mr_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_entry: None,
             worktree: None,
+            worktree_generation: 0,
+            worktree_paths_pending: false,
+            worktree_scan_error: None,
             empty_mr: false,
             pending_kind_restore: false,
             repo_menu: None,
@@ -201,21 +211,8 @@ impl AppView {
                     this.sidebar_width
                 };
                 // HorizontalTrailing reports distance to viewport right; float is inset.
-                // Worktree centers the island, so width is twice the distance from the
-                // stage center to the pointer (ponytail: one width field, two geometries).
-                let width = if this.worktree.is_some() {
-                    let (stage_left, stage_w) = stage_span(this, available);
-                    let pointer_x = available - requested;
-                    let center = stage_left + stage_w / 2.;
-                    let slot_w = (center - pointer_x) * 2.;
-                    splitter::clamp_files_width(
-                        slot_w - theme::CHANGES_SHADOW_GAP,
-                        available,
-                        sidebar,
-                    )
-                } else {
-                    splitter::clamp_files_width(requested - theme::CHANGES_INSET, available, sidebar)
-                };
+                let width =
+                    splitter::clamp_files_width(requested - theme::CHANGES_INSET, available, sidebar);
                 if this.files_width != width {
                     this.files_width = width;
                     cx.notify();
@@ -371,9 +368,56 @@ impl AppView {
         }
     }
 
+    fn clear_worktree(&mut self) {
+        self.worktree = None;
+        self.worktree_paths_pending = false;
+        self.worktree_scan_error = None;
+        self.worktree_generation = self.worktree_generation.wrapping_add(1);
+    }
+
+    /// HEAD is read here so the kind switches immediately. The workdir scan runs
+    /// off the UI thread; a large checkout otherwise freezes the window.
+    fn spawn_worktree_paths(
+        &mut self,
+        repository: Repository,
+        refresh: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.worktree_generation = self.worktree_generation.wrapping_add(1);
+        let generation = self.worktree_generation;
+        self.worktree_paths_pending = true;
+        self.worktree_scan_error = None;
+        cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_executor()
+                .spawn(async move { git::load_worktree(&repository) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.worktree_generation != generation {
+                    return;
+                }
+                this.worktree_paths_pending = false;
+                match loaded {
+                    Ok(entry) => this.worktree = Some(entry),
+                    Err(e) => {
+                        if refresh {
+                            this.worktree_scan_error = Some(e.0);
+                        } else {
+                            this.clear_worktree();
+                            this.state = MainState::Error(e.0);
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Hold empty MR kind (`Select MR…`) and open the picker.
     fn enter_empty_mr(&mut self, cx: &mut Context<Self>) {
-        self.worktree = None;
+        self.clear_worktree();
         self.branch_picker = None;
         self.mr_entry = None;
         self.empty_mr = true;
@@ -395,7 +439,7 @@ impl AppView {
         match entry_chrome::kind_switch_action(current, target, last_mr.as_ref()) {
             KindSwitchAction::Stay => {}
             KindSwitchAction::SelectBranch => {
-                self.worktree = None;
+                self.clear_worktree();
                 self.branch_picker = None;
                 self.mr_picker = None;
                 self.empty_mr = false;
@@ -404,7 +448,7 @@ impl AppView {
             }
             KindSwitchAction::SelectWorktree => self.enter_worktree(cx),
             KindSwitchAction::RestoreMr(label) => {
-                self.worktree = None;
+                self.clear_worktree();
                 self.branch_picker = None;
                 self.mr_picker = None;
                 self.begin_restore_mr(label, cx);
@@ -421,7 +465,7 @@ impl AppView {
             return;
         };
         let repository = bb.comparison.repository.clone();
-        let loaded = match git::load_worktree(&repository) {
+        let shell = match git::worktree_head(&repository) {
             Ok(entry) => entry,
             Err(e) => {
                 self.state = MainState::Error(e.0);
@@ -430,13 +474,14 @@ impl AppView {
         };
         self.branch_picker = None;
         self.mr_picker = None;
+        self.worktree = Some(shell);
+        self.spawn_worktree_paths(repository, false, cx);
         if self.mr_entry.is_some() {
             self.clear_mr_entry(cx);
         } else {
             self.empty_mr = false;
             self.pending_kind_restore = false;
         }
-        self.worktree = Some(loaded);
     }
 
     fn refresh_worktree(&mut self, cx: &mut Context<Self>) {
@@ -444,10 +489,7 @@ impl AppView {
             return;
         };
         let repository = current.comparison.repository.clone();
-        match git::load_worktree(&repository) {
-            Ok(entry) => self.worktree = Some(entry),
-            Err(e) => self.state = MainState::Error(e.0),
-        }
+        self.spawn_worktree_paths(repository, true, cx);
         cx.notify();
     }
 
@@ -477,7 +519,7 @@ impl AppView {
                 self.branch_picker = None;
                 self.mr_picker = None;
                 self.mr_entry = None;
-                self.worktree = None;
+                self.clear_worktree();
                 self.empty_mr = false;
                 self.pending_kind_restore = false;
             }
@@ -806,7 +848,7 @@ impl AppView {
     }
 
     fn open_branch(&mut self, name: &str, cx: &mut Context<Self>) {
-        self.worktree = None;
+        self.clear_worktree();
         self.mr_entry = None;
         self.empty_mr = false;
         self.pending_kind_restore = false;
@@ -875,7 +917,7 @@ impl AppView {
         self.repo_menu = None;
         if removing_current {
             self.state = MainState::Empty;
-            self.worktree = None;
+            self.clear_worktree();
             self.branch_picker = None;
             self.mr_picker = None;
             self.mr_entry = None;
@@ -1081,7 +1123,7 @@ impl AppView {
                     Ok(bb) => {
                         this.state = MainState::Ready(bb);
                         this.mr_entry = None;
-                        this.worktree = None;
+                        this.clear_worktree();
                         this.empty_mr = false;
                         this.pending_kind_restore = false;
                         this.mr_picker = None;
@@ -1306,7 +1348,7 @@ impl Render for AppView {
                             .overflow_hidden()
                             .bg(theme::sidebar())
                             .when(self.worktree.is_none(), |d| d.child(render_commits(self, cx)))
-                            .child(render_files(self, window, cx)),
+                            .child(render_files(self, cx)),
                     ),
             )
             .when(self.repo_menu.is_some(), |d| {
@@ -1964,15 +2006,6 @@ fn entry_kind_hit(
                 .text_color(fg)
                 .child(label),
         )
-}
-
-fn stage_span(view: &AppView, viewport_w: f32) -> (f32, f32) {
-    let left = if view.repos_collapsed {
-        0.
-    } else {
-        view.sidebar_width + splitter::RAIL_HANDLE_WIDTH
-    };
-    (left, (viewport_w - left).max(0.))
 }
 
 /// Width the leading chrome reserves when the sidebar is collapsed. The islands do not follow
@@ -2715,7 +2748,7 @@ fn picker_line(
     )
 }
 
-fn render_files(view: &AppView, window: &Window, cx: &mut Context<AppView>) -> impl IntoElement {
+fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let mono = appearance::code_font(cx);
     let worktree = view.worktree.is_some();
     let paths = if let Some(wt) = &view.worktree {
@@ -2727,6 +2760,13 @@ fn render_files(view: &AppView, window: &Window, cx: &mut Context<AppView>) -> i
         }
     };
     let can_open = view.can_open_diff();
+    let awaiting_paths = worktree && view.worktree_paths_pending && paths.is_empty();
+    let refresh_pending = worktree && view.worktree_paths_pending && !paths.is_empty();
+    let scan_error = if worktree {
+        view.worktree_scan_error.clone()
+    } else {
+        None
+    };
     let rows = file_tree::flatten(&paths, &view.collapsed_dirs);
     let head_meta = if worktree {
         None
@@ -2747,14 +2787,12 @@ fn render_files(view: &AppView, window: &Window, cx: &mut Context<AppView>) -> i
         }
     };
     let inset = px(theme::CHANGES_INSET);
-    let gap = theme::CHANGES_SHADOW_GAP;
-    let slot_w = view.files_width + gap;
-    let centered_left = if worktree {
-        let viewport_w = f32::from(window.viewport_size().width);
-        let (_, stage_w) = stage_span(view, viewport_w);
-        Some(((stage_w - slot_w) / 2.).max(0.))
+    // Commit island is gone, so there is no gap and no splitter. Dock left at the
+    // same inset the Commit island used.
+    let slot_w = if worktree {
+        view.files_width
     } else {
-        None
+        view.files_width + theme::CHANGES_SHADOW_GAP
     };
 
     // Slot spans the frost gap + Changes island so the trailing handle can sit
@@ -2765,17 +2803,19 @@ fn render_files(view: &AppView, window: &Window, cx: &mut Context<AppView>) -> i
         .top(px(theme::CHANGES_TOP_INSET))
         .bottom(inset)
         .w(px(slot_w))
-        .when_some(centered_left, |d, left| d.left(px(left)))
+        .when(worktree, |d| d.left(inset))
         .when(!worktree, |d| d.right(inset))
         .flex()
         .flex_row()
-        .child(splitter::handle(
-            "files-resize-handle",
-            Axis::HorizontalTrailing,
-            view.files_resize_handler(cx),
-            view.files_resize_state.clone(),
-            true,
-        ))
+        .when(!worktree, |d| {
+            d.child(splitter::handle(
+                "files-resize-handle",
+                Axis::HorizontalTrailing,
+                view.files_resize_handler(cx),
+                view.files_resize_state.clone(),
+                true,
+            ))
+        })
         .child(
             div()
                 .id("files")
@@ -2797,10 +2837,22 @@ fn render_files(view: &AppView, window: &Window, cx: &mut Context<AppView>) -> i
                         .pb_1()
                         .child(
                             div()
-                                .ui_text_size(12., cx)
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme::faint())
-                                .child(format!("Changes ({})", paths.len())),
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .min_w(px(0.))
+                                .child(
+                                    div()
+                                        .ui_text_size(12., cx)
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(theme::faint())
+                                        .child(if awaiting_paths {
+                                            "Changes".to_string()
+                                        } else {
+                                            format!("Changes ({})", paths.len())
+                                        }),
+                                )
+                                .when(refresh_pending, |d| d.child(worktree_loading_row(cx))),
                         )
                         .child(
                             div()
@@ -2813,51 +2865,30 @@ fn render_files(view: &AppView, window: &Window, cx: &mut Context<AppView>) -> i
                                 .child(open_diff_button(can_open, cx)),
                         ),
                 )
-                .child({
-                    let (scroll, sb) = scrollbar::vertical("file-tree-sb", cx);
-                    let pane_width = view.files_width;
-                    scrollbar::overlay_flex(
+                .when_some(scan_error, |d, message| {
+                    d.child(
                         div()
-                            .id("file-tree")
-                            .size_full()
-                            .px_1()
-                            .track_scroll(&scroll)
-                            .overflow_y_scroll()
-                            .children(rows.into_iter().enumerate().map(|(i, row)| match row {
-                                TreeRow::Dir { depth, name, path } => {
-                                    let collapsed = view.collapsed_dirs.contains(&path);
-                                    let toggle_path = path.clone();
-                                    file_tree_rows::dir_row(
-                                        ("dir", i),
-                                        depth,
-                                        name,
-                                        collapsed,
-                                        RowSurface::Island,
-                                        pane_width,
-                                        cx,
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            if !this.collapsed_dirs.remove(&toggle_path) {
-                                                this.collapsed_dirs.insert(toggle_path.clone());
-                                            }
-                                            cx.notify();
-                                        },
-                                    ))
-                                }
-                                TreeRow::File { depth, path } => file_tree_rows::file_row(
-                                    ("file", i),
-                                    depth,
-                                    &path,
-                                    false,
-                                    RowSurface::Island,
-                                    mono.clone(),
-                                    pane_width,
-                                    cx,
-                                ),
-                            })),
-                        sb,
+                            .px_3()
+                            .py_1()
+                            .ui_text_size(12., cx)
+                            .text_color(theme::error())
+                            .child(message),
                     )
+                })
+                .when(awaiting_paths, |d| {
+                    d.child(
+                        div()
+                            .id("worktree-loading")
+                            .flex_1()
+                            .min_h(px(0.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(worktree_loading_row(cx)),
+                    )
+                })
+                .when(!awaiting_paths, |d| {
+                    d.child(render_file_tree(view, &mono, &rows, cx))
                 })
                 .when_some(head_meta, |d, meta| {
                     d.child(splitter::handle(
@@ -3173,6 +3204,83 @@ impl BranchPicker {
             .cloned()
             .collect();
     }
+}
+
+/// One revolution per 2s, matching Zed's activity-indicator spinner.
+fn worktree_loading_row(cx: &App) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .flex_none()
+        .child(
+            svg()
+                .path("refresh.svg")
+                .size(theme::ICON_SIZE_SM)
+                .flex_none()
+                .text_color(theme::muted())
+                .with_animation(
+                    "worktree-loading-spin",
+                    Animation::new(Duration::from_secs(2)).repeat(),
+                    |icon, delta| icon.with_transformation(Transformation::rotate(percentage(delta))),
+                ),
+        )
+        .child(
+            div()
+                .ui_text_size(12., cx)
+                .text_color(theme::muted())
+                .child("Loading"),
+        )
+}
+
+fn render_file_tree(
+    view: &AppView,
+    mono: &gpui::SharedString,
+    rows: &[TreeRow],
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let (scroll, sb) = scrollbar::vertical("file-tree-sb", cx);
+    let pane_width = view.files_width;
+    scrollbar::overlay_flex(
+        div()
+            .id("file-tree")
+            .size_full()
+            .px_1()
+            .track_scroll(&scroll)
+            .overflow_y_scroll()
+            .children(rows.iter().enumerate().map(|(i, row)| match row {
+                TreeRow::Dir { depth, name, path } => {
+                    let collapsed = view.collapsed_dirs.contains(path);
+                    let toggle_path = path.clone();
+                    file_tree_rows::dir_row(
+                        ("dir", i),
+                        *depth,
+                        name.clone(),
+                        collapsed,
+                        RowSurface::Island,
+                        pane_width,
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.collapsed_dirs.remove(&toggle_path) {
+                            this.collapsed_dirs.insert(toggle_path.clone());
+                        }
+                        cx.notify();
+                    }))
+                }
+                TreeRow::File { depth, path } => file_tree_rows::file_row(
+                    ("file", i),
+                    *depth,
+                    path,
+                    false,
+                    RowSurface::Island,
+                    mono.clone(),
+                    pane_width,
+                    cx,
+                ),
+            })),
+        sb,
+    )
 }
 
 fn refresh_worktree_button(cx: &mut Context<AppView>) -> impl IntoElement {
