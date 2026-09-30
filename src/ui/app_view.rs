@@ -2,8 +2,8 @@ use gpui::{
     Animation, AnimationExt, App, Bounds, ClickEvent, ClipboardItem, Context, Corner, Div,
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, ParentElement, Pixels, Point, Render, Size, StatefulInteractiveElement, Styled,
-    TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowDecorations, WindowHandle,
-    WindowOptions, Transformation, anchored, canvas, deferred, div, ease_out_quint, percentage,
+    TitlebarOptions, Transformation, Window, WindowBounds, WindowControlArea, WindowDecorations,
+    WindowHandle, WindowOptions, anchored, canvas, deferred, div, ease_out_quint, percentage,
     prelude::*, px, rgb, svg,
 };
 use std::cell::{Cell, RefCell};
@@ -15,9 +15,7 @@ use std::time::Duration;
 use super::OpenSettings;
 use super::appearance::{self, UiTextSize};
 use super::diff_window::{DiffSnapshot, DiffView};
-use super::entry_chrome::{
-    self, EntryKind, KindSwitchAction, OpenEntry, RestoreFailureAction,
-};
+use super::entry_chrome::{self, EntryKind, KindSwitchAction, OpenEntry, RestoreFailureAction};
 use super::file_tree::{self, TreeRow};
 use super::file_tree_rows::{self, RowSurface};
 use super::gitlab_connection::{self, GitLabConnection};
@@ -153,7 +151,7 @@ impl AppView {
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
             sidebar_width: splitter::default_sidebar_width(),
-            sidebar_resize_state: Rc::new(ResizeState::default()),
+            sidebar_resize_state: Rc::new(ResizeState::with_drag_latch()),
             files_width: splitter::default_files_width(),
             files_resize_state: Rc::new(ResizeState::default()),
             head_meta_height: splitter::MIN_HEAD_META_HEIGHT,
@@ -187,13 +185,45 @@ impl AppView {
 
     fn sidebar_resize_handler(&self, cx: &Context<Self>) -> splitter::ResizeHandler {
         let view = cx.entity().downgrade();
-        Rc::new(move |requested, window, cx: &mut App| {
+        Rc::new(move |raw, window, cx: &mut App| {
             view.update(cx, |this, cx| {
+                if this.sidebar_resize_state.drag_consumed() {
+                    return;
+                }
                 let available = f32::from(window.viewport_size().width);
-                let width = splitter::clamp_sidebar_width(requested, available);
-                if this.sidebar_width != width {
-                    this.sidebar_width = width;
-                    cx.notify();
+                let origin = this.sidebar_resize_state.drag_origin().unwrap_or(raw);
+                match splitter::leading_rail_drag(
+                    raw,
+                    origin,
+                    !this.repos_collapsed,
+                    available,
+                    splitter::MIN_COMMITS_WIDTH,
+                ) {
+                    splitter::RailDrag::Stay => {}
+                    splitter::RailDrag::Reveal => {
+                        this.sidebar_resize_state.consume_drag();
+                        this.repos_collapsed = false;
+                        window_geometry_store::set_repos_collapsed(false);
+                        cx.notify();
+                    }
+                    splitter::RailDrag::Show(width) => {
+                        let changed = this.repos_collapsed || this.sidebar_width != width;
+                        if this.repos_collapsed {
+                            window_geometry_store::set_repos_collapsed(false);
+                        }
+                        this.repos_collapsed = false;
+                        this.sidebar_width = width;
+                        if changed {
+                            cx.notify();
+                        }
+                    }
+                    splitter::RailDrag::Hide => {
+                        if !this.repos_collapsed {
+                            this.repos_collapsed = true;
+                            window_geometry_store::set_repos_collapsed(true);
+                            cx.notify();
+                        }
+                    }
                 }
             })
             .ok();
@@ -211,8 +241,11 @@ impl AppView {
                     this.sidebar_width
                 };
                 // HorizontalTrailing reports distance to viewport right; float is inset.
-                let width =
-                    splitter::clamp_files_width(requested - theme::CHANGES_INSET, available, sidebar);
+                let width = splitter::clamp_files_width(
+                    requested - theme::CHANGES_INSET,
+                    available,
+                    sidebar,
+                );
                 if this.files_width != width {
                     this.files_width = width;
                     cx.notify();
@@ -1393,8 +1426,17 @@ impl Render for AppView {
                             .min_w(px(splitter::MIN_COMMITS_WIDTH))
                             .overflow_hidden()
                             .bg(theme::sidebar())
-                            .when(self.worktree.is_none(), |d| d.child(render_commits(self, cx)))
-                            .child(render_files(self, cx)),
+                            .when(self.worktree.is_none(), |d| {
+                                d.child(render_commits(self, cx))
+                            })
+                            .child(render_files(self, cx))
+                            .when(self.repos_collapsed, |d| {
+                                d.child(splitter::parked_leading_handle(
+                                    "sidebar-parked-handle",
+                                    self.sidebar_resize_handler(cx),
+                                    self.sidebar_resize_state.clone(),
+                                ))
+                            }),
                     ),
             )
             .when(self.repo_menu.is_some(), |d| {
@@ -1764,14 +1806,15 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
         })
         .unwrap_or_else(|| branch.clone());
     let show_gitlab = gitlab_chrome_visible(view);
-    let entry_chrome = render_entry_chrome(view, &branch, &checkout, show_gitlab, cx).into_any_element();
+    let entry_chrome =
+        render_entry_chrome(view, &branch, &checkout, show_gitlab, cx).into_any_element();
 
     // Leading zone spans exactly what sits left of the stage, so the pills after it start on
     // the stage's left edge and share a left edge with the islands below.
     let leading_w = if view.repos_collapsed {
         px(collapsed_leading_width())
     } else {
-        px(view.sidebar_width + splitter::RAIL_HANDLE_WIDTH)
+        px(view.sidebar_width + theme::CHANGES_SHADOW_GAP)
     };
 
     div()
@@ -1826,8 +1869,10 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                 // Balances the pills against the island below; see `titlebar-leading`.
                 .pt(px(theme::CHANGES_TOP_INSET))
                 .gap(px(theme::CHROME_GAP))
-                // Same inset the islands use, measured from the stage's left edge.
-                .pl(px(theme::CHANGES_INSET))
+                // Sidebar open: the rail seam is the left gap, so the pills start
+                // on the stage edge and share it with the island. Collapsed: the
+                // island's own left inset, measured from the stage edge.
+                .when(view.repos_collapsed, |d| d.pl(px(theme::CHANGES_INSET)))
                 .child(entry_chrome)
                 .child(
                     div()
@@ -1959,11 +2004,12 @@ fn render_entry_chrome(
                     .size_full(),
                 )
                 .when(kind != EntryKind::Worktree, |d| {
-                    d.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| match kind {
-                        EntryKind::Branch => this.toggle_branch_picker(cx),
-                        EntryKind::Mr => this.toggle_mr_picker(cx),
-                        EntryKind::Worktree => {}
-                    }))
+                    d.cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| match kind {
+                            EntryKind::Branch => this.toggle_branch_picker(cx),
+                            EntryKind::Mr => this.toggle_mr_picker(cx),
+                            EntryKind::Worktree => {}
+                        }))
                 })
                 .when(kind == EntryKind::Mr && view.mr_entry.is_some(), |el| {
                     el.on_mouse_down(
@@ -2065,7 +2111,8 @@ fn collapsed_leading_width() -> f32 {
 
 fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let show_gitlab = gitlab_chrome_visible(view);
-    // Clear Changes. Pills + islands share one padded column so left edges match.
+    // Clear Changes. Pills share the island's left edge: the rail seam when the
+    // sidebar is open, `CHANGES_INSET` when it is collapsed.
     let float_gap = px(theme::changes_float_clearance(view.files_width));
     let inset = px(theme::CHANGES_INSET);
     let show_mr = show_gitlab && view.mr_entry.is_some();
@@ -2076,7 +2123,9 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
         .min_h(px(0.))
         .flex()
         .flex_col()
-        .pl(inset)
+        // Sidebar open: the rail seam is this gap, so padding here would double it.
+        // Collapsed: the island still needs the window-edge inset.
+        .when(view.repos_collapsed, |d| d.pl(inset))
         // No right padding: `changes_float_clearance` already ends this column one
         // gap short of the Changes island, so padding here would count it twice.
         .pt(px(theme::CHANGES_TOP_INSET))
@@ -3265,7 +3314,9 @@ fn worktree_loading_row(cx: &App) -> impl IntoElement {
                 .with_animation(
                     "worktree-loading-spin",
                     Animation::new(Duration::from_secs(2)).repeat(),
-                    |icon, delta| icon.with_transformation(Transformation::rotate(percentage(delta))),
+                    |icon, delta| {
+                        icon.with_transformation(Transformation::rotate(percentage(delta)))
+                    },
                 ),
         )
         .child(

@@ -1,9 +1,9 @@
 use gpui::{
-    actions, canvas, div, ease_out_quint, prelude::*, px, Animation, AnimationExt, AnyElement,
-    AnyView, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyBinding, KeyDownEvent, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Task, Timer, WeakEntity,
-    Window, WindowControlArea,
+    Animation, AnimationExt, AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity,
+    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
+    Subscription, Task, Timer, WeakEntity, Window, WindowControlArea, actions, canvas, div,
+    ease_out_quint, prelude::*, px,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -11,13 +11,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::domain::{
-    next_match_index, next_search_side, prev_match_index, search_file, search_files,
-    toggle_search_files, Anchor, ChangedPath, Comparison, DiffFontSize, LineSpan, PathStatus,
-    SearchFileText, SearchFiles, SearchMatch, SearchSide, Side, ViewOptions,
+    Anchor, ChangedPath, Comparison, DiffFontSize, LineSpan, PathStatus, SearchFileText,
+    SearchFiles, SearchMatch, SearchSide, Side, ViewOptions, next_match_index, next_search_side,
+    prev_match_index, search_file, search_files, toggle_search_files,
 };
 
 use super::appearance::{self, UiTextSize};
-use super::diff::pane::{self, placeholder, DualPane, FontOp, PaneComment, PaneEvent, SlotBounds};
+use super::diff::pane::{self, DualPane, FontOp, PaneComment, PaneEvent, SlotBounds, placeholder};
 use super::diff::review::{OpenReview, PathView};
 use super::file_tree::{self, TreeRow};
 use super::file_tree_rows::{self, RowSurface};
@@ -239,7 +239,7 @@ impl DiffView {
             focus: cx.focus_handle(),
             tree_collapsed: shell.tree_collapsed,
             tree_width: f32::from(theme::DIFF_TREE_WIDTH),
-            tree_resize_state: Rc::new(ResizeState::default()),
+            tree_resize_state: Rc::new(ResizeState::with_drag_latch()),
             comments_visible: shell.comments_visible,
             comment_width: theme::COMMENT_ISLAND_WIDTH,
             comments_forced: false,
@@ -696,13 +696,45 @@ impl DiffView {
 
     fn tree_resize_handler(&self, cx: &Context<Self>) -> splitter::ResizeHandler {
         let view = cx.entity().downgrade();
-        Rc::new(move |requested, window, cx: &mut App| {
+        Rc::new(move |raw, window, cx: &mut App| {
             view.update(cx, |this, cx| {
+                if this.tree_resize_state.drag_consumed() {
+                    return;
+                }
                 let available = f32::from(window.viewport_size().width);
-                let width = splitter::clamp_diff_tree_width(requested, available);
-                if this.tree_width != width {
-                    this.tree_width = width;
-                    cx.notify();
+                let origin = this.tree_resize_state.drag_origin().unwrap_or(raw);
+                match splitter::leading_rail_drag(
+                    raw,
+                    origin,
+                    !this.tree_collapsed,
+                    available,
+                    splitter::MIN_DIFF_CONTENT_WIDTH,
+                ) {
+                    splitter::RailDrag::Stay => {}
+                    splitter::RailDrag::Reveal => {
+                        this.tree_resize_state.consume_drag();
+                        this.tree_collapsed = false;
+                        window_geometry_store::set_tree_collapsed(false);
+                        cx.notify();
+                    }
+                    splitter::RailDrag::Show(width) => {
+                        let changed = this.tree_collapsed || this.tree_width != width;
+                        if this.tree_collapsed {
+                            window_geometry_store::set_tree_collapsed(false);
+                        }
+                        this.tree_collapsed = false;
+                        this.tree_width = width;
+                        if changed {
+                            cx.notify();
+                        }
+                    }
+                    splitter::RailDrag::Hide => {
+                        if !this.tree_collapsed {
+                            this.tree_collapsed = true;
+                            window_geometry_store::set_tree_collapsed(true);
+                            cx.notify();
+                        }
+                    }
                 }
             })
             .ok();
@@ -714,7 +746,7 @@ impl DiffView {
         let tree = if self.tree_collapsed {
             0.
         } else {
-            self.tree_width + splitter::RAIL_HANDLE_WIDTH
+            self.tree_width + theme::CHANGES_SHADOW_GAP
         };
         f32::from(window.viewport_size().width)
             - tree
@@ -1201,9 +1233,10 @@ impl DiffView {
                             true,
                         ))
                     })
-                    // Frosted desk: the content island floats here, inset on all four
-                    // sides so the material reads around it. Comment island sits to
-                    // the right of the diff island while it is shown.
+                    // Frosted desk: the content island floats here. Top and right stay
+                    // inset; the left gap is the rail seam while the tree is open,
+                    // and the status bar replaces the bottom inset. Comment island
+                    // sits to the right of the diff island while it is shown.
                     .child(
                         div()
                             .id("diff-stage")
@@ -1216,7 +1249,9 @@ impl DiffView {
                             .flex()
                             .flex_col()
                             .pt(px(theme::CHANGES_TOP_INSET))
-                            .pl(px(theme::CHANGES_INSET))
+                            // Tree open: the rail seam is the left gap. Collapsed:
+                            // the island still needs the window-edge inset.
+                            .when(self.tree_collapsed, |d| d.pl(px(theme::CHANGES_INSET)))
                             .pr(px(theme::CHANGES_INSET))
                             .child(
                                 div()
@@ -1235,7 +1270,14 @@ impl DiffView {
                                         ))
                                     }),
                             )
-                            .child(render_status_bar(self, cx)),
+                            .child(render_status_bar(self, cx))
+                            .when(self.tree_collapsed, |d| {
+                                d.child(splitter::parked_leading_handle(
+                                    "diff-tree-parked-handle",
+                                    self.tree_resize_handler(cx),
+                                    self.tree_resize_state.clone(),
+                                ))
+                            }),
                     ),
             )
             .into_any_element()
@@ -1414,7 +1456,7 @@ fn render_titlebar(
     let leading_w = if view.tree_collapsed {
         px(collapsed_leading_width())
     } else {
-        px(view.tree_width + splitter::RAIL_HANDLE_WIDTH)
+        px(view.tree_width + theme::CHANGES_SHADOW_GAP)
     };
     div()
         .id("diff-titlebar")
@@ -1464,8 +1506,10 @@ fn render_titlebar(
                 // main window's `titlebar-leading`.
                 .pt(px(theme::CHANGES_TOP_INSET))
                 .gap_2()
-                // Same inset the island uses, measured from the stage's left edge.
-                .pl(px(theme::CHANGES_INSET))
+                // Tree open: the rail seam is the left gap, so the toolbar starts
+                // on the stage edge and shares it with the island. Collapsed: the
+                // island's own left inset, measured from the stage edge.
+                .when(view.tree_collapsed, |d| d.pl(px(theme::CHANGES_INSET)))
                 .child(render_nav_capsule(view, cx))
                 .child(
                     capsule()
@@ -2529,7 +2573,7 @@ fn traffic_lights_space() -> Option<Div> {
 
 #[cfg(test)]
 mod tests {
-    use super::{selection_matches_span, span_label, LineSpan, Side};
+    use super::{LineSpan, Side, selection_matches_span, span_label};
 
     #[test]
     fn span_label_names_one_line_and_a_range() {

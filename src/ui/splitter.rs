@@ -67,7 +67,9 @@ impl ResizeState {
     }
 
     pub fn drag_consumed(&self) -> bool {
-        self.latch.as_ref().is_some_and(|latch| latch.consumed.get())
+        self.latch
+            .as_ref()
+            .is_some_and(|latch| latch.consumed.get())
     }
 
     /// `size_at_pointer` at the mousedown that started this drag.
@@ -109,8 +111,6 @@ pub const MIN_FILES_WIDTH: f32 = 200.;
 pub const MAX_FILES_WIDTH: f32 = 480.;
 /// Hit-target thickness for most resize handles (ADR 0004).
 pub const HANDLE_WIDTH: f32 = 5.;
-/// Hit strip for sidebar|stage and Diff tree|stage — room around the 3px capsule.
-pub const RAIL_HANDLE_WIDTH: f32 = 8.;
 /// Short stadium painted at the seam center when chrome is on (paint-only).
 pub const CAPSULE_THICKNESS: f32 = 3.;
 pub const CAPSULE_LENGTH: f32 = 24.;
@@ -156,11 +156,22 @@ pub fn clamp_sidebar_width(requested: f32, available: f32) -> f32 {
     requested.clamp(MIN_SIDEBAR_WIDTH, maximum)
 }
 
-/// Floating Changes width: leave `MIN_COMMITS_WIDTH` for the Commit capsule
-/// (+ left island inset + right float clearance).
+/// Floating Changes width: leave `MIN_COMMITS_WIDTH` for the Commit capsule,
+/// plus the right inset and the Commit|Changes gap.
+///
+/// `sidebar_width == 0` means the rail is collapsed: the left inset is inside
+/// the stage. When the rail is open, that inset is the seam outside the stage
+/// (`CHANGES_SHADOW_GAP`), so it is subtracted from `available` instead.
 pub fn clamp_files_width(requested: f32, available: f32, sidebar_width: f32) -> f32 {
-    let stage = (available - sidebar_width).max(0.);
-    let clear = theme::CHANGES_INSET * 2. + theme::CHANGES_SHADOW_GAP;
+    let rail_open = sidebar_width > 0.;
+    let rail = if rail_open {
+        theme::CHANGES_SHADOW_GAP
+    } else {
+        0.
+    };
+    let stage = (available - sidebar_width - rail).max(0.);
+    let left_inset = if rail_open { 0. } else { theme::CHANGES_INSET };
+    let clear = left_inset + theme::CHANGES_INSET + theme::CHANGES_SHADOW_GAP;
     let maximum = MAX_FILES_WIDTH.min((stage - MIN_COMMITS_WIDTH - clear).max(MIN_FILES_WIDTH));
     requested.clamp(MIN_FILES_WIDTH, maximum)
 }
@@ -188,6 +199,8 @@ pub fn clamp_mr_detail_height(requested: f32, available: f32) -> f32 {
 
 /// A collapsible pane snaps shut below this width; there is no state between 0 and it.
 pub const COLLAPSE_THRESHOLD: f32 = 160.;
+/// A collapsed leading rail opens once the pointer has moved this far toward open.
+pub const REVEAL_NUDGE: f32 = 8.;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Collapse {
@@ -207,6 +220,39 @@ pub fn resolve_collapsible(requested: f32, available: f32, floor: f32, threshold
     }
 }
 
+/// One move of a leading rail that can snap shut and nudge back open.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RailDrag {
+    Stay,
+    Reveal,
+    Show(f32),
+    Hide,
+}
+
+/// Open rail: follow the pointer, cap at [`MAX_SIDEBAR_WIDTH`], hide below
+/// [`COLLAPSE_THRESHOLD`]. Collapsed rail: stay put until the pointer has moved
+/// [`REVEAL_NUDGE`] toward open, then reveal at the remembered width.
+pub fn leading_rail_drag(
+    raw: f32,
+    origin: f32,
+    shown: bool,
+    available: f32,
+    floor: f32,
+) -> RailDrag {
+    if !shown {
+        if raw - origin < REVEAL_NUDGE {
+            RailDrag::Stay
+        } else {
+            RailDrag::Reveal
+        }
+    } else {
+        match resolve_collapsible(raw, available, floor, COLLAPSE_THRESHOLD) {
+            Collapse::Hidden => RailDrag::Hide,
+            Collapse::Width(width) => RailDrag::Show(width.min(MAX_SIDEBAR_WIDTH)),
+        }
+    }
+}
+
 /// Map pointer → raw pane size in window space (handlers re-clamp with sibling widths).
 /// Vertical is clamped here (no sibling). Not `window.bounds()` — that is screen-global.
 pub fn size_at_pointer(axis: Axis, position: Point<Pixels>, viewport: Size<Pixels>) -> f32 {
@@ -223,9 +269,7 @@ pub fn size_at_pointer(axis: Axis, position: Point<Pixels>, viewport: Size<Pixel
 
 fn capsule_size(axis: Axis) -> (f32, f32) {
     match axis {
-        Axis::HorizontalLeading | Axis::HorizontalTrailing => {
-            (CAPSULE_THICKNESS, CAPSULE_LENGTH)
-        }
+        Axis::HorizontalLeading | Axis::HorizontalTrailing => (CAPSULE_THICKNESS, CAPSULE_LENGTH),
         Axis::Vertical | Axis::VerticalNorth => (CAPSULE_LENGTH, CAPSULE_THICKNESS),
     }
 }
@@ -271,8 +315,11 @@ pub fn handle(
         move |bounds, _, window, _| {
             if chrome {
                 window.paint_quad(
-                    fill(capsule_bounds(axis, bounds), theme::splitter_capsule(capsule_alpha(&paint_state)))
-                        .corner_radii(px(CAPSULE_RADIUS)),
+                    fill(
+                        capsule_bounds(axis, bounds),
+                        theme::splitter_capsule(capsule_alpha(&paint_state)),
+                    )
+                    .corner_radii(px(CAPSULE_RADIUS)),
                 );
             }
 
@@ -323,10 +370,11 @@ pub fn handle(
     let mut el = div().id(id).flex_none().relative().child(hit);
 
     el = match axis {
-        // Leading rail: wider hit when chromed so the 3px capsule has air.
+        // Leading chrome fills the frost gap between the rail and the island,
+        // same width as Commit|Changes. Without chrome, keep a slim strip.
         Axis::HorizontalLeading => {
             let w = if chrome {
-                RAIL_HANDLE_WIDTH
+                theme::CHANGES_SHADOW_GAP
             } else {
                 HANDLE_WIDTH
             };
@@ -346,11 +394,7 @@ pub fn handle(
         // With chrome, the strip stays clear — only the center stadium paints.
         Axis::Vertical => {
             let el = el.h(px(HANDLE_WIDTH)).w_full().cursor_row_resize();
-            if chrome {
-                el
-            } else {
-                el.bg(theme::white())
-            }
+            if chrome { el } else { el.bg(theme::white()) }
         }
         // MR detail ↔ Commit island: clear hit strip doubles as the frost gap.
         Axis::VerticalNorth => el.h(px(theme::CHANGES_INSET)).w_full().cursor_row_resize(),
@@ -372,7 +416,35 @@ pub fn parked_handle(
         .bottom_0()
         .right(px(-theme::CHANGES_INSET))
         .w(px(theme::CHANGES_INSET))
-        .child(handle(id, Axis::HorizontalTrailing, on_resize, resize_state, true))
+        .child(handle(
+            id,
+            Axis::HorizontalTrailing,
+            on_resize,
+            resize_state,
+            true,
+        ))
+}
+
+/// A collapsed leading rail's handle, parked in the parent's left gutter so the
+/// rail can be dragged back open. The parent must be `relative`.
+pub fn parked_leading_handle(
+    id: &'static str,
+    on_resize: ResizeHandler,
+    resize_state: Rc<ResizeState>,
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .w(px(theme::CHANGES_SHADOW_GAP))
+        .child(handle(
+            id,
+            Axis::HorizontalLeading,
+            on_resize,
+            resize_state,
+            true,
+        ))
 }
 
 #[cfg(test)]
@@ -395,8 +467,11 @@ mod tests {
         assert_eq!(clamp_files_width(100., 1280., 220.), 200.);
         assert_eq!(clamp_files_width(280., 1280., 220.), 280.);
         assert_eq!(clamp_files_width(600., 1280., 220.), 480.);
-        // stage 500 − 280 − left − right − gap = 196 → floors at MIN_FILES (200)
+        // stage (720−220−12 rail) − 280 − right − gap = 184 → floors at MIN_FILES
         assert_eq!(clamp_files_width(400., 720., 220.), 200.);
+        // collapsed rail: left inset is back inside the stage
+        assert_eq!(clamp_files_width(600., 1280., 0.), 480.);
+        assert_eq!(clamp_files_width(400., 400., 0.), 200.);
     }
 
     #[test]
@@ -543,7 +618,10 @@ mod tests {
         );
         // A forced show drops the snap threshold too: a 100px stage still shows,
         // clamped to the room, instead of staying hidden.
-        assert_eq!(resolve_collapsible(268., 100., 0., 0.), Collapse::Width(100.));
+        assert_eq!(
+            resolve_collapsible(268., 100., 0., 0.),
+            Collapse::Width(100.)
+        );
     }
 
     #[test]
@@ -560,10 +638,44 @@ mod tests {
     #[test]
     fn capsule_chrome_tokens_are_stadium_shaped() {
         assert_eq!(CAPSULE_RADIUS, CAPSULE_THICKNESS / 2.);
-        assert!(RAIL_HANDLE_WIDTH > HANDLE_WIDTH);
-        assert!(RAIL_HANDLE_WIDTH >= CAPSULE_THICKNESS + 2.);
+        assert!(theme::CHANGES_SHADOW_GAP > HANDLE_WIDTH);
+        assert!(theme::CHANGES_SHADOW_GAP >= CAPSULE_THICKNESS + 2.);
         assert_eq!(CAPSULE_THICKNESS, 3.);
         assert_eq!(CAPSULE_LENGTH, 24.);
+    }
+
+    #[test]
+    fn leading_rail_drag_snaps_and_nudges() {
+        let floor = MIN_COMMITS_WIDTH;
+        assert_eq!(
+            leading_rail_drag(160., 0., true, 1280., floor),
+            RailDrag::Show(160.)
+        );
+        assert_eq!(
+            leading_rail_drag(188., 0., true, 1280., floor),
+            RailDrag::Show(188.)
+        );
+        assert_eq!(
+            leading_rail_drag(159., 0., true, 1280., floor),
+            RailDrag::Hide
+        );
+        assert_eq!(
+            leading_rail_drag(500., 0., true, 1280., floor),
+            RailDrag::Show(MAX_SIDEBAR_WIDTH)
+        );
+        // 400 − 280 commits = 120, under the snap threshold.
+        assert_eq!(
+            leading_rail_drag(200., 0., true, 400., floor),
+            RailDrag::Hide
+        );
+        assert_eq!(
+            leading_rail_drag(7., 0., false, 1280., floor),
+            RailDrag::Stay
+        );
+        assert_eq!(
+            leading_rail_drag(8., 0., false, 1280., floor),
+            RailDrag::Reveal
+        );
     }
 
     #[test]
