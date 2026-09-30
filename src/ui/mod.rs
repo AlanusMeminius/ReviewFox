@@ -226,7 +226,7 @@ pub fn run() {
                 )
                 .expect("open main window");
 
-            // Diff opens via Open Diff on the main Changes chrome, or boot restore.
+            // Diff opens from the main Changes chrome, or via boot restore.
             cx.activate(true);
         });
 }

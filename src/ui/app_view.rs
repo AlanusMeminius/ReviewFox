@@ -3369,16 +3369,27 @@ fn render_file_tree(
                         cx.notify();
                     }))
                 }
-                TreeRow::File { depth, path } => file_tree_rows::file_row(
-                    ("file", i),
-                    *depth,
-                    path,
-                    false,
-                    RowSurface::Island,
-                    mono.clone(),
-                    pane_width,
-                    cx,
-                ),
+                TreeRow::File { depth, path } => {
+                    let diff_path = path.path.clone();
+                    file_tree_rows::file_row(
+                        ("file", i),
+                        *depth,
+                        path,
+                        false,
+                        RowSurface::Island,
+                        mono.clone(),
+                        pane_width,
+                        cx,
+                    )
+                    .cursor_pointer()
+                    .on_click(cx.listener(
+                        move |this, event: &ClickEvent, _, cx| {
+                            if event.click_count() >= 2 {
+                                this.push_diff(diff_path.clone(), cx);
+                            }
+                        },
+                    ))
+                }
             })),
         sb,
     )
