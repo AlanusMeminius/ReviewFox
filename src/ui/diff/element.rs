@@ -1854,6 +1854,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                     track_y,
                     h_track_x,
                 },
+                window,
                 cx,
             )
         });

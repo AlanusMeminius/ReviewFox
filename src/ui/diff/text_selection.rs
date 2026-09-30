@@ -2,7 +2,7 @@
 //! Pure: no GPUI. The pane stores the result; the element maps pixels and paints.
 //! See ADR-0017 and `.scratch/diff-text-selection/spec.md`.
 
-use super::tabs::TAB_SIZE;
+use super::tabs::{TAB_SIZE, display_columns};
 use crate::domain::Side;
 
 /// Original-byte span on one side. Line numbers are 1-based. `end_byte` is
@@ -59,8 +59,48 @@ pub enum RowClass {
         ln: u32,
     },
     Hatch,
-    /// Above or below the pressed side's rows. No scroll in this ticket.
+    /// Not a row under the pointer. Autoscroll uses [`Place`], not this variant,
+    /// so a far hit cannot jump the span to the file's first or last line.
     Outside,
+}
+
+/// One autoscroll step. The pane applies it with the existing shared vertical
+/// scroll and per-side horizontal scroll. All zero is a no-op.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScrollStep {
+    /// Shared vertical scroll, in visual rows. Negative moves toward the top.
+    pub rows: i32,
+    /// Horizontal scroll, in display columns, on the pressed side. Negative
+    /// moves toward column 0. Zero when soft wrap is on.
+    pub columns: i32,
+    /// `columns` moves both sides because horizontal sync is on.
+    pub both_sides: bool,
+}
+
+/// Pointer versus the pressed side's code column. Default: inside the column.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Place {
+    /// Set when the pointer is above or below that column.
+    pub vertical: Option<VerticalEdge>,
+    /// -1 left of the column, +1 right. Unset over the gutter.
+    pub horizontal: Option<i8>,
+    /// Over the gutter: no autoscroll, and the span stays on the press side.
+    pub over_gutter: bool,
+    pub soft_wrap: bool,
+    pub sync_horizontal: bool,
+}
+
+/// One visual row of shared vertical scroll toward the pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VerticalEdge {
+    /// -1 above, +1 below.
+    pub dir: i8,
+    /// The row that enters. `None` when this side has no further row.
+    pub entering: Option<RowClass>,
+    /// Display column into that line. The model clamps it into the line.
+    pub column: usize,
+    /// Shared scroll still has room in `dir`. When false the step is a no-op.
+    pub room: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +120,7 @@ pub struct Sample {
     pub class: RowClass,
     pub column: usize,
     pub clicks: usize,
+    pub place: Place,
 }
 
 /// Text gesture plus the gutter line span it must not write.
@@ -88,6 +129,7 @@ pub struct Model {
     selection: Option<TextSelection>,
     gutter: Option<(Side, u32, u32)>,
     press: Option<Press>,
+    scroll: ScrollStep,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,12 +180,19 @@ impl Model {
         self.press.as_ref().map(|p| p.side)
     }
 
+    /// Scroll reported by the last sample. Zero unless that sample was a drag
+    /// outside the pressed side's code column.
+    pub fn scroll_step(&self) -> ScrollStep {
+        self.scroll
+    }
+
     /// Drop an in-progress gesture without changing the span.
     pub fn cancel_press(&mut self) {
         self.press = None;
     }
 
     pub fn pointer<'a>(&mut self, sample: Sample, line: impl Fn(Side, u32) -> &'a str) {
+        self.scroll = ScrollStep::default();
         match sample.phase {
             Phase::Press => {
                 let cell = cell_at(sample.class, sample.column, sample.side, &line);
@@ -158,7 +207,12 @@ impl Model {
             }
             Phase::Move | Phase::Release => {
                 let side = self.press.as_ref().map(|p| p.side).unwrap_or(sample.side);
-                let cell = cell_at(sample.class, sample.column, side, &line);
+                let mut cell = cell_at(sample.class, sample.column, side, &line);
+                if sample.phase == Phase::Move
+                    && let Some(next) = self.outside_cell(sample.place, sample.class, side, &line)
+                {
+                    cell = next;
+                }
                 self.track(cell, &line, sample.phase == Phase::Release);
             }
         }
@@ -221,6 +275,79 @@ impl Model {
         out
     }
 
+    /// One move outside the code column. `None` means the sample's own row stands.
+    fn outside_cell<'a>(
+        &mut self,
+        place: Place,
+        hit: RowClass,
+        side: Side,
+        line: &impl Fn(Side, u32) -> &'a str,
+    ) -> Option<Cell> {
+        if place.over_gutter {
+            return None;
+        }
+        let mut cell = None;
+        if let Some(v) = place.vertical {
+            if v.room {
+                self.scroll.rows = i32::from(v.dir);
+                cell = Some(match v.entering {
+                    Some(class) => {
+                        // A horizontal edge has no column on the line. Keep the
+                        // anchor's column, then the horizontal step moves four.
+                        let column = if place.horizontal.is_some() {
+                            self.anchor_column(side, line).unwrap_or(v.column)
+                        } else {
+                            v.column
+                        };
+                        cell_at(class, column, side, line)
+                    }
+                    None => Cell::Outside,
+                });
+            } else if place.horizontal.is_none() || place.soft_wrap {
+                return Some(Cell::Outside);
+            }
+        } else if place.horizontal.is_some() {
+            let column = self.anchor_column(side, line).unwrap_or(0);
+            cell = Some(cell_at(hit, column, side, line));
+        }
+        let Some(dir) = place.horizontal else {
+            return cell;
+        };
+        if place.soft_wrap {
+            return cell.or(Some(Cell::Outside));
+        }
+        self.scroll.columns = i32::from(dir) * 4;
+        self.scroll.both_sides = place.sync_horizontal;
+        let base = match cell {
+            Some(Cell::At { .. } | Cell::After { .. } | Cell::Pad { .. }) => cell,
+            _ => self.anchor_cell(),
+        };
+        Some(shift_columns(
+            side,
+            base.unwrap_or(Cell::Outside),
+            self.scroll.columns,
+            line,
+        ))
+    }
+
+    fn anchor_column<'a>(&self, side: Side, line: &impl Fn(Side, u32) -> &'a str) -> Option<usize> {
+        match self.anchor_cell()? {
+            Cell::At { ln, byte } => {
+                Some(display_columns(line(side, ln).get(..byte).unwrap_or("")))
+            }
+            Cell::After { ln } => Some(display_columns(line(side, ln))),
+            _ => None,
+        }
+    }
+
+    fn anchor_cell(&self) -> Option<Cell> {
+        let press = self.press.as_ref()?;
+        match press.head.or_else(|| anchor_of(press.origin))? {
+            Anchor::At { ln, byte } => Some(Cell::At { ln, byte }),
+            Anchor::After { ln } => Some(Cell::After { ln }),
+        }
+    }
+
     fn track<'a>(&mut self, cell: Cell, line: &impl Fn(Side, u32) -> &'a str, release: bool) {
         let Some(press) = self.press else {
             return;
@@ -254,6 +381,28 @@ impl Model {
             }
         }
     }
+}
+
+fn shift_columns<'a>(
+    side: Side,
+    cell: Cell,
+    delta: i32,
+    line: &impl Fn(Side, u32) -> &'a str,
+) -> Cell {
+    let (ln, col) = match cell {
+        Cell::At { ln, byte } => (
+            ln,
+            display_columns(line(side, ln).get(..byte).unwrap_or("")),
+        ),
+        Cell::After { ln } => (ln, display_columns(line(side, ln))),
+        other => return other,
+    };
+    let next = if delta >= 0 {
+        col.saturating_add(delta as usize)
+    } else {
+        col.saturating_sub(delta.unsigned_abs() as usize)
+    };
+    cell_at(RowClass::Text { ln }, next, side, line)
 }
 
 fn cell_at<'a>(
@@ -578,6 +727,7 @@ mod tests {
             class,
             column,
             clicks: 1,
+            place: Place::default(),
         }
     }
 
@@ -1845,6 +1995,426 @@ mod tests {
                     end_byte: 3,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn drag_below_scrolls_one_row_and_extends_to_the_line_that_enters() {
+        let pre = ["aa", "bb", "cc", "dd", "ee"];
+        let mut model = Model::default();
+        let mut below = sample(Phase::Move, Side::Preimage, RowClass::Outside, 0);
+        below.place.vertical = Some(VerticalEdge {
+            dir: 1,
+            entering: Some(RowClass::Text { ln: 3 }),
+            column: 0,
+            room: true,
+        });
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 2 }, 0),
+                below,
+            ],
+        );
+        assert_eq!(
+            model.scroll_step(),
+            ScrollStep {
+                rows: 1,
+                columns: 0,
+                both_sides: false,
+            }
+        );
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 2,
+                start_byte: 0,
+                end_line: 3,
+                end_byte: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn drag_above_scrolls_one_row_toward_the_pointer_not_to_the_first_line() {
+        let pre = ["aa", "bb", "cc", "dd", "ee"];
+        let mut model = Model::default();
+        let mut above = sample(Phase::Move, Side::Preimage, RowClass::Outside, 0);
+        above.place.vertical = Some(VerticalEdge {
+            dir: -1,
+            entering: Some(RowClass::Text { ln: 3 }),
+            column: 0,
+            room: true,
+        });
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 4 }, 0),
+                above,
+            ],
+        );
+        assert_eq!(model.scroll_step().rows, -1);
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 3,
+                start_byte: 0,
+                end_line: 4,
+                end_byte: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn vertical_step_at_the_end_of_the_scroll_range_is_a_no_op() {
+        let pre = ["aa", "bb", "cc", "dd", "ee"];
+        let mut model = Model::default();
+        let mut into = sample(Phase::Move, Side::Preimage, RowClass::Outside, 0);
+        into.place.vertical = Some(VerticalEdge {
+            dir: 1,
+            entering: Some(RowClass::Text { ln: 3 }),
+            column: 0,
+            room: true,
+        });
+        let mut stuck = sample(Phase::Move, Side::Preimage, RowClass::Text { ln: 5 }, 0);
+        stuck.place.vertical = Some(VerticalEdge {
+            dir: 1,
+            entering: Some(RowClass::Text { ln: 5 }),
+            column: 0,
+            room: false,
+        });
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 2 }, 0),
+                into,
+                stuck,
+            ],
+        );
+        assert_eq!(model.scroll_step(), ScrollStep::default());
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 2,
+                start_byte: 0,
+                end_line: 3,
+                end_byte: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn entering_line_clamps_the_pointer_column_into_that_line() {
+        let pre = ["abcdef", "xy"];
+        let mut model = Model::default();
+        let mut below = sample(Phase::Move, Side::Preimage, RowClass::Outside, 0);
+        below.place.vertical = Some(VerticalEdge {
+            dir: 1,
+            entering: Some(RowClass::Text { ln: 2 }),
+            column: 50,
+            room: true,
+        });
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                below,
+            ],
+        );
+        assert_eq!(model.scroll_step().rows, 1);
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 0,
+                end_line: 2,
+                end_byte: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn drag_past_the_right_edge_scrolls_four_columns_on_the_pressed_side() {
+        let pre = ["abcdefghijklmnopqrstuvwxyz"];
+        let mut model = Model::default();
+        let mut right = sample(Phase::Move, Side::Preimage, RowClass::Text { ln: 1 }, 25);
+        right.place.horizontal = Some(1);
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                right,
+            ],
+        );
+        assert_eq!(
+            model.scroll_step(),
+            ScrollStep {
+                rows: 0,
+                columns: 4,
+                both_sides: false,
+            }
+        );
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 0,
+                end_line: 1,
+                end_byte: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn pointer_over_the_gutter_does_not_scroll_and_stays_on_the_pressed_side() {
+        let pre = ["abcdef", "ghijkl"];
+        let post = ["zzzzzz", "yyyyyy"];
+        let mut model = Model::default();
+        let mut gutter = sample(Phase::Move, Side::Postimage, RowClass::Text { ln: 2 }, 1);
+        gutter.place.over_gutter = true;
+        gutter.place.horizontal = Some(1);
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                gutter,
+            ],
+        );
+        assert_eq!(model.scroll_step(), ScrollStep::default());
+        assert_eq!(model.gutter(), None);
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 0,
+                end_line: 2,
+                end_byte: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn horizontal_sync_scrolls_both_sides_by_four_columns() {
+        let pre = ["abcdefghijklmnopqrstuvwxyz"];
+        let mut model = Model::default();
+        let mut right = sample(Phase::Move, Side::Preimage, RowClass::Text { ln: 1 }, 25);
+        right.place.horizontal = Some(1);
+        right.place.sync_horizontal = true;
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                right,
+            ],
+        );
+        assert_eq!(
+            model.scroll_step(),
+            ScrollStep {
+                rows: 0,
+                columns: 4,
+                both_sides: true,
+            }
+        );
+        assert_eq!(model.selection().map(|s| s.side), Some(Side::Preimage));
+        assert_eq!(model.selection().map(|s| s.end_byte), Some(5));
+    }
+
+    #[test]
+    fn drag_past_the_left_edge_scrolls_four_columns_toward_the_start() {
+        let pre = ["abcdefghijklmnopqrstuvwxyz"];
+        let mut model = Model::default();
+        let mut left = sample(Phase::Move, Side::Preimage, RowClass::Text { ln: 1 }, 0);
+        left.place.horizontal = Some(-1);
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 8),
+                left,
+            ],
+        );
+        assert_eq!(model.scroll_step().columns, -4);
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 4,
+                end_line: 1,
+                end_byte: 9,
+            })
+        );
+    }
+
+    #[test]
+    fn another_horizontal_sample_is_another_four_columns() {
+        let pre = ["abcdefghijklmnopqrstuvwxyz"];
+        let mut model = Model::default();
+        let mut right = sample(Phase::Move, Side::Preimage, RowClass::Text { ln: 1 }, 25);
+        right.place.horizontal = Some(1);
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                right,
+                right,
+            ],
+        );
+        assert_eq!(model.scroll_step().columns, 4);
+        assert_eq!(
+            model.selection().map(|s| (s.start_byte, s.end_byte)),
+            Some((0, 9))
+        );
+    }
+
+    #[test]
+    fn soft_wrap_reports_no_horizontal_scroll() {
+        let pre = ["abcdefghijklmnopqrstuvwxyz"];
+        let mut model = Model::default();
+        let mut right = sample(Phase::Move, Side::Preimage, RowClass::Text { ln: 1 }, 25);
+        right.place.horizontal = Some(1);
+        right.place.soft_wrap = true;
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                right,
+            ],
+        );
+        assert_eq!(model.scroll_step(), ScrollStep::default());
+        assert_eq!(model.selection(), None);
+    }
+
+    #[test]
+    fn autoscroll_does_not_light_occurrences_until_release() {
+        let pre = ["foo foo"];
+        let post = ["x foo y"];
+        let mut model = Model::default();
+        let mut below = sample(Phase::Move, Side::Preimage, RowClass::Outside, 0);
+        below.place.vertical = Some(VerticalEdge {
+            dir: 1,
+            entering: Some(RowClass::Text { ln: 1 }),
+            column: 2,
+            room: true,
+        });
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                below,
+            ],
+        );
+        assert_eq!(model.scroll_step().rows, 1);
+        assert!(highlights(&model, &pre, &post, no_fold).is_empty());
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[sample(
+                Phase::Release,
+                Side::Preimage,
+                RowClass::Text { ln: 1 },
+                2,
+            )],
+        );
+        assert_eq!(model.scroll_step(), ScrollStep::default());
+        assert!(!highlights(&model, &pre, &post, no_fold).is_empty());
+    }
+
+    #[test]
+    fn corner_scrolls_one_row_and_four_columns_from_the_anchor_not_the_line_end() {
+        let pre = ["abcdefghij", "abcdefghij"];
+        let mut model = Model::default();
+        let mut corner = sample(Phase::Move, Side::Preimage, RowClass::Outside, 0);
+        corner.place.vertical = Some(VerticalEdge {
+            dir: 1,
+            entering: Some(RowClass::Text { ln: 2 }),
+            column: 99,
+            room: true,
+        });
+        corner.place.horizontal = Some(1);
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 2),
+                corner,
+            ],
+        );
+        assert_eq!(
+            model.scroll_step(),
+            ScrollStep {
+                rows: 1,
+                columns: 4,
+                both_sides: false,
+            }
+        );
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 2,
+                end_line: 2,
+                end_byte: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn horizontal_edge_on_a_visible_row_extends_to_that_row() {
+        let pre = ["abcdefghij", "abcdefghij"];
+        let mut model = Model::default();
+        let mut right = sample(Phase::Move, Side::Preimage, RowClass::Text { ln: 2 }, 99);
+        right.place.horizontal = Some(1);
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                right,
+            ],
+        );
+        assert_eq!(model.scroll_step().rows, 0);
+        assert_eq!(model.scroll_step().columns, 4);
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 0,
+                end_line: 2,
+                end_byte: 5,
+            })
         );
     }
 }
