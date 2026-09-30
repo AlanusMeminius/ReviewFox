@@ -13,6 +13,7 @@ pub struct SoftwarePalette {
     pub surface: SurfaceColors,
     pub text: TextColors,
     pub field: FieldColors,
+    pub scrollbar: ScrollbarColors,
     pub sidebar_row: SidebarRowColors,
 }
 
@@ -42,6 +43,27 @@ pub struct FieldColors {
     pub caret: Rgba,
     pub selection: Rgba,
     pub selection_outline: Rgba,
+}
+
+#[derive(Clone, Copy)]
+pub struct ScrollbarColors {
+    pub track: Rgba,
+    pub track_outline: Rgba,
+    pub idle: Rgba,
+    pub hover: Rgba,
+    pub drag: Rgba,
+}
+
+impl ScrollbarColors {
+    pub fn thumb(self, hovered: bool, dragging: bool) -> Rgba {
+        if dragging {
+            self.drag
+        } else if hovered {
+            self.hover
+        } else {
+            self.idle
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +103,13 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 selection: gpui::rgba(0x2457d633),
                 selection_outline: rgb(0x2457d6),
             },
+            scrollbar: ScrollbarColors {
+                track: rgb(0xffffff),
+                track_outline: rgb(0x3b4048),
+                idle: rgb(0x858c98),
+                hover: rgb(0x647b9e),
+                drag: rgb(0x3f78bc),
+            },
             sidebar_row: SidebarRowColors {
                 idle_indicator: gpui::rgba(0x00000000),
                 hover_indicator: rgb(0x596579),
@@ -113,6 +142,13 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 caret: rgb(0x89c7f7),
                 selection: gpui::rgba(0x89c7f72a),
                 selection_outline: rgb(0x89c7f7),
+            },
+            scrollbar: ScrollbarColors {
+                track: rgb(0x1d2027),
+                track_outline: rgb(0xc5cfde),
+                idle: rgb(0x858c98),
+                hover: rgb(0x6d85a5),
+                drag: rgb(0x4c80bb),
             },
             sidebar_row: SidebarRowColors {
                 idle_indicator: gpui::rgba(0x00000000),
@@ -726,6 +762,44 @@ mod software_palette_tests {
                 assert!(contrast(palette.text.primary, overlay) >= 4.5);
                 assert!(contrast(palette.text.secondary, overlay) >= 4.5);
                 assert!(contrast(field.border, overlay) >= 3.);
+            }
+        }
+    }
+
+    #[test]
+    fn scrollbar_track_and_thumb_stay_visible_on_every_builtin_diff_band() {
+        for mode in [SoftwareThemeMode::Light, SoftwareThemeMode::Dark] {
+            let colors = resolve_software_palette(mode).scrollbar;
+            assert_eq!(colors.thumb(false, false), colors.idle);
+            assert_eq!(colors.thumb(true, false), colors.hover);
+            assert_eq!(colors.thumb(true, true), colors.drag);
+            assert_eq!(colors.thumb(false, true), colors.drag);
+            assert!(contrast(colors.track, colors.track_outline) >= 3.);
+            for (name, thumb) in [
+                ("idle", colors.idle),
+                ("hover", colors.hover),
+                ("drag", colors.drag),
+            ] {
+                assert!(
+                    contrast(thumb, colors.track) >= 3.,
+                    "{mode:?} {name} thumb on track: {}",
+                    contrast(thumb, colors.track)
+                );
+            }
+            for code_theme in crate::ui::code_theme::builtin_catalog() {
+                for band in [
+                    code_theme.slots.paper,
+                    code_theme.slots.added_band,
+                    code_theme.slots.deleted_band,
+                    code_theme.slots.replaced_band,
+                ] {
+                    assert!(
+                        contrast(colors.track, band).max(contrast(colors.track_outline, band))
+                            >= 3.,
+                        "{mode:?} track boundary on {} band {band:?}",
+                        code_theme.id
+                    );
+                }
             }
         }
     }

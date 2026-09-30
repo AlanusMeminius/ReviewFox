@@ -11,16 +11,29 @@ use std::time::Duration;
 use gpui::{
     App, Context, CursorStyle, Div, Entity, Global, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollHandle, Task, Timer, Window, canvas, div,
-    point, prelude::*, px, rgb,
+    point, prelude::*, px,
 };
 
+use super::theme;
+
 pub(crate) const THUMB_WIDTH: f32 = 6.;
-pub(crate) const TRACK_WIDTH: f32 = 10.;
+pub(crate) const THUMB_HOVER_WIDTH: f32 = 8.;
+pub(crate) const THUMB_DRAG_WIDTH: f32 = 10.;
+pub(crate) const TRACK_WIDTH: f32 = 14.;
+pub(crate) const TRACK_OUTLINE_WIDTH: f32 = 1.;
 const MIN_THUMB: f32 = 24.;
 pub(crate) const PAD: f32 = 4.;
 pub(crate) const HIDE_DELAY: Duration = Duration::from_secs(1);
-pub(crate) const THUMB_IDLE: u32 = 0xd8dde6;
-pub(crate) const THUMB_ACTIVE: u32 = 0xb8c0cc;
+
+pub(crate) fn thumb_width(hovered: bool, dragging: bool) -> f32 {
+    if dragging {
+        THUMB_DRAG_WIDTH
+    } else if hovered {
+        THUMB_HOVER_WIDTH
+    } else {
+        THUMB_WIDTH
+    }
+}
 
 struct Handle(ScrollHandle);
 
@@ -221,8 +234,10 @@ impl Render for VerticalScrollbar {
         let thumb_h = geom.thumb_height;
         let dragging = self.drag_grab.is_some();
         let show_thumb = self.thumb_shown();
+        let colors = theme::software_palette().scrollbar;
         let entity = cx.entity();
-        let inset = px((TRACK_WIDTH - THUMB_WIDTH) / 2.);
+        let thumb_width = thumb_width(self.hovered, dragging);
+        let inset = px((TRACK_WIDTH - thumb_width) / 2.);
 
         let track = div()
             .absolute()
@@ -230,23 +245,28 @@ impl Render for VerticalScrollbar {
             .right(px(0.))
             .w(px(TRACK_WIDTH))
             .h(geom.track_height)
+            .rounded_full()
+            .opacity(if show_thumb { 1. } else { 0. })
+            .bg(colors.track_outline)
             .cursor(CursorStyle::Arrow);
 
         let thumb = div()
             .absolute()
             .top(thumb_top)
             .right(inset)
-            .w(px(THUMB_WIDTH))
+            .w(px(thumb_width))
             .h(thumb_h)
             .rounded_full()
-            .opacity(if show_thumb { 1. } else { 0. })
-            .bg(if dragging {
-                rgb(THUMB_ACTIVE)
-            } else {
-                rgb(THUMB_IDLE)
-            });
+            .bg(colors.thumb(self.hovered, dragging));
 
         track
+            .child(
+                div()
+                    .absolute()
+                    .inset(px(TRACK_OUTLINE_WIDTH))
+                    .rounded_full()
+                    .bg(colors.track),
+            )
             .child(thumb)
             .child(
                 canvas(
@@ -380,6 +400,15 @@ pub fn overlay_flex(content: impl IntoElement, scrollbar: Entity<VerticalScrollb
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thumb_thickens_on_hover_and_drag_within_the_track() {
+        assert_eq!(thumb_width(false, false), 6.);
+        assert_eq!(thumb_width(true, false), 8.);
+        assert_eq!(thumb_width(false, true), 10.);
+        assert_eq!(thumb_width(true, true), 10.);
+        assert!(TRACK_WIDTH - thumb_width(true, true) >= 2. * (TRACK_OUTLINE_WIDTH + 1.));
+    }
 
     #[test]
     fn thumb_geom_none_without_overflow() {

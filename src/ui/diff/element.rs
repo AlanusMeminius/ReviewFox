@@ -27,7 +27,6 @@ use crate::domain::Side;
 use crate::syntax::Span;
 use crate::ui::code_theme::{self, ResolvedCodeTheme};
 use crate::ui::scrollbar::{self, ThumbGeom};
-#[cfg(test)]
 use crate::ui::theme;
 
 pub(super) const LN_FONT_PX: f32 = 10.;
@@ -361,7 +360,9 @@ pub(super) struct IconSlot {
 
 struct Thumb {
     rect: Bounds<Pixels>,
+    thickness: f32,
     shown: bool,
+    hovered: bool,
     dragging: bool,
 }
 
@@ -617,15 +618,20 @@ pub(super) fn build_frame(
         let n = rows.rows();
         let thumb = thumb_for(view_h, vp.max_top(side), side_top).map(|g| {
             let track = geom.track(side);
-            let inset = (scrollbar::TRACK_WIDTH - scrollbar::THUMB_WIDTH) / 2.;
+            let hovered = bars.hovered[side_ix(side)];
+            let dragging = bars.drag.is_some_and(|(s, _)| s == side);
+            let thickness = scrollbar::thumb_width(hovered, dragging);
+            let inset = (scrollbar::TRACK_WIDTH - thickness) / 2.;
             let rect = Bounds::new(
                 point(track.left() + px(inset), track.top() + g.thumb_top),
-                size(px(scrollbar::THUMB_WIDTH), g.thumb_height),
+                size(px(thickness), g.thumb_height),
             );
             Thumb {
                 rect,
+                thickness,
                 shown: bars.shown(side),
-                dragging: bars.drag.is_some_and(|(s, _)| s == side),
+                hovered,
+                dragging,
             }
         });
         SideFrame {
@@ -1003,6 +1009,22 @@ fn hline(x0: f32, x1: f32, y: f32, h: f32) -> Bounds<Pixels> {
     Bounds::from_corners(point(px(x0), px(y)), point(px(x1.max(x0)), px(y + h)))
 }
 
+fn paint_scrollbar_track(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    colors: theme::ScrollbarColors,
+) {
+    let edge = px(scrollbar::TRACK_OUTLINE_WIDTH);
+    window.paint_quad(
+        fill(bounds, colors.track_outline).corner_radii(px(scrollbar::TRACK_WIDTH / 2.)),
+    );
+    let inner = Bounds::from_corners(
+        point(bounds.left() + edge, bounds.top() + edge),
+        point(bounds.right() - edge, bounds.bottom() - edge),
+    );
+    window.paint_quad(fill(inner, colors.track).corner_radii(px(scrollbar::TRACK_WIDTH / 2. - 1.)));
+}
+
 impl Frame {
     pub(super) fn widest(&self, side: Side) -> f32 {
         self.sides[side_ix(side)].widest
@@ -1020,15 +1042,20 @@ impl Frame {
         bars: &BarState,
     ) {
         let track = self.geom.h_track(side);
-        let inset = (scrollbar::TRACK_WIDTH - scrollbar::THUMB_WIDTH) / 2.;
+        let hovered = bars.h_hovered[side_ix(side)];
+        let dragging = bars.h_drag.is_some_and(|(s, _)| s == side);
+        let thickness = scrollbar::thumb_width(hovered, dragging);
+        let inset = (scrollbar::TRACK_WIDTH - thickness) / 2.;
         let rect = Bounds::new(
             point(track.left() + px(geom.thumb_left), track.top() + px(inset)),
-            size(px(geom.thumb_width), px(scrollbar::THUMB_WIDTH)),
+            size(px(geom.thumb_width), px(thickness)),
         );
         self.sides[side_ix(side)].h_thumb = Some(Thumb {
             rect,
+            thickness,
             shown: bars.h_shown(side),
-            dragging: bars.h_drag.is_some_and(|(s, _)| s == side),
+            hovered,
+            dragging,
         });
     }
 
@@ -1047,20 +1074,27 @@ impl Frame {
             },
         );
         paint_omit_waves(window, geom, &self.waves);
-        for frame in &self.sides {
+        let scrollbar_colors = theme::software_palette().scrollbar;
+        for side in [Side::Preimage, Side::Postimage] {
+            let frame = &self.sides[side_ix(side)];
+            if frame.thumb.as_ref().is_some_and(|t| t.shown) {
+                paint_scrollbar_track(window, geom.track(side), scrollbar_colors);
+            }
+            if frame.h_thumb.as_ref().is_some_and(|t| t.shown) {
+                paint_scrollbar_track(window, geom.h_track(side), scrollbar_colors);
+            }
             for thumb in frame
                 .thumb
                 .iter()
                 .chain(frame.h_thumb.iter())
                 .filter(|t| t.shown)
             {
-                let color = if thumb.dragging {
-                    scrollbar::THUMB_ACTIVE
-                } else {
-                    scrollbar::THUMB_IDLE
-                };
                 window.paint_quad(
-                    fill(thumb.rect, rgb(color)).corner_radii(px(scrollbar::THUMB_WIDTH / 2.)),
+                    fill(
+                        thumb.rect,
+                        scrollbar_colors.thumb(thumb.hovered, thumb.dragging),
+                    )
+                    .corner_radii(px(thumb.thickness / 2.)),
                 );
             }
         }
