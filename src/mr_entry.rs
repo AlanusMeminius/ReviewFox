@@ -51,7 +51,7 @@ pub trait ObjectFetch {
         remote_url: &str,
         iid: u64,
         shas: &[String],
-        specs: &[(String, String, String, String)],
+        commits: &[MergeRequestCommit],
     ) -> Result<Vec<CommitInfo>, Failure>;
 }
 
@@ -82,25 +82,52 @@ where
     }
     shas.sort();
     shas.dedup();
-    let specs: Vec<(String, String, String, String)> = commits
-        .iter()
-        .map(|c| {
-            (
-                c.id.clone(),
-                c.title.clone(),
-                c.author_name.clone(),
-                c.authored_date.clone(),
-            )
-        })
-        .collect();
     let commit_infos = objects
-        .fetch(repo_path, &project.remote_url, iid, &shas, &specs)
+        .fetch(repo_path, &project.remote_url, iid, &shas, &commits)
         .await?;
     Ok(Ready {
         detail,
         project: project.path_with_namespace,
         commit_infos,
     })
+}
+
+fn failure(message: impl Into<String>, settings_target: Option<gitlab::SettingsTarget>) -> Failure {
+    Failure {
+        message: message.into(),
+        settings_target,
+    }
+}
+
+trait IntoFailure {
+    fn into_failure(&self) -> Failure;
+}
+
+impl IntoFailure for gitlab::ResolveProjectError {
+    fn into_failure(&self) -> Failure {
+        failure(
+            gitlab::format_resolve_project_error(self),
+            self.settings_fix(),
+        )
+    }
+}
+
+impl IntoFailure for gitlab::FetchMergeRequestError {
+    fn into_failure(&self) -> Failure {
+        failure(
+            gitlab::format_fetch_merge_request_error(self),
+            self.settings_fix(),
+        )
+    }
+}
+
+impl IntoFailure for gitlab::ListMergeRequestCommitsError {
+    fn into_failure(&self) -> Failure {
+        failure(
+            gitlab::format_list_merge_request_commits_error(self),
+            self.settings_fix(),
+        )
+    }
 }
 
 pub struct GitLabForge {
@@ -116,10 +143,7 @@ impl Forge for GitLabForge {
     ) -> Result<GitLabProjectIdentity, Failure> {
         match gitlab::resolve_project(self.http.clone(), base_url, pat, repo_path).await {
             gitlab::ResolveProjectResult::Ok(identity) => Ok(identity),
-            gitlab::ResolveProjectResult::Err(e) => Err(Failure {
-                message: gitlab::format_resolve_project_error(&e),
-                settings_target: e.settings_fix(),
-            }),
+            gitlab::ResolveProjectResult::Err(e) => Err(e.into_failure()),
         }
     }
 
@@ -132,10 +156,7 @@ impl Forge for GitLabForge {
     ) -> Result<MergeRequestDetail, Failure> {
         match gitlab::fetch_merge_request(self.http.clone(), base_url, pat, project, iid).await {
             gitlab::FetchMergeRequestResult::Ok(detail) => Ok(detail),
-            gitlab::FetchMergeRequestResult::Err(e) => Err(Failure {
-                message: gitlab::format_fetch_merge_request_error(&e),
-                settings_target: e.settings_fix(),
-            }),
+            gitlab::FetchMergeRequestResult::Err(e) => Err(e.into_failure()),
         }
     }
 
@@ -150,10 +171,7 @@ impl Forge for GitLabForge {
             .await
         {
             gitlab::ListMergeRequestCommitsResult::Ok(commits) => Ok(commits),
-            gitlab::ListMergeRequestCommitsResult::Err(e) => Err(Failure {
-                message: gitlab::format_list_merge_request_commits_error(&e),
-                settings_target: e.settings_fix(),
-            }),
+            gitlab::ListMergeRequestCommitsResult::Err(e) => Err(e.into_failure()),
         }
     }
 }
@@ -167,16 +185,19 @@ impl ObjectFetch for SystemGitObjects {
         remote_url: &str,
         iid: u64,
         shas: &[String],
-        specs: &[(String, String, String, String)],
+        commits: &[MergeRequestCommit],
     ) -> Result<Vec<CommitInfo>, Failure> {
-        git::fetch_oids(repo_path, remote_url, iid, shas).map_err(|e| Failure {
-            message: e.0,
-            settings_target: None,
-        })?;
-        git::commit_infos_from_mr_specs(repo_path, specs).map_err(|e| Failure {
-            message: e.0,
-            settings_target: None,
-        })
+        git::fetch_oids(repo_path, remote_url, iid, shas).map_err(|e| failure(e.0, None))?;
+        let metas: Vec<git::MrCommitMeta> = commits
+            .iter()
+            .map(|commit| git::MrCommitMeta {
+                id: commit.id.clone(),
+                title: commit.title.clone(),
+                author_name: commit.author_name.clone(),
+                authored_date: commit.authored_date.clone(),
+            })
+            .collect();
+        git::commit_infos_from_mr_specs(repo_path, &metas).map_err(|e| failure(e.0, None))
     }
 }
 
@@ -281,7 +302,7 @@ mod tests {
             _remote_url: &str,
             _iid: u64,
             shas: &[String],
-            _specs: &[(String, String, String, String)],
+            _commits: &[MergeRequestCommit],
         ) -> Result<Vec<CommitInfo>, Failure> {
             self.calls.set(self.calls.get() + 1);
             self.shas.borrow_mut().push(shas.to_vec());
