@@ -12,6 +12,7 @@ use super::code_theme::{self, SoftwareThemeMode};
 pub struct SoftwarePalette {
     pub surface: SurfaceColors,
     pub text: TextColors,
+    pub field: FieldColors,
     pub sidebar_row: SidebarRowColors,
 }
 
@@ -21,6 +22,8 @@ pub struct SurfaceColors {
     /// Stable backing over the platform's frosted material. A small amount of
     /// the material remains visible without letting the wallpaper set contrast.
     pub sidebar_backing: Rgba,
+    pub floating_overlay: Rgba,
+    pub shadow_ink: Hsla,
 }
 
 #[derive(Clone, Copy)]
@@ -28,6 +31,17 @@ pub struct TextColors {
     pub primary: Rgba,
     pub secondary: Rgba,
     pub section: Rgba,
+    pub placeholder: Rgba,
+}
+
+#[derive(Clone, Copy)]
+pub struct FieldColors {
+    pub surface: Rgba,
+    pub border: Rgba,
+    pub focused_border: Rgba,
+    pub caret: Rgba,
+    pub selection: Rgba,
+    pub selection_outline: Rgba,
 }
 
 #[derive(Clone, Copy)]
@@ -50,11 +64,22 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             surface: SurfaceColors {
                 window_backing: window_backing(mode),
                 sidebar_backing: gpui::rgba(0xf4f5f7e6),
+                floating_overlay: gpui::rgba(0xfffffff5),
+                shadow_ink: hsla(220. / 360., 0.38, 0.14, 1.),
             },
             text: TextColors {
                 primary: rgb(0x172033),
                 secondary: rgb(0x596579),
                 section: rgb(0x4b5669),
+                placeholder: rgb(0x4b5669),
+            },
+            field: FieldColors {
+                surface: rgb(0xffffff),
+                border: rgb(0x7c8798),
+                focused_border: rgb(0x2457d6),
+                caret: rgb(0x2457d6),
+                selection: gpui::rgba(0x2457d633),
+                selection_outline: rgb(0x2457d6),
             },
             sidebar_row: SidebarRowColors {
                 idle_indicator: gpui::rgba(0x00000000),
@@ -72,11 +97,22 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             surface: SurfaceColors {
                 window_backing: window_backing(mode),
                 sidebar_backing: gpui::rgba(0x1d202780),
+                floating_overlay: gpui::rgba(0x272b33f5),
+                shadow_ink: hsla(220. / 360., 0.38, 0.03, 1.),
             },
             text: TextColors {
                 primary: rgb(0xd5dae3),
                 secondary: rgb(0xaeb7c5),
                 section: rgb(0xe2e6ed),
+                placeholder: rgb(0xc5cfde),
+            },
+            field: FieldColors {
+                surface: rgb(0x30343d),
+                border: rgb(0x8993a3),
+                focused_border: rgb(0x89c7f7),
+                caret: rgb(0x89c7f7),
+                selection: gpui::rgba(0x89c7f72a),
+                selection_outline: rgb(0x89c7f7),
             },
             sidebar_row: SidebarRowColors {
                 idle_indicator: gpui::rgba(0x00000000),
@@ -221,7 +257,8 @@ pub fn picker_shadow() -> Vec<BoxShadow> {
 /// Floating Diff find bar (prototype B): shadow-only edge. Painted as a
 /// window-root overlay *after* DualPane so the drop shadow sits on the code.
 pub fn find_bar_shadow() -> Vec<BoxShadow> {
-    let ink = |a: f32| -> Hsla { hsla(220. / 360., 0.38, 0.14, a) };
+    let shadow_ink = software_palette().surface.shadow_ink;
+    let ink = |a: f32| -> Hsla { Hsla { a, ..shadow_ink } };
     vec![
         BoxShadow {
             color: ink(0.08),
@@ -240,16 +277,7 @@ pub fn find_bar_shadow() -> Vec<BoxShadow> {
 
 /// Translucent fill for the floating find bar / draft dock.
 pub fn find_bar_bg() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        gpui::rgba(0x272b33f5)
-    } else {
-        Rgba {
-            r: 1.,
-            g: 1.,
-            b: 1.,
-            a: 0.96,
-        }
-    }
+    software_palette().surface.floating_overlay
 }
 
 /// Outer capsule radius. Field radius is [`FIND_FIELD_RADIUS`] so corners stay
@@ -652,6 +680,53 @@ mod software_palette_tests {
         for width in widths {
             assert!(width <= SIDEBAR_ROW_PAD_X);
             assert_eq!(width + (SIDEBAR_ROW_PAD_X - width), SIDEBAR_ROW_PAD_X);
+        }
+    }
+
+    #[test]
+    fn find_and_draft_fields_remain_readable_over_either_code_paper() {
+        for mode in [SoftwareThemeMode::Light, SoftwareThemeMode::Dark] {
+            let palette = resolve_software_palette(mode);
+            let field = palette.field;
+            let selected_surface = composite(field.selection, field.surface);
+            for (name, text) in [
+                ("placeholder", palette.text.placeholder),
+                ("entered text", palette.text.primary),
+            ] {
+                assert!(
+                    contrast(text, field.surface) >= 4.5,
+                    "{mode:?} {name} on input: {}",
+                    contrast(text, field.surface)
+                );
+                assert!(
+                    contrast(text, selected_surface) >= 4.5,
+                    "{mode:?} {name} on selection: {}",
+                    contrast(text, selected_surface)
+                );
+            }
+            for (name, mark) in [
+                ("idle border", field.border),
+                ("focused border", field.focused_border),
+                ("caret", field.caret),
+                ("selection outline", field.selection_outline),
+            ] {
+                assert!(
+                    contrast(mark, field.surface) >= 3.,
+                    "{mode:?} {name} on input: {}",
+                    contrast(mark, field.surface)
+                );
+            }
+            assert!(
+                contrast(field.selection_outline, selected_surface) >= 3.,
+                "{mode:?} selection outline on selection: {}",
+                contrast(field.selection_outline, selected_surface)
+            );
+            for code_paper in [rgb(0x000000), rgb(0xffffff)] {
+                let overlay = composite(palette.surface.floating_overlay, code_paper);
+                assert!(contrast(palette.text.primary, overlay) >= 4.5);
+                assert!(contrast(palette.text.secondary, overlay) >= 4.5);
+                assert!(contrast(field.border, overlay) >= 3.);
+            }
         }
     }
 }

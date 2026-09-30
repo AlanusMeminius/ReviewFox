@@ -1774,6 +1774,7 @@ fn render_search_bar(
     window: &Window,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
+    let palette = theme::software_palette();
     let matches = view.current_matches();
     let total = matches.len();
     let current = view
@@ -1809,11 +1810,12 @@ fn render_search_bar(
                 .flex()
                 .items_center()
                 .rounded(px(theme::FIND_FIELD_RADIUS))
+                .bg(palette.field.surface)
                 .border_1()
                 .border_color(if focused {
-                    theme::border_focused()
+                    palette.field.focused_border
                 } else {
-                    theme::line()
+                    palette.field.border
                 })
                 .child(view.search_field.clone()),
         )
@@ -1829,11 +1831,7 @@ fn render_search_bar(
             div()
                 .flex_none()
                 .ui_text_size(12., cx)
-                .text_color(if total == 0 {
-                    theme::faint()
-                } else {
-                    theme::muted()
-                })
+                .text_color(palette.text.secondary)
                 .child(count),
         )
         .child(
@@ -1858,6 +1856,7 @@ fn render_search_bar(
 
 /// Find Side/Files track: same height / inset / radius / border as [`capsule`].
 fn search_seg_track() -> Div {
+    let palette = theme::software_palette();
     div()
         .flex_none()
         .h(theme::TOGGLE_SIZE)
@@ -1866,8 +1865,8 @@ fn search_seg_track() -> Div {
         .p(px(NAV_INSET))
         .rounded(px(NAV_BUTTON_RADIUS + NAV_INSET + 1.))
         .border_1()
-        .border_color(theme::line())
-        .bg(theme::white())
+        .border_color(palette.field.border)
+        .bg(palette.field.surface)
 }
 
 fn search_seg_btn(
@@ -1877,6 +1876,7 @@ fn search_seg_btn(
     cx: &mut Context<DiffView>,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let palette = theme::software_palette();
     div()
         .id(id)
         .h_full()
@@ -1899,7 +1899,7 @@ fn search_seg_btn(
                 .text_color(if selected {
                     theme::accent()
                 } else {
-                    theme::muted()
+                    palette.text.secondary
                 })
                 .child(label),
         )
@@ -2261,6 +2261,7 @@ fn render_draft_dock(
     window: &Window,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
+    let palette = theme::software_palette();
     let Some(draft) = view.open_review.dock() else {
         return div().into_any_element();
     };
@@ -2296,7 +2297,7 @@ fn render_draft_dock(
                 .child(
                     div()
                         .ui_text_size(11., cx)
-                        .text_color(theme::muted())
+                        .text_color(palette.text.secondary)
                         .child(if draft.editing.is_some() {
                             "Edit DraftComment ·"
                         } else {
@@ -2307,7 +2308,7 @@ fn render_draft_dock(
                     div()
                         .font_family(mono)
                         .text_xs()
-                        .text_color(theme::text())
+                        .text_color(palette.text.primary)
                         .child(label),
                 )
                 .child(
@@ -2315,7 +2316,7 @@ fn render_draft_dock(
                         .flex_1()
                         .min_w(px(0.))
                         .ui_text_size(11., cx)
-                        .text_color(theme::faint())
+                        .text_color(palette.text.secondary)
                         .child("Enter to save · Shift-Enter for a newline · Esc to cancel"),
                 )
                 .child(
@@ -2331,11 +2332,12 @@ fn render_draft_dock(
                 .flex()
                 .items_start()
                 .rounded(px(theme::FIND_FIELD_RADIUS))
+                .bg(palette.field.surface)
                 .border_1()
                 .border_color(if focused {
-                    theme::border_focused()
+                    palette.field.focused_border
                 } else {
-                    theme::line()
+                    palette.field.border
                 })
                 .child(view.draft_field.clone()),
         )

@@ -5,7 +5,7 @@ use gpui::{
     ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId,
     IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
     Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
-    UnderlineStyle, Window, actions, div, fill, hsla, point, prelude::*, px, relative, rgba, size,
+    UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -578,7 +578,10 @@ impl Element for TextElement {
         let line_height = window.line_height();
 
         let (display_text, text_color) = if input.content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 0., 0.35))
+            (
+                input.placeholder.clone(),
+                theme::software_palette().text.placeholder.into(),
+            )
         } else {
             (content, style.color)
         };
@@ -626,7 +629,7 @@ impl Element for TextElement {
                         point(left + cursor_x, chrome_top),
                         size(cursor_width, chrome_bottom - chrome_top),
                     ),
-                    gpui::blue(),
+                    theme::software_palette().field.caret,
                 ))
             } else {
                 let (a, b) = (selected_range.start, selected_range.end);
@@ -646,12 +649,12 @@ impl Element for TextElement {
                     };
                     let top = bounds.top() + line_height * row as f32 + px(CARET_INSET);
                     let bottom = bounds.top() + line_height * (row as f32 + 1.) - px(CARET_INSET);
-                    selection.push(fill(
-                        Bounds::from_corners(
-                            point(left + x0, top),
-                            point(left + x1.max(x0 + px(1.)), bottom),
-                        ),
-                        rgba(0x3311ff30),
+                    selection.extend(selection_quads(
+                        left + x0,
+                        left + x1.max(x0 + px(1.)),
+                        top,
+                        bottom,
+                        theme::software_palette().field,
                     ));
                     let _ = byte_start;
                 }
@@ -738,18 +741,18 @@ impl Element for TextElement {
                         point(left + cursor_x, chrome_top),
                         size(cursor_width, chrome_bottom - chrome_top),
                     ),
-                    gpui::blue(),
+                    theme::software_palette().field.caret,
                 )),
             )
         } else {
             (
-                vec![fill(
-                    Bounds::from_corners(
-                        point(left + line.x_for_index(selected_range.start), chrome_top),
-                        point(left + line.x_for_index(selected_range.end), chrome_bottom),
-                    ),
-                    rgba(0x3311ff30),
-                )],
+                selection_quads(
+                    left + line.x_for_index(selected_range.start),
+                    left + line.x_for_index(selected_range.end),
+                    chrome_top,
+                    chrome_bottom,
+                    theme::software_palette().field,
+                ),
                 None,
             )
         };
@@ -860,6 +863,33 @@ fn ink_nudge_for_line(
     ))
 }
 
+/// Keep the selection wash light enough for text contrast, and draw a strong
+/// 1px edge at both ends of its height so the selected span remains obvious.
+fn selection_quads(
+    left: Pixels,
+    right: Pixels,
+    top: Pixels,
+    bottom: Pixels,
+    colors: theme::FieldColors,
+) -> Vec<PaintQuad> {
+    let right = right.max(left + px(1.));
+    let width = right - left;
+    vec![
+        fill(
+            Bounds::from_corners(point(left, top), point(right, bottom)),
+            colors.selection,
+        ),
+        fill(
+            Bounds::new(point(left, top), size(width, px(1.))),
+            colors.selection_outline,
+        ),
+        fill(
+            Bounds::new(point(left, bottom - px(1.)), size(width, px(1.))),
+            colors.selection_outline,
+        ),
+    ]
+}
+
 impl Render for TextField {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -921,6 +951,7 @@ impl Render for TextField {
                 }
             })
             .ui_text_size(13., cx)
+            .text_color(theme::software_palette().text.primary)
             .font_family(appearance::ui_font(cx))
             .child(TextElement { input: cx.entity() })
     }
