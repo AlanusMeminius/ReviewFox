@@ -143,7 +143,7 @@ impl DiffView {
             focus: cx.focus_handle(),
             tree_collapsed: false,
             tree_width: f32::from(theme::DIFF_TREE_WIDTH),
-            tree_resize_state: Rc::new(ResizeState::default()),
+            tree_resize_state: Rc::new(ResizeState::with_drag_latch()),
             snapshot: Some(snapshot),
             review: Some(review),
             drafting: None,
@@ -329,13 +329,40 @@ impl DiffView {
 
     fn tree_resize_handler(&self, cx: &Context<Self>) -> splitter::ResizeHandler {
         let view = cx.entity().downgrade();
-        Rc::new(move |requested, window, cx: &mut App| {
+        Rc::new(move |raw, window, cx: &mut App| {
             view.update(cx, |this, cx| {
+                if this.tree_resize_state.drag_consumed() {
+                    return;
+                }
                 let available = f32::from(window.viewport_size().width);
-                let width = splitter::clamp_diff_tree_width(requested, available);
-                if this.tree_width != width {
-                    this.tree_width = width;
-                    cx.notify();
+                let origin = this.tree_resize_state.drag_origin().unwrap_or(raw);
+                match splitter::leading_rail_drag(
+                    raw,
+                    origin,
+                    !this.tree_collapsed,
+                    available,
+                    splitter::MIN_DIFF_CONTENT_WIDTH,
+                ) {
+                    splitter::RailDrag::Stay => {}
+                    splitter::RailDrag::Reveal => {
+                        this.tree_resize_state.consume_drag();
+                        this.tree_collapsed = false;
+                        cx.notify();
+                    }
+                    splitter::RailDrag::Show(width) => {
+                        let changed = this.tree_collapsed || this.tree_width != width;
+                        this.tree_collapsed = false;
+                        this.tree_width = width;
+                        if changed {
+                            cx.notify();
+                        }
+                    }
+                    splitter::RailDrag::Hide => {
+                        if !this.tree_collapsed {
+                            this.tree_collapsed = true;
+                            cx.notify();
+                        }
+                    }
                 }
             })
             .ok();
@@ -615,7 +642,14 @@ impl DiffView {
                             .when(self.tree_collapsed, |d| d.pl(px(theme::CHANGES_INSET)))
                             .pr(px(theme::CHANGES_INSET))
                             .child(render_dual_pane(self, cx))
-                            .child(render_status_bar(self, cx)),
+                            .child(render_status_bar(self, cx))
+                            .when(self.tree_collapsed, |d| {
+                                d.child(splitter::parked_leading_handle(
+                                    "diff-tree-parked-handle",
+                                    self.tree_resize_handler(cx),
+                                    self.tree_resize_state.clone(),
+                                ))
+                            }),
                     ),
             )
             .into_any_element()

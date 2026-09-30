@@ -33,11 +33,63 @@ fn end_resize_drag() {
     });
 }
 
+/// Present only on a handle whose caller may swallow the rest of a drag.
+#[derive(Default)]
+struct DragLatch {
+    /// A nudge already opened the pane; moves do nothing until mouseup.
+    consumed: Cell<bool>,
+    /// `size_at_pointer` at mousedown.
+    origin: Cell<Option<f32>>,
+}
+
 #[derive(Default)]
 pub struct ResizeState {
     active: Cell<bool>,
     /// Pointer is over this handle's hit strip (chrome reads this for hover fill).
     hovered: Cell<bool>,
+    latch: Option<Rc<DragLatch>>,
+}
+
+impl ResizeState {
+    /// Opt in to [`Self::consume_drag`]: other splitters leave the latch off.
+    pub fn with_drag_latch() -> Self {
+        Self {
+            latch: Some(Rc::new(DragLatch::default())),
+            ..Self::default()
+        }
+    }
+
+    /// Ignore further moves until mouseup.
+    pub fn consume_drag(&self) {
+        if let Some(latch) = &self.latch {
+            latch.consumed.set(true);
+        }
+    }
+
+    pub fn drag_consumed(&self) -> bool {
+        self.latch
+            .as_ref()
+            .is_some_and(|latch| latch.consumed.get())
+    }
+
+    /// `size_at_pointer` at the mousedown that started this drag.
+    pub fn drag_origin(&self) -> Option<f32> {
+        self.latch.as_ref().and_then(|latch| latch.origin.get())
+    }
+
+    fn note_drag_start(&self, origin: f32) {
+        if let Some(latch) = &self.latch {
+            latch.consumed.set(false);
+            latch.origin.set(Some(origin));
+        }
+    }
+
+    fn note_drag_end(&self) {
+        if let Some(latch) = &self.latch {
+            latch.consumed.set(false);
+            latch.origin.set(None);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,6 +193,62 @@ pub fn clamp_mr_detail_height(requested: f32, available: f32) -> f32 {
     requested.clamp(MIN_MR_DETAIL_HEIGHT, maximum)
 }
 
+/// A collapsible pane snaps shut below this width; there is no state between 0 and it.
+pub const COLLAPSE_THRESHOLD: f32 = 160.;
+/// A collapsed leading rail opens once the pointer has moved this far toward open.
+pub const REVEAL_NUDGE: f32 = 8.;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Collapse {
+    Hidden,
+    Width(f32),
+}
+
+/// Collapsible pane beside a sibling that keeps `floor` of `available`. The pane
+/// takes what it asks for, shrinks when the sibling would drop below its floor,
+/// and hides once it would be under `threshold`.
+pub fn resolve_collapsible(requested: f32, available: f32, floor: f32, threshold: f32) -> Collapse {
+    let width = requested.min(available - floor);
+    if width < threshold {
+        Collapse::Hidden
+    } else {
+        Collapse::Width(width)
+    }
+}
+
+/// One move of a leading rail that can snap shut and nudge back open.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RailDrag {
+    Stay,
+    Reveal,
+    Show(f32),
+    Hide,
+}
+
+/// Open rail: follow the pointer, cap at [`MAX_SIDEBAR_WIDTH`], hide below
+/// [`COLLAPSE_THRESHOLD`]. Collapsed rail: stay put until the pointer has moved
+/// [`REVEAL_NUDGE`] toward open, then reveal at the remembered width.
+pub fn leading_rail_drag(
+    raw: f32,
+    origin: f32,
+    shown: bool,
+    available: f32,
+    floor: f32,
+) -> RailDrag {
+    if !shown {
+        if raw - origin < REVEAL_NUDGE {
+            RailDrag::Stay
+        } else {
+            RailDrag::Reveal
+        }
+    } else {
+        match resolve_collapsible(raw, available, floor, COLLAPSE_THRESHOLD) {
+            Collapse::Hidden => RailDrag::Hide,
+            Collapse::Width(width) => RailDrag::Show(width.min(MAX_SIDEBAR_WIDTH)),
+        }
+    }
+}
+
 /// Map pointer → raw pane size in window space (handlers re-clamp with sibling widths).
 /// Vertical is clamped here (no sibling). Not `window.bounds()` — that is screen-global.
 pub fn size_at_pointer(axis: Axis, position: Point<Pixels>, viewport: Size<Pixels>) -> f32 {
@@ -157,9 +265,7 @@ pub fn size_at_pointer(axis: Axis, position: Point<Pixels>, viewport: Size<Pixel
 
 fn capsule_size(axis: Axis) -> (f32, f32) {
     match axis {
-        Axis::HorizontalLeading | Axis::HorizontalTrailing => {
-            (CAPSULE_THICKNESS, CAPSULE_LENGTH)
-        }
+        Axis::HorizontalLeading | Axis::HorizontalTrailing => (CAPSULE_THICKNESS, CAPSULE_LENGTH),
         Axis::Vertical | Axis::VerticalNorth => (CAPSULE_LENGTH, CAPSULE_THICKNESS),
     }
 }
@@ -205,14 +311,22 @@ pub fn handle(
         move |bounds, _, window, _| {
             if chrome {
                 window.paint_quad(
-                    fill(capsule_bounds(axis, bounds), theme::splitter_capsule(capsule_alpha(&paint_state)))
-                        .corner_radii(px(CAPSULE_RADIUS)),
+                    fill(
+                        capsule_bounds(axis, bounds),
+                        theme::splitter_capsule(capsule_alpha(&paint_state)),
+                    )
+                    .corner_radii(px(CAPSULE_RADIUS)),
                 );
             }
 
             let down_state = down_state.clone();
             window.on_mouse_event(move |event: &MouseDownEvent, _, window, _| {
                 if event.button == MouseButton::Left && bounds.contains(&event.position) {
+                    down_state.note_drag_start(size_at_pointer(
+                        axis,
+                        event.position,
+                        window.viewport_size(),
+                    ));
                     // `replace` returns the previous value — count only transitions.
                     if !down_state.active.replace(true) {
                         begin_resize_drag();
@@ -240,6 +354,7 @@ pub fn handle(
             let up_state = up_state.clone();
             window.on_mouse_event(move |event: &MouseUpEvent, _, window, _| {
                 if event.button == MouseButton::Left && up_state.active.replace(false) {
+                    up_state.note_drag_end();
                     end_resize_drag();
                     window.refresh();
                 }
@@ -275,16 +390,34 @@ pub fn handle(
         // With chrome, the strip stays clear — only the center stadium paints.
         Axis::Vertical => {
             let el = el.h(px(HANDLE_WIDTH)).w_full().cursor_row_resize();
-            if chrome {
-                el
-            } else {
-                el.bg(theme::white())
-            }
+            if chrome { el } else { el.bg(theme::white()) }
         }
         // MR detail ↔ Commit island: clear hit strip doubles as the frost gap.
         Axis::VerticalNorth => el.h(px(theme::CHANGES_INSET)).w_full().cursor_row_resize(),
     };
     el
+}
+
+/// A collapsed leading rail's handle, parked in the parent's left gutter so the
+/// rail can be dragged back open. The parent must be `relative`.
+pub fn parked_leading_handle(
+    id: &'static str,
+    on_resize: ResizeHandler,
+    resize_state: Rc<ResizeState>,
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .w(px(theme::CHANGES_SHADOW_GAP))
+        .child(handle(
+            id,
+            Axis::HorizontalLeading,
+            on_resize,
+            resize_state,
+            true,
+        ))
 }
 
 #[cfg(test)]
@@ -390,6 +523,40 @@ mod tests {
         assert!(theme::CHANGES_SHADOW_GAP >= CAPSULE_THICKNESS + 2.);
         assert_eq!(CAPSULE_THICKNESS, 3.);
         assert_eq!(CAPSULE_LENGTH, 24.);
+    }
+
+    #[test]
+    fn leading_rail_drag_snaps_and_nudges() {
+        let floor = MIN_COMMITS_WIDTH;
+        assert_eq!(
+            leading_rail_drag(160., 0., true, 1280., floor),
+            RailDrag::Show(160.)
+        );
+        assert_eq!(
+            leading_rail_drag(188., 0., true, 1280., floor),
+            RailDrag::Show(188.)
+        );
+        assert_eq!(
+            leading_rail_drag(159., 0., true, 1280., floor),
+            RailDrag::Hide
+        );
+        assert_eq!(
+            leading_rail_drag(500., 0., true, 1280., floor),
+            RailDrag::Show(MAX_SIDEBAR_WIDTH)
+        );
+        // 400 − 280 commits = 120, under the snap threshold.
+        assert_eq!(
+            leading_rail_drag(200., 0., true, 400., floor),
+            RailDrag::Hide
+        );
+        assert_eq!(
+            leading_rail_drag(7., 0., false, 1280., floor),
+            RailDrag::Stay
+        );
+        assert_eq!(
+            leading_rail_drag(8., 0., false, 1280., floor),
+            RailDrag::Reveal
+        );
     }
 
     #[test]

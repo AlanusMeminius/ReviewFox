@@ -139,7 +139,7 @@ impl AppView {
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
             sidebar_width: splitter::default_sidebar_width(),
-            sidebar_resize_state: Rc::new(ResizeState::default()),
+            sidebar_resize_state: Rc::new(ResizeState::with_drag_latch()),
             files_width: splitter::default_files_width(),
             files_resize_state: Rc::new(ResizeState::default()),
             head_meta_height: splitter::DEFAULT_HEAD_META_HEIGHT,
@@ -171,13 +171,40 @@ impl AppView {
 
     fn sidebar_resize_handler(&self, cx: &Context<Self>) -> splitter::ResizeHandler {
         let view = cx.entity().downgrade();
-        Rc::new(move |requested, window, cx: &mut App| {
+        Rc::new(move |raw, window, cx: &mut App| {
             view.update(cx, |this, cx| {
+                if this.sidebar_resize_state.drag_consumed() {
+                    return;
+                }
                 let available = f32::from(window.viewport_size().width);
-                let width = splitter::clamp_sidebar_width(requested, available);
-                if this.sidebar_width != width {
-                    this.sidebar_width = width;
-                    cx.notify();
+                let origin = this.sidebar_resize_state.drag_origin().unwrap_or(raw);
+                match splitter::leading_rail_drag(
+                    raw,
+                    origin,
+                    !this.repos_collapsed,
+                    available,
+                    splitter::MIN_COMMITS_WIDTH,
+                ) {
+                    splitter::RailDrag::Stay => {}
+                    splitter::RailDrag::Reveal => {
+                        this.sidebar_resize_state.consume_drag();
+                        this.repos_collapsed = false;
+                        cx.notify();
+                    }
+                    splitter::RailDrag::Show(width) => {
+                        let changed = this.repos_collapsed || this.sidebar_width != width;
+                        this.repos_collapsed = false;
+                        this.sidebar_width = width;
+                        if changed {
+                            cx.notify();
+                        }
+                    }
+                    splitter::RailDrag::Hide => {
+                        if !this.repos_collapsed {
+                            this.repos_collapsed = true;
+                            cx.notify();
+                        }
+                    }
                 }
             })
             .ok();
@@ -1162,7 +1189,14 @@ impl Render for AppView {
                             .overflow_hidden()
                             .bg(theme::sidebar())
                             .child(render_commits(self, cx))
-                            .child(render_files(self, cx)),
+                            .child(render_files(self, cx))
+                            .when(self.repos_collapsed, |d| {
+                                d.child(splitter::parked_leading_handle(
+                                    "sidebar-parked-handle",
+                                    self.sidebar_resize_handler(cx),
+                                    self.sidebar_resize_state.clone(),
+                                ))
+                            }),
                     ),
             )
             .when(self.repo_menu.is_some(), |d| {
