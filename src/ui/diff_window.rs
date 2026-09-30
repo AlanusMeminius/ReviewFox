@@ -2787,7 +2787,7 @@ mod tests {
                             repository: Repository::new("/tmp/diff-draft-test".into()),
                             base_oid: None,
                             head_oid: Oid::from_bytes([1; 20]),
-                            worktree: false,
+                            uncommitted: false,
                         },
                         changed_paths: Vec::new(),
                         selected_path: "sample.txt".into(),
