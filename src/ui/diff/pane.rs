@@ -20,6 +20,7 @@ use super::element::{
     wrap_plan_for_panes,
 };
 use super::layout::{HunkLand, Layout, Row, WrapPlan};
+use super::text_selection::{Model as TextModel, Phase, RowClass, Sample};
 use super::trace;
 use super::viewport::{self, Viewport};
 use crate::domain::{
@@ -48,6 +49,8 @@ pub enum PaneEvent {
     /// A gutter-band drag began a postimage selection, so any open DraftComment is
     /// no longer the user's target.
     SelectionStarted,
+    /// A press in the code column; the shell focuses the Diff.
+    FocusDiff,
     HunkIndexChanged(Option<usize>),
     HoverCopy(Option<String>),
 }
@@ -60,27 +63,14 @@ pub(super) struct PointerMove {
     pub h_hovered: [bool; 2],
     /// Pane y, only while the pointer is over the center gutter.
     pub gutter_y: Option<f32>,
+    /// Window x, wherever the pointer is. A text drag maps this into a column.
+    pub pane_x: f32,
     /// Pane y, wherever the pointer is; a selection drag reads only this.
     pub pane_y: f32,
     /// Pointer y inside each side's vertical track.
     pub track_y: [f32; 2],
     /// Pointer x inside each side's horizontal track.
     pub h_track_x: [f32; 2],
-}
-
-/// Contiguous, same-side, line-granular selection from a center-gutter drag
-/// on the line-number column. `start..=end` in 1-based line numbers of `side`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct LineSelection {
-    side: Side,
-    start: u32,
-    end: u32,
-}
-
-impl LineSelection {
-    fn span(self) -> (Side, u32, u32) {
-        (self.side, self.start, self.end)
-    }
 }
 
 /// A DraftComment as the pane needs it: the Anchor drives the row index and the
@@ -115,8 +105,9 @@ pub struct DualPane {
     comments: Vec<PaneComment>,
     /// LineSpan being drafted, highlighted in its pane.
     drafting: Option<(Side, u32, u32)>,
-    /// Current drag selection; the draft target while the dock is open.
-    selection: Option<LineSelection>,
+    /// TextSelection plus the gutter line span. Text gestures do not write the
+    /// gutter span; gutter drags do not write the TextSelection.
+    text: TextModel,
     /// Live drag: the side and the line the press landed on.
     sel_drag: Option<(Side, u32)>,
     /// Shared scroll parameter, in pixels, and the only vertical scroll
@@ -164,6 +155,8 @@ pub struct DualPane {
     view_h: f32,
     /// Code column width per side, set in prepaint.
     pane_w: [f32; 2],
+    /// Window x of each code pane's left edge, set in prepaint.
+    code_left: [f32; 2],
     /// Device pixels per logical pixel, from the last prepaint.
     scale: f32,
     hover_copy: Option<String>,
@@ -203,7 +196,7 @@ impl DualPane {
             shapes: ShapeCache::default(),
             comments: Vec::new(),
             drafting: None,
-            selection: None,
+            text: TextModel::default(),
             sel_drag: None,
             scroll_s: 0.,
             x_offsets: [0.; 2],
@@ -224,6 +217,7 @@ impl DualPane {
             ln_advance: None,
             view_h: 0.,
             pane_w: [0.; 2],
+            code_left: [0.; 2],
             scale: 1.,
             hover_copy: None,
             press: None,
@@ -348,9 +342,11 @@ impl DualPane {
             }
         }
         self.comments = comments;
-        // A selection belongs to the file it was dragged in.
-        self.selection = None;
+        // A gutter span belongs to the file it was dragged in.
+        self.text.clear_gutter();
+        self.text.cancel_press();
         self.sel_drag = None;
+        // ChangedPath clears TextSelection in a later ticket.
         self.fold = FoldState::collapsed();
         self.set_hunk_index(None, cx);
         self.hunk_s = Some(0.);
@@ -406,25 +402,32 @@ impl DualPane {
     /// DraftComment makes its span the draft target, so the wash and the icon
     /// follow the dock).
     pub fn select_span(&mut self, side: Side, start: u32, end: u32, cx: &mut Context<Self>) {
-        let next = Some(LineSelection { side, start, end });
         self.sel_drag = None;
-        if self.selection != next {
-            self.selection = next;
+        let next = Some((side, start, end));
+        if self.text.gutter() != next {
+            self.text.drag_gutter(side, start, end);
             cx.notify();
         }
     }
 
-    /// Current selection as `(side, start, end)` inclusive, if any.
+    /// Current gutter line span as `(side, start, end)` inclusive, if any.
     pub fn selection(&self) -> Option<(Side, u32, u32)> {
-        self.selection.map(LineSelection::span)
+        self.text.gutter()
+    }
+
+    /// Original text of the TextSelection, when there is one.
+    pub fn copied_text(&self) -> Option<String> {
+        let layout = self.layout.as_ref()?;
+        self.text
+            .clipboard(|side, ln| layout.side(side).line_text(ln).unwrap_or(""))
     }
 
     /// Drop the wash without opening or closing the dock.
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        if self.selection.is_none() && self.sel_drag.is_none() {
+        if self.text.gutter().is_none() && self.sel_drag.is_none() {
             return;
         }
-        self.selection = None;
+        self.text.clear_gutter();
         self.sel_drag = None;
         cx.notify();
     }
@@ -436,13 +439,13 @@ impl DualPane {
         match mark {
             element::IconMark::Filled(id) => cx.emit(PaneEvent::OpenEdit { id }),
             element::IconMark::Empty => {
-                let Some(sel) = self.selection else {
+                let Some((side, start, end)) = self.text.gutter() else {
                     return;
                 };
                 cx.emit(PaneEvent::OpenDraft {
-                    side: sel.side,
-                    start: sel.start,
-                    count: span_count(sel.start, sel.end),
+                    side,
+                    start,
+                    count: span_count(start, end),
                 });
             }
         }
@@ -1160,6 +1163,46 @@ impl DualPane {
         }
     }
 
+    fn text_sample(&self, side: Side, x: f32, y: f32, phase: Phase) -> Sample {
+        let (class, column) = self.classify_text(side, x, y);
+        Sample {
+            phase,
+            side,
+            class,
+            column,
+        }
+    }
+
+    fn classify_text(&self, side: Side, x: f32, y: f32) -> (RowClass, usize) {
+        let Some(vp) = self.viewport() else {
+            return (RowClass::Hatch, 0);
+        };
+        let Some(layout) = self.layout.as_ref() else {
+            return (RowClass::Hatch, 0);
+        };
+        match vp.hit(side, y) {
+            Some(Row::Omit(_)) => (RowClass::Omission, 0),
+            Some(Row::Line(line)) if line.is_equal_padding() => {
+                (RowClass::Padding { ln: line.ln }, 0)
+            }
+            Some(Row::Line(line)) => {
+                let ix = side_ix(side);
+                let left = self.code_left[ix];
+                let right = left + self.pane_w[ix];
+                let (_, _, inset) = element::comment_bar_layout(side, left, right);
+                let mut origin = left + element::TEXT_PAD - self.x_offsets[ix];
+                if layout.side(side).has_comment(line.ln) {
+                    origin += inset;
+                }
+                let advance = self.mono_advance.map(|(_, advance)| advance).unwrap_or(0.);
+                let column = element::display_column(layout, side, line, origin, x, advance);
+                (RowClass::Text { ln: line.ln }, column)
+            }
+            None if vp.gaps(side).iter().any(|&(a, b)| y >= a && y < b) => (RowClass::Hatch, 0),
+            None => (RowClass::Outside, 0),
+        }
+    }
+
     /// Logical line `side` shows at pane y `y`, skipping blank padding rows.
     fn line_at(&self, side: Side, y: f32) -> Option<u32> {
         match self.viewport()?.hit(side, y)? {
@@ -1168,34 +1211,36 @@ impl DualPane {
         }
     }
 
-    /// Left press in `side`'s code column: arm an omission-separator click only.
-    /// Line selection belongs to the gutter band so the code column stays free
-    /// for text selection.
-    pub(super) fn press_code(&mut self, side: Side, y: f32, _cx: &mut Context<Self>) {
+    /// Left press in `side`'s code column. Arms an omission-separator click and
+    /// a text gesture. Does not write the gutter line span.
+    pub(super) fn press_code(&mut self, side: Side, x: f32, y: f32, cx: &mut Context<Self>) {
         self.press = self.row_index_at(side, y).map(|row| (side, row));
+        cx.emit(PaneEvent::FocusDiff);
+        if self.layout.is_none() {
+            return;
+        }
+        let sample = self.text_sample(side, x, y, Phase::Press);
+        note_text(&mut self.text, self.layout.as_ref(), sample);
     }
 
     /// Left press on `side`'s line-number column.
     /// On a line it starts a selection drag (replacing any selection, including
-    /// one on the other side).
+    /// one on the other side). Does not write the TextSelection.
     pub(super) fn press_gutter_select(&mut self, side: Side, y: f32, cx: &mut Context<Self>) {
         let Some(ln) = self.line_at(side, y) else {
             return;
         };
         self.press = None;
+        self.text.cancel_press();
         self.sel_drag = Some((side, ln));
-        self.selection = Some(LineSelection {
-            side,
-            start: ln,
-            end: ln,
-        });
+        self.text.drag_gutter(side, ln, ln);
         cx.emit(PaneEvent::SelectionStarted);
         cx.notify();
     }
 
-    /// Left release. Ends a thumb or selection drag, or completes a click on
-    /// the pressed omission separator by expanding its span.
-    pub(super) fn release(&mut self, side: Option<Side>, y: f32, cx: &mut Context<Self>) {
+    /// Left release. Ends a thumb or selection drag, finishes a text gesture,
+    /// or completes a click on the pressed omission separator.
+    pub(super) fn release(&mut self, side: Option<Side>, x: f32, y: f32, cx: &mut Context<Self>) {
         self.sel_drag = None;
         if self.bars.drag.take().is_some() || self.bars.h_drag.take().is_some() {
             if !self.bars.hovered.iter().any(|&h| h) && !self.bars.h_hovered.iter().any(|&h| h) {
@@ -1204,10 +1249,21 @@ impl DualPane {
             cx.notify();
             return;
         }
+        let mut dirty = false;
+        if let Some(pressed) = self.text.press_side() {
+            let sample = self.text_sample(pressed, x, y, Phase::Release);
+            dirty = note_text(&mut self.text, self.layout.as_ref(), sample);
+        }
         let (Some(pressed), Some(side)) = (self.press.take(), side) else {
+            if dirty {
+                cx.notify();
+            }
             return;
         };
         if pressed.0 != side {
+            if dirty {
+                cx.notify();
+            }
             return;
         }
         let omit = self.viewport().and_then(|vp| match vp.hit(side, y)? {
@@ -1216,6 +1272,8 @@ impl DualPane {
         });
         if let Some(id) = omit {
             self.expand_omit(id, cx);
+        } else if dirty {
+            cx.notify();
         }
     }
 
@@ -1226,6 +1284,7 @@ impl DualPane {
             hovered,
             h_hovered,
             gutter_y,
+            pane_x,
             pane_y,
             track_y,
             h_track_x,
@@ -1237,9 +1296,14 @@ impl DualPane {
             && let Some(ln) = self.line_at(side, pane_y)
         {
             let (start, end) = selection_span(anchor, ln);
-            let next = Some(LineSelection { side, start, end });
-            if self.selection != next {
-                self.selection = next;
+            let next = Some((side, start, end));
+            if self.text.gutter() != next {
+                self.text.drag_gutter(side, start, end);
+                dirty = true;
+            }
+        } else if let Some(side) = self.text.press_side() {
+            let sample = self.text_sample(side, pane_x, pane_y, Phase::Move);
+            if note_text(&mut self.text, self.layout.as_ref(), sample) {
                 dirty = true;
             }
         }
@@ -1301,7 +1365,9 @@ impl DualPane {
         let ln_w = ln_col_width(line_number_digits(self.layout.as_ref()?), ln_advance);
         let geom = Geom::new(bounds, ln_w, self.scale);
         for side in [Side::Preimage, Side::Postimage] {
-            self.pane_w[side_ix(side)] = f32::from(geom.pane(side).size.width);
+            let ix = side_ix(side);
+            self.pane_w[ix] = f32::from(geom.pane(side).size.width);
+            self.code_left[ix] = f32::from(geom.pane(side).left());
         }
         self.sync_wrap_layout(self.pane_w, window, cx);
         let comment_starts = self.comment_starts();
@@ -1322,7 +1388,8 @@ impl DualPane {
                 scale: self.scale,
                 decorations: Decorations {
                     drafting: self.drafting,
-                    selection: self.selection.map(LineSelection::span),
+                    selection: self.text.gutter(),
+                    text: self.text.selection(),
                     comment_starts,
                     search_query: (!self.search_query.is_empty())
                         .then(|| Arc::from(self.search_query.as_str())),
@@ -1718,6 +1785,17 @@ pub(super) fn nearest_hunk_index(s_rows: f32, lands: &[HunkLand]) -> Option<usiz
 /// Background highlight results apply only while this open is still current.
 fn should_apply_highlight(open_generation: u64, result_generation: u64) -> bool {
     open_generation == result_generation
+}
+
+fn note_text(text: &mut TextModel, layout: Option<&Layout>, sample: Sample) -> bool {
+    let Some(layout) = layout else {
+        return false;
+    };
+    let before = text.selection();
+    text.pointer(sample, |side, ln| {
+        layout.side(side).line_text(ln).unwrap_or("")
+    });
+    text.selection() != before
 }
 
 /// Inclusive line span of a drag from `anchor` to the line under the pointer,

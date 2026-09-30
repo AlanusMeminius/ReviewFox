@@ -292,6 +292,14 @@ pub fn selection_wash() -> Rgba {
         ..accent()
     }
 }
+/// Character TextSelection, painted above the line wash, word marks, and find
+/// hits. The color does not change when focus leaves the Diff.
+pub fn text_selection() -> Rgba {
+    Rgba {
+        a: 0.45,
+        ..accent()
+    }
+}
 pub fn accent() -> Rgba {
     rgb(0x2457d6)
 }

@@ -193,6 +193,7 @@ impl DiffView {
                         this.close_dock(window, cx);
                     }
                 }
+                PaneEvent::FocusDiff => window.focus(&this.focus),
                 PaneEvent::HunkIndexChanged(index) => {
                     this.hunk_index = *index;
                     cx.notify();
@@ -1125,6 +1126,15 @@ impl DiffView {
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let mods = &event.keystroke.modifiers;
+        if mods.secondary() && !mods.alt && !mods.shift && event.keystroke.key == "c" {
+            if self.focus.is_focused(window)
+                && let Some(text) = self.pane.read(cx).copied_text()
+            {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                cx.stop_propagation();
+            }
+            return;
+        }
         if mods.secondary() && !mods.alt && !mods.shift {
             let op = match event.keystroke.key.as_str() {
                 "=" | "+" => Some(FontOp::Inc),

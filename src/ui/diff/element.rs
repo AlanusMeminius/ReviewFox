@@ -16,9 +16,10 @@ use gpui::{
     relative, rgb, size,
 };
 
-use super::layout::{Layout, LineKind, Row};
+use super::layout::{Layout, LineKind, LineRow, Row};
 use super::pane::{DualPane, PointerMove};
 use super::tabs::TabExpansion;
+use super::text_selection::TextSelection;
 use super::trace::{self, FrameStats};
 use super::viewport::{Viewport, route_wheel, snap};
 use super::visual_wrap::WrapSide;
@@ -90,6 +91,8 @@ pub(super) struct Decorations {
     pub active_match: Option<ActiveSearchMatch>,
     /// Pulse strength 1→0 over ~250ms after land; `None` = settled.
     pub search_pulse: Option<f32>,
+    /// Caret-free character span. A decoration: it does not rebuild Layout.
+    pub text: Option<TextSelection>,
 }
 
 /// Shaped text and line number per `(side, visual row)`. Cleared on Layout
@@ -322,6 +325,8 @@ struct RowPaint {
     marks: Vec<(f32, f32)>,
     /// Search-hit runs, x relative to the text origin; `true` = current hit.
     search: Vec<(f32, f32, bool)>,
+    /// TextSelection runs, x relative to the text origin.
+    chars: Vec<(f32, f32)>,
     label: Option<ShapedLine>,
     show_label: bool,
 }
@@ -409,6 +414,9 @@ pub struct Frame {
     bridges: Vec<WinBridge>,
     /// Omission separator joins: (preimage y, postimage y), window.
     waves: Vec<(f32, f32)>,
+    /// Code-column hitboxes over text rows only, so the I-beam is not shown
+    /// on omission, padding, or hatch.
+    text_cursors: Vec<Hitbox>,
     /// Frame-trace numbers (zeros unless `REVIEWFOX_FRAME_TRACE=1`).
     pub(super) stats: FrameStats,
 }
@@ -453,6 +461,7 @@ pub(super) fn build_frame(
     let view_h = f32::from(geom.bounds.size.height);
     let screen = (view_h / row_h).ceil() as usize;
     let mut keep = [0..0, 0..0];
+    let mut text_cursors = Vec::new();
     let sides = [Side::Preimage, Side::Postimage].map(|side| {
         let rows = layout.side(side);
         let visible = vp.visible_rows(side);
@@ -578,6 +587,30 @@ pub(super) fn build_frame(
             if let Some(text) = &shape.text {
                 widest = widest.max(shape.text_leading + f32::from(text.width));
             }
+            let chars = match row {
+                Row::Line(l) if !l.is_equal_padding() => char_spans(
+                    decorations.text.as_ref(),
+                    side,
+                    l,
+                    rows.text(l),
+                    shape.tabs.as_ref(),
+                    shape.text.as_ref(),
+                    layout,
+                ),
+                _ => Vec::new(),
+            };
+            if let Row::Line(l) = row
+                && !l.is_equal_padding()
+            {
+                let pane = geom.pane(side);
+                text_cursors.push(window.insert_hitbox(
+                    Bounds::from_corners(
+                        point(pane.left(), px(y_of(i))),
+                        point(pane.right(), px(y_of(i + 1))),
+                    ),
+                    HitboxBehavior::Normal,
+                ));
+            }
             out.push(RowPaint {
                 y0: y_of(i),
                 y1: y_of(i + 1),
@@ -593,6 +626,7 @@ pub(super) fn build_frame(
                 text_leading: leading,
                 marks,
                 search,
+                chars,
                 label: shape.label.clone(),
                 show_label,
             });
@@ -693,8 +727,60 @@ pub(super) fn build_frame(
         sides,
         bridges,
         waves,
+        text_cursors,
         stats,
     }
+}
+
+fn char_spans(
+    sel: Option<&TextSelection>,
+    side: Side,
+    line: &LineRow,
+    line_text: &str,
+    tabs: Option<&TabExpansion>,
+    shaped: Option<&ShapedLine>,
+    layout: &Layout,
+) -> Vec<(f32, f32)> {
+    let (Some(sel), Some(tabs), Some(shaped)) = (sel, tabs, shaped) else {
+        return Vec::new();
+    };
+    if sel.side != side {
+        return Vec::new();
+    }
+    let Some((start, end)) = sel.bytes_on(line.ln, line_text.len()) else {
+        return Vec::new();
+    };
+    let (segment, _) = wrap_segment(layout, side, line, tabs, layout.side(side));
+    let clipped = clip_runs_to_display_segment(&[(start, end)], tabs, segment);
+    run_spans(&clipped, shaped)
+}
+
+/// Display column under `pointer_x`. `origin_x` is the visual row's text origin
+/// (pane edge + pad − scroll + comment inset), before continuation indent.
+/// A tab's expanded spaces share one original character; that map lives in the model.
+pub(super) fn display_column(
+    layout: &Layout,
+    side: Side,
+    line: &LineRow,
+    origin_x: f32,
+    pointer_x: f32,
+    advance: f32,
+) -> usize {
+    let text = layout.side(side).text(line);
+    let tabs = TabExpansion::new(text);
+    let (seg, leading) = wrap_segment(layout, side, line, &tabs, layout.side(side));
+    let base = tabs
+        .text
+        .get(..seg.start)
+        .map(|prefix| prefix.chars().count())
+        .unwrap_or(0);
+    let local = pointer_x - (origin_x + leading);
+    let extra = if advance <= 0. || local <= 0. {
+        0
+    } else {
+        (local / advance).floor() as usize
+    };
+    base + extra
 }
 
 fn shape_row(
@@ -1093,6 +1179,12 @@ impl Frame {
                         mark_h,
                     );
                     window.paint_quad(fill(rect, theme::mod_chg()).corner_radii(px(2.)));
+                }
+                for &(a, b) in &row.chars {
+                    window.paint_quad(fill(
+                        hline(text_x + a, text_x + b, row.y0, row.y1 - row.y0),
+                        theme::text_selection(),
+                    ));
                 }
                 if let Some(text) = &row.text {
                     text.paint(point(px(text_x), px(row.y0)), row_h, window, cx)
@@ -1513,7 +1605,10 @@ impl Element for DualPaneElement {
         let t = trace::start();
         frame.paint(window, cx);
         for code in &frame.code {
-            window.set_cursor_style(CursorStyle::IBeam, code);
+            window.set_cursor_style(CursorStyle::Arrow, code);
+        }
+        for row in &frame.text_cursors {
+            window.set_cursor_style(CursorStyle::IBeam, row);
         }
         for icon in &frame.icon_hitboxes {
             window.set_cursor_style(CursorStyle::PointingHand, icon);
@@ -1632,7 +1727,8 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                         pane.press_h_track(side, local, cx);
                     } else {
                         // Bar hidden: still allow omit-expand under the track strip.
-                        pane.press_code(side, y, cx);
+                        let x = f32::from(event.position.x);
+                        pane.press_code(side, x, y, cx);
                     }
                 });
                 return;
@@ -1650,10 +1746,12 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                 }
             }
         }
-        // Code column: omit-expand click only — never starts a line selection.
+        // Code column: text selection, and an omission-separator click. Never a
+        // gutter line span. Right-click does not reach here.
         for side in [Side::Preimage, Side::Postimage] {
             if down_code[side_ix(side)].is_hovered(window) {
-                entity.update(cx, |pane, cx| pane.press_code(side, y, cx));
+                let x = f32::from(event.position.x);
+                entity.update(cx, |pane, cx| pane.press_code(side, x, y, cx));
                 return;
             }
         }
@@ -1665,10 +1763,11 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
             return;
         }
         let y = f32::from(event.position.y) - geom.top();
+        let x = f32::from(event.position.x);
         let side = [Side::Preimage, Side::Postimage]
             .into_iter()
             .find(|&side| code[side_ix(side)].is_hovered(window));
-        entity.update(cx, |pane, cx| pane.release(side, y, cx));
+        entity.update(cx, |pane, cx| pane.release(side, x, y, cx));
     });
 
     let entity = pane.clone();
@@ -1699,6 +1798,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                     hovered,
                     h_hovered,
                     gutter_y: in_gutter.then_some(y),
+                    pane_x: f32::from(pos.x),
                     pane_y: y,
                     track_y,
                     h_track_x,
