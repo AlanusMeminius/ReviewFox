@@ -5,6 +5,7 @@ pub mod element;
 pub mod layout;
 pub mod pane;
 pub mod review;
+pub mod rewrap;
 mod tabs;
 mod text_selection;
 mod trace;
