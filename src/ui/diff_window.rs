@@ -595,8 +595,9 @@ impl DiffView {
                             true,
                         ))
                     })
-                    // Frosted desk: the content island floats here, inset on all four
-                    // sides so the material reads around it.
+                    // Frosted desk: the content island floats here. Top and right stay
+                    // inset; the left gap is the rail seam while the tree is open,
+                    // and the status bar replaces the bottom inset.
                     .child(
                         div()
                             .id("diff-stage")
@@ -609,7 +610,9 @@ impl DiffView {
                             .flex()
                             .flex_col()
                             .pt(px(theme::CHANGES_TOP_INSET))
-                            .pl(px(theme::CHANGES_INSET))
+                            // Tree open: the rail seam is the left gap. Collapsed:
+                            // the island still needs the window-edge inset.
+                            .when(self.tree_collapsed, |d| d.pl(px(theme::CHANGES_INSET)))
                             .pr(px(theme::CHANGES_INSET))
                             .child(render_dual_pane(self, cx))
                             .child(render_status_bar(self, cx)),
@@ -764,7 +767,7 @@ fn render_titlebar(
     let leading_w = if view.tree_collapsed {
         px(collapsed_leading_width())
     } else {
-        px(view.tree_width + splitter::RAIL_HANDLE_WIDTH)
+        px(view.tree_width + theme::CHANGES_SHADOW_GAP)
     };
     div()
         .id("diff-titlebar")
@@ -814,8 +817,10 @@ fn render_titlebar(
                 // main window's `titlebar-leading`.
                 .pt(px(theme::CHANGES_TOP_INSET))
                 .gap_2()
-                // Same inset the island uses, measured from the stage's left edge.
-                .pl(px(theme::CHANGES_INSET))
+                // Tree open: the rail seam is the left gap, so the toolbar starts
+                // on the stage edge and shares it with the island. Collapsed: the
+                // island's own left inset, measured from the stage edge.
+                .when(view.tree_collapsed, |d| d.pl(px(theme::CHANGES_INSET)))
                 .child(render_nav_capsule(view, cx))
                 .child(
                     capsule()

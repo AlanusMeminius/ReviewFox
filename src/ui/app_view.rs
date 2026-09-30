@@ -1536,7 +1536,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
     let leading_w = if view.repos_collapsed {
         px(collapsed_leading_width())
     } else {
-        px(view.sidebar_width + splitter::RAIL_HANDLE_WIDTH)
+        px(view.sidebar_width + theme::CHANGES_SHADOW_GAP)
     };
 
     div()
@@ -1591,8 +1591,10 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                 // Balances the pills against the island below; see `titlebar-leading`.
                 .pt(px(theme::CHANGES_TOP_INSET))
                 .gap(px(theme::CHROME_GAP))
-                // Same inset the islands use, measured from the stage's left edge.
-                .pl(px(theme::CHANGES_INSET))
+                // Sidebar open: the rail seam is the left gap, so the pills start
+                // on the stage edge and share it with the island. Collapsed: the
+                // island's own left inset, measured from the stage edge.
+                .when(view.repos_collapsed, |d| d.pl(px(theme::CHANGES_INSET)))
                 .child(entry_chrome)
                 .child(
                     div()
@@ -1846,7 +1848,8 @@ fn collapsed_leading_width() -> f32 {
 
 fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let show_gitlab = gitlab_chrome_visible(view);
-    // Clear Changes. Pills + islands share one padded column so left edges match.
+    // Clear Changes. Pills share the island's left edge: the rail seam when the
+    // sidebar is open, `CHANGES_INSET` when it is collapsed.
     let float_gap = px(theme::changes_float_clearance(view.files_width));
     let inset = px(theme::CHANGES_INSET);
     let show_mr = show_gitlab && view.mr_entry.is_some();
@@ -1857,7 +1860,9 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
         .min_h(px(0.))
         .flex()
         .flex_col()
-        .pl(inset)
+        // Sidebar open: the rail seam is this gap, so padding here would double it.
+        // Collapsed: the island still needs the window-edge inset.
+        .when(view.repos_collapsed, |d| d.pl(inset))
         // No right padding: `changes_float_clearance` already ends this column one
         // gap short of the Changes island, so padding here would count it twice.
         .pt(px(theme::CHANGES_TOP_INSET))

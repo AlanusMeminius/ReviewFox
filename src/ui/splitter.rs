@@ -59,8 +59,6 @@ pub const MIN_FILES_WIDTH: f32 = 200.;
 pub const MAX_FILES_WIDTH: f32 = 480.;
 /// Hit-target thickness for most resize handles (ADR 0004).
 pub const HANDLE_WIDTH: f32 = 5.;
-/// Hit strip for sidebar|stage and Diff tree|stage — room around the 3px capsule.
-pub const RAIL_HANDLE_WIDTH: f32 = 8.;
 /// Short stadium painted at the seam center when chrome is on (paint-only).
 pub const CAPSULE_THICKNESS: f32 = 3.;
 pub const CAPSULE_LENGTH: f32 = 24.;
@@ -102,11 +100,22 @@ pub fn clamp_sidebar_width(requested: f32, available: f32) -> f32 {
     requested.clamp(MIN_SIDEBAR_WIDTH, maximum)
 }
 
-/// Floating Changes width: leave `MIN_COMMITS_WIDTH` for the Commit capsule
-/// (+ left island inset + right float clearance).
+/// Floating Changes width: leave `MIN_COMMITS_WIDTH` for the Commit capsule,
+/// plus the right inset and the Commit|Changes gap.
+///
+/// `sidebar_width == 0` means the rail is collapsed: the left inset is inside
+/// the stage. When the rail is open, that inset is the seam outside the stage
+/// (`CHANGES_SHADOW_GAP`), so it is subtracted from `available` instead.
 pub fn clamp_files_width(requested: f32, available: f32, sidebar_width: f32) -> f32 {
-    let stage = (available - sidebar_width).max(0.);
-    let clear = theme::CHANGES_INSET * 2. + theme::CHANGES_SHADOW_GAP;
+    let rail_open = sidebar_width > 0.;
+    let rail = if rail_open {
+        theme::CHANGES_SHADOW_GAP
+    } else {
+        0.
+    };
+    let stage = (available - sidebar_width - rail).max(0.);
+    let left_inset = if rail_open { 0. } else { theme::CHANGES_INSET };
+    let clear = left_inset + theme::CHANGES_INSET + theme::CHANGES_SHADOW_GAP;
     let maximum = MAX_FILES_WIDTH.min((stage - MIN_COMMITS_WIDTH - clear).max(MIN_FILES_WIDTH));
     requested.clamp(MIN_FILES_WIDTH, maximum)
 }
@@ -242,10 +251,11 @@ pub fn handle(
     let mut el = div().id(id).flex_none().relative().child(hit);
 
     el = match axis {
-        // Leading rail: wider hit when chromed so the 3px capsule has air.
+        // Leading chrome fills the frost gap between the rail and the island,
+        // same width as Commit|Changes. Without chrome, keep a slim strip.
         Axis::HorizontalLeading => {
             let w = if chrome {
-                RAIL_HANDLE_WIDTH
+                theme::CHANGES_SHADOW_GAP
             } else {
                 HANDLE_WIDTH
             };
@@ -297,8 +307,11 @@ mod tests {
         assert_eq!(clamp_files_width(100., 1280., 220.), 200.);
         assert_eq!(clamp_files_width(280., 1280., 220.), 280.);
         assert_eq!(clamp_files_width(600., 1280., 220.), 480.);
-        // stage 500 − 280 − left − right − gap = 196 → floors at MIN_FILES (200)
+        // stage (720−220−12 rail) − 280 − right − gap = 184 → floors at MIN_FILES
         assert_eq!(clamp_files_width(400., 720., 220.), 200.);
+        // collapsed rail: left inset is back inside the stage
+        assert_eq!(clamp_files_width(600., 1280., 0.), 480.);
+        assert_eq!(clamp_files_width(400., 400., 0.), 200.);
     }
 
     #[test]
@@ -373,8 +386,8 @@ mod tests {
     #[test]
     fn capsule_chrome_tokens_are_stadium_shaped() {
         assert_eq!(CAPSULE_RADIUS, CAPSULE_THICKNESS / 2.);
-        assert!(RAIL_HANDLE_WIDTH > HANDLE_WIDTH);
-        assert!(RAIL_HANDLE_WIDTH >= CAPSULE_THICKNESS + 2.);
+        assert!(theme::CHANGES_SHADOW_GAP > HANDLE_WIDTH);
+        assert!(theme::CHANGES_SHADOW_GAP >= CAPSULE_THICKNESS + 2.);
         assert_eq!(CAPSULE_THICKNESS, 3.);
         assert_eq!(CAPSULE_LENGTH, 24.);
     }
