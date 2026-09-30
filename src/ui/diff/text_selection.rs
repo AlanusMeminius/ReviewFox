@@ -290,9 +290,11 @@ impl Model {
         (!joined.is_empty()).then_some(joined)
     }
 
-    /// Lighter matches of a settled one-Identifier span. Empty while a gesture
-    /// is in progress. `pre` and `post` are 1-based logical lines. `folded`
-    /// lines are outside the scan.
+    /// Lighter matches of a settled one-Identifier span. During a gesture,
+    /// keep painting the previous settled span until the new one is released;
+    /// this avoids a blank frame when switching selections.
+    /// `pre` and `post` are 1-based logical lines. `folded` lines are outside
+    /// the scan.
     /// ponytail: linear scan each call; index if a profile says so.
     pub fn occurrences(
         &self,
@@ -300,10 +302,11 @@ impl Model {
         post: &[&str],
         folded: impl Fn(Side, u32) -> bool,
     ) -> Vec<OccurrenceHighlight> {
-        if self.press.is_some() {
-            return Vec::new();
-        }
-        let Some(sel) = self.selection else {
+        let sel = match self.press.as_ref() {
+            Some(press) => press.prior,
+            None => self.selection,
+        };
+        let Some(sel) = sel else {
             return Vec::new();
         };
         let selected = side_lines(sel.side, pre, post)
@@ -422,12 +425,19 @@ impl Model {
         if release {
             let press = self.press.take().expect("press");
             if press.head.is_none() {
-                self.selection = if press.clicks >= 3 {
+                let next = if press.clicks >= 3 {
                     triple_click(press.side, press.origin, press.prior, line)
                 } else if press.clicks == 2 {
                     double_click(press.side, press.origin, press.prior, line)
                 } else {
                     click_result(press.side, press.origin, press.prior, line)
+                };
+                self.selection = if press.clicks >= 2
+                    && same_identifier(press.prior, next, line)
+                {
+                    press.prior
+                } else {
+                    next
                 };
             }
         }
@@ -729,6 +739,29 @@ fn ident_run(text: &str, at: usize) -> (usize, usize) {
         end += c.len_utf8();
     }
     (start, end)
+}
+
+fn same_identifier<'a>(
+    prior: Option<TextSelection>,
+    next: Option<TextSelection>,
+    line: &impl Fn(Side, u32) -> &'a str,
+) -> bool {
+    let (Some(prior), Some(next)) = (prior, next) else {
+        return false;
+    };
+    let text = |selection: TextSelection| {
+        (selection.start_line == selection.end_line).then(|| {
+            line(selection.side, selection.start_line)
+                .get(selection.start_byte..selection.end_byte)
+        })
+    };
+    let (Some(prior_text), Some(next_text)) = (text(prior).flatten(), text(next).flatten())
+    else {
+        return false;
+    };
+    exact_identifier(prior, prior_text) == Some(prior_text)
+        && exact_identifier(next, next_text) == Some(next_text)
+        && prior_text == next_text
 }
 
 fn click_result<'a>(
@@ -1725,7 +1758,60 @@ mod tests {
                 4,
             )],
         );
-        assert!(highlights(&model, &pre, &post, no_fold).is_empty());
+        assert_eq!(
+            highlights(&model, &pre, &post, no_fold),
+            vec![
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 4,
+                    end_byte: 7,
+                },
+                OccurrenceHighlight {
+                    side: Side::Postimage,
+                    line: 1,
+                    start_byte: 0,
+                    end_byte: 3,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn switching_double_click_keeps_old_occurrences_until_release() {
+        let pre = ["foo bar foo"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0, 2),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+            ],
+        );
+        let old = highlights(&model, &pre, &[], no_fold);
+        assert_eq!(old.len(), 1);
+
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 4, 2)],
+        );
+        assert_eq!(highlights(&model, &pre, &[], no_fold), old);
+
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 4)],
+        );
+        assert_eq!(
+            model.selection().map(|selection| (selection.start_byte, selection.end_byte)),
+            Some((4, 7))
+        );
+        assert!(highlights(&model, &pre, &[], no_fold).is_empty());
     }
 
     #[test]
