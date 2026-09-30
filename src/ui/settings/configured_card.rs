@@ -24,7 +24,7 @@ impl ConfiguredCard {
         }
     }
 
-    /// Leading status icon, e.g. `("check.svg", theme::success())`.
+    /// Leading status icon, e.g. the Software Theme success foreground.
     pub fn icon(mut self, icon: impl Into<SharedString>, color: impl Into<Hsla>) -> Self {
         self.icon = Some((icon.into(), color.into()));
         self

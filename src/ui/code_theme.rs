@@ -348,8 +348,8 @@ pub fn remember_mode(mode: SoftwareThemeMode) {
     *ACTIVE_MODE.lock().unwrap_or_else(|err| err.into_inner()) = mode;
 }
 
-pub fn is_dark() -> bool {
-    *ACTIVE_MODE.lock().unwrap_or_else(|err| err.into_inner()) == SoftwareThemeMode::Dark
+pub fn active_mode() -> SoftwareThemeMode {
+    *ACTIVE_MODE.lock().unwrap_or_else(|err| err.into_inner())
 }
 
 /// Palette Diff paints from the active Software Theme mode and pairing.

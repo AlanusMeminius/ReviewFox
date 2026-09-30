@@ -1696,7 +1696,7 @@ pub fn placeholder(msg: &str, cx: &App) -> gpui::AnyElement {
         .items_center()
         .justify_center()
         .ui_text_size(14., cx)
-        .text_color(theme::muted())
+        .text_color(theme::software_palette().text.secondary)
         .child(msg.to_string())
         .into_any_element()
 }

@@ -988,7 +988,7 @@ impl Render for SettingsView {
             .overflow_hidden()
             // The root tints the native material; the nav adds its own bounded
             // backing so text contrast does not depend on the wallpaper.
-            .bg(theme::frost())
+            .bg(theme::software_palette().surface.window_backing)
             .font_family(appearance::ui_font(cx))
             // Unsized UI text inherits gpui's 1rem default (16px), scaled like the rest.
             .ui_text_size(16., cx)

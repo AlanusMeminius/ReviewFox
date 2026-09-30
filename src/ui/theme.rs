@@ -1,4 +1,4 @@
-//! Visual tokens aligned with BeadsViewer + accepted prototype A.
+//! Resolved Software Theme roles and shared UI geometry.
 
 #[cfg(target_os = "windows")]
 use gpui::rgba;
@@ -6,8 +6,7 @@ use gpui::{BoxShadow, Hsla, Pixels, Rgba, hsla, point, px, rgb};
 
 use super::code_theme::{self, SoftwareThemeMode};
 
-/// Semantic application colors. New screens can migrate one visible slice at a
-/// time while both built-in appearances keep the same set of roles.
+/// Semantic application colors. Both built-in appearances expose the same roles.
 #[derive(Clone, Copy)]
 pub struct SoftwarePalette {
     pub surface: SurfaceColors,
@@ -101,6 +100,11 @@ pub struct SettingsRowColors {
 #[derive(Clone, Copy)]
 pub struct ControlColors {
     pub idle: Rgba,
+    pub pill: Rgba,
+    pub pill_hover: Rgba,
+    pub pill_outline: Rgba,
+    pub accent: Rgba,
+    pub on_accent: Rgba,
     pub hover: Rgba,
     pub pressed: Rgba,
     pub selected: Rgba,
@@ -135,6 +139,14 @@ pub struct WindowControlColors {
 #[derive(Clone, Copy)]
 pub struct SurfaceColors {
     pub window_backing: Rgba,
+    /// Clear stage over the one window backing, including on platforms where
+    /// that backing is opaque rather than a native material.
+    pub desk: Rgba,
+    pub island: Rgba,
+    pub popover: Rgba,
+    pub divider: Rgba,
+    /// Stable backing for text that otherwise sits directly on window material.
+    pub chrome_backing: Rgba,
     /// Stable backing over the platform's frosted material. A small amount of
     /// the material remains visible without letting the wallpaper set contrast.
     pub sidebar_backing: Rgba,
@@ -146,8 +158,12 @@ pub struct SurfaceColors {
 pub struct TextColors {
     pub primary: Rgba,
     pub secondary: Rgba,
+    /// Secondary copy over selected, hovered, and pressed control fills.
+    pub on_control_secondary: Rgba,
     pub section: Rgba,
     pub placeholder: Rgba,
+    pub disabled: Rgba,
+    pub link: Rgba,
 }
 
 #[derive(Clone, Copy)]
@@ -280,6 +296,11 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             },
             control: ControlColors {
                 idle: rgb(0xf4f5f7),
+                pill: rgb(0xffffff),
+                pill_hover: rgb(0xe4e7ed),
+                pill_outline: rgb(0x657184),
+                accent: rgb(0x2457d6),
+                on_accent: rgb(0xffffff),
                 hover: rgb(0xe9ebef),
                 pressed: rgb(0xdde3ec),
                 selected: rgb(0xdce8f8),
@@ -333,6 +354,11 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             },
             surface: SurfaceColors {
                 window_backing: window_backing(mode),
+                desk: CLEAR,
+                island: rgb(0xffffff),
+                popover: rgb(0xffffff),
+                divider: rgb(0x7c8798),
+                chrome_backing: gpui::rgba(0xf4f5f7f5),
                 sidebar_backing: gpui::rgba(0xf4f5f7e6),
                 floating_overlay: gpui::rgba(0xfffffff5),
                 shadow_ink: hsla(220. / 360., 0.38, 0.14, 1.),
@@ -340,8 +366,11 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             text: TextColors {
                 primary: rgb(0x172033),
                 secondary: rgb(0x596579),
+                on_control_secondary: rgb(0x4b5669),
                 section: rgb(0x4b5669),
                 placeholder: rgb(0x4b5669),
+                disabled: rgb(0x657184),
+                link: rgb(0x2457d6),
             },
             field: FieldColors {
                 surface: rgb(0xffffff),
@@ -460,6 +489,11 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             },
             control: ControlColors {
                 idle: rgb(0x1d2027),
+                pill: rgb(0x30343d),
+                pill_hover: rgb(0x39404a),
+                pill_outline: rgb(0xaeb7c5),
+                accent: rgb(0x2457a8),
+                on_accent: rgb(0xffffff),
                 hover: rgb(0x414a59),
                 pressed: rgb(0x4a5669),
                 selected: rgb(0x344a65),
@@ -513,6 +547,11 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             },
             surface: SurfaceColors {
                 window_backing: window_backing(mode),
+                desk: CLEAR,
+                island: rgb(0x30343d),
+                popover: rgb(0x30343d),
+                divider: rgb(0x8993a3),
+                chrome_backing: gpui::rgba(0x1d2027e6),
                 sidebar_backing: gpui::rgba(0x1d202780),
                 floating_overlay: gpui::rgba(0x272b33f5),
                 shadow_ink: hsla(220. / 360., 0.38, 0.03, 1.),
@@ -520,8 +559,11 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             text: TextColors {
                 primary: rgb(0xd5dae3),
                 secondary: rgb(0xaeb7c5),
+                on_control_secondary: rgb(0xd1d7e0),
                 section: rgb(0xe2e6ed),
                 placeholder: rgb(0xc5cfde),
+                disabled: rgb(0x96a1b0),
+                link: rgb(0x89c7f7),
             },
             field: FieldColors {
                 surface: rgb(0x30343d),
@@ -586,11 +628,7 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
 }
 
 pub fn software_palette() -> SoftwarePalette {
-    resolve_software_palette(if code_theme::is_dark() {
-        SoftwareThemeMode::Dark
-    } else {
-        SoftwareThemeMode::Light
-    })
+    resolve_software_palette(code_theme::active_mode())
 }
 
 #[cfg(target_os = "macos")]
@@ -693,7 +731,8 @@ pub fn changes_float_clearance(files_width: f32) -> f32 {
 /// Soft cast for expanded branch/MR pickers — separates the panel from islands below.
 /// Includes a zero-offset ambient layer so side edges soften against the frosted desk.
 pub fn picker_shadow() -> Vec<BoxShadow> {
-    let ink = |a: f32| -> Hsla { hsla(220. / 360., 0.38, 0.14, a) };
+    let shadow_ink = software_palette().surface.shadow_ink;
+    let ink = |a: f32| -> Hsla { Hsla { a, ..shadow_ink } };
     vec![
         BoxShadow {
             color: ink(0.06),
@@ -729,11 +768,6 @@ pub fn find_bar_shadow() -> Vec<BoxShadow> {
             spread_radius: px(0.),
         },
     ]
-}
-
-/// Translucent fill for the floating find bar / draft dock.
-pub fn find_bar_bg() -> Rgba {
-    software_palette().surface.floating_overlay
 }
 
 /// Outer capsule radius. Field radius is [`FIND_FIELD_RADIUS`] so corners stay
@@ -788,223 +822,13 @@ pub const TRAFFIC_LIGHT_LEFT_INSET: f32 = 12.;
 #[cfg(target_os = "macos")]
 pub const TRAFFIC_LIGHTS_WIDTH: f32 = 76.;
 
-pub fn text() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0xabb2bf)
-    } else {
-        rgb(0x172033)
-    }
-}
-pub fn muted() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x8f96a3)
-    } else {
-        rgb(0x596579)
-    }
-}
-/// Splitter stadium chrome: [`muted`] at the given alpha (idle / hover / drag).
-pub fn splitter_capsule(alpha: f32) -> Rgba {
-    Rgba {
-        a: alpha,
-        ..muted()
-    }
-}
-pub fn faint() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x636d83)
-    } else {
-        rgb(0x98a2b3)
-    }
-}
-pub fn line() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x3b4048)
-    } else {
-        rgb(0xdfe3ea)
-    }
-}
-pub fn white() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x30343d)
-    } else {
-        rgb(0xffffff)
-    }
-}
 /// Paints nothing; lets whatever is behind the element show through.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 const CLEAR: Rgba = Rgba {
     r: 0.,
     g: 0.,
     b: 0.,
     a: 0.,
 };
-
-/// The window-wide frosted tint. Exactly one element per window paints it: the
-/// root. The workspace sidebar and Diff ChangedPath tree add bounded backings
-/// for text; other desk columns remain clear so their tint does not compound.
-pub fn frost() -> Rgba {
-    software_palette().surface.window_backing
-}
-
-/// Columns that sit directly on the frosted desk, such as the stage between
-/// islands. The workspace sidebar and Diff ChangedPath tree have semantic
-/// backings because their labels need a stable backdrop.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-pub fn sidebar() -> Rgba {
-    // Columns on the frosted desk stay clear; in dark the desk is already
-    // tinted by [`frost`].
-    CLEAR
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn sidebar() -> Rgba {
-    rgb(0xf4f5f7)
-}
-pub fn hover() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x3b4048)
-    } else {
-        rgb(0xe9ebef)
-    }
-}
-/// Chrome pill fill (branch / value / unselected kind toggles) — white on the frosted desk.
-pub fn capsule() -> Rgba {
-    white()
-}
-/// Hover fill on capsule chrome (prototype `--capsule-bg-hover`).
-pub fn capsule_track_hover() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x454b55)
-    } else {
-        rgb(0xe4e7ed)
-    }
-}
-/// Sidebar active row — same blue as the app icon; chroma survives vibrancy.
-pub fn sidebar_selected() -> Rgba {
-    accent()
-}
-/// Primary label on [`sidebar_selected`].
-pub fn on_sidebar_selected() -> Rgba {
-    // Primary label on the accent fill: true white in both themes.
-    rgb(0xffffff)
-}
-/// Workspace sidebar selected / pressed row fill. Translucent so macOS vibrancy
-/// (and Windows acrylic) shows through.
-#[allow(dead_code)] // Compatibility role until remaining callers are migrated in ticket 09.
-pub fn sidebar_row_selected() -> Rgba {
-    Rgba {
-        r: 0.,
-        g: 0.,
-        b: 0.,
-        a: 0.07,
-    }
-}
-/// Workspace sidebar hover fill on a non-selected row.
-#[allow(dead_code)] // Compatibility role until remaining callers are migrated in ticket 09.
-pub fn sidebar_row_hover() -> Rgba {
-    Rgba {
-        r: 0.,
-        g: 0.,
-        b: 0.,
-        a: 0.04,
-    }
-}
-pub fn range() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x30384a)
-    } else {
-        rgb(0xf1f5ff)
-    }
-}
-pub fn accent() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x61afef)
-    } else {
-        rgb(0x2457d6)
-    }
-}
-
-// Settings tokens: Zed One Light roles, tuned to the palette above. [`line`]
-// plays One Light's `border`.
-
-/// Row dividers and card outlines — a step lighter than [`line`].
-#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
-pub fn border_variant() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x333842)
-    } else {
-        rgb(0xe8ebf0)
-    }
-}
-/// Focused input / keyboard-focused control border; a softened [`accent`].
-pub fn border_focused() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x4c739e)
-    } else {
-        rgb(0x7c9be6)
-    }
-}
-/// Pressed controls and selected rows; one step past [`hover`].
-pub fn element_active() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x454b55)
-    } else {
-        rgb(0xdfe3e9)
-    }
-}
-#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
-pub fn success() -> Rgba {
-    rgb(0x2f8f55)
-}
-#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
-pub fn success_background() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x1e3a2a)
-    } else {
-        rgb(0xe8f7ee)
-    }
-}
-#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
-pub fn success_border() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x2f5c40)
-    } else {
-        rgb(0xc3e5cf)
-    }
-}
-#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
-pub fn error() -> Rgba {
-    rgb(0xcf4a3c)
-}
-#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
-pub fn error_background() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x3d2422)
-    } else {
-        rgb(0xfdeceb)
-    }
-}
-#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
-pub fn error_border() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x5c3532)
-    } else {
-        rgb(0xf5c8c2)
-    }
-}
-/// Settings nav row under the pointer: a half-step toward the white
-/// [`capsule`] that marks the selected row, so hover never reads as selection.
-#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
-pub fn settings_nav_hover() -> Rgba {
-    if crate::ui::code_theme::is_dark() {
-        Rgba {
-            a: 0.12,
-            ..rgb(0xffffff)
-        }
-    } else {
-        Rgba { a: 0.55, ..white() }
-    }
-}
 
 #[cfg(test)]
 mod inset_tests {
@@ -1430,6 +1254,105 @@ mod software_palette_tests {
             }
             for surface in [caption.close_hover, caption.close_pressed] {
                 assert!(contrast(caption.close_icon, surface) >= 3.);
+            }
+        }
+    }
+
+    #[test]
+    fn chrome_roles_remain_readable_over_material_and_controls() {
+        for mode in [SoftwareThemeMode::Light, SoftwareThemeMode::Dark] {
+            let palette = resolve_software_palette(mode);
+            for wallpaper in [rgb(0x000000), rgb(0xffffff)] {
+                let root = composite(palette.surface.window_backing, wallpaper);
+                let desk = composite(palette.surface.desk, root);
+                assert_eq!(desk, root, "{mode:?} desk must not compound window tint");
+                let chrome = composite(palette.surface.chrome_backing, desk);
+                for (name, fg) in [
+                    ("titlebar/status secondary", palette.text.secondary),
+                    ("titlebar feedback", palette.text.link),
+                ] {
+                    assert!(
+                        contrast(fg, chrome) >= 4.5,
+                        "{mode:?} {name} over composed material: {}",
+                        contrast(fg, chrome)
+                    );
+                }
+                for (name, surface) in [
+                    ("island", palette.surface.island),
+                    ("popover", palette.surface.popover),
+                    ("pill", palette.control.pill),
+                    ("pill hover", palette.control.pill_hover),
+                ] {
+                    assert!(
+                        contrast(palette.text.primary, surface) >= 4.5,
+                        "{mode:?} primary on {name}"
+                    );
+                    assert!(
+                        contrast(palette.text.secondary, surface) >= 4.5,
+                        "{mode:?} secondary on {name}"
+                    );
+                }
+                assert!(contrast(palette.surface.divider, palette.control.pill) >= 3.);
+                assert!(contrast(palette.text.section, palette.surface.island) >= 4.5);
+                assert!(contrast(palette.control.pill_outline, palette.control.pill_hover) >= 3.);
+                assert!(contrast(palette.control.pill_outline, palette.control.pressed) >= 3.);
+                assert!(contrast(palette.text.disabled, palette.surface.popover) >= 4.5);
+                assert!(contrast(palette.text.link, palette.surface.island) >= 4.5);
+                assert!(contrast(palette.control.on_accent, palette.control.accent) >= 4.5);
+                for (name, fill, indicator) in [
+                    (
+                        "picker hover",
+                        palette.control.hover,
+                        palette.text.secondary,
+                    ),
+                    (
+                        "picker pressed",
+                        palette.control.pressed,
+                        palette.text.secondary,
+                    ),
+                    (
+                        "picker selected",
+                        palette.control.selected,
+                        palette.text.link,
+                    ),
+                    (
+                        "picker selected hover",
+                        palette.control.selected_hover,
+                        palette.text.link,
+                    ),
+                    (
+                        "picker selected pressed",
+                        palette.control.selected_pressed,
+                        palette.text.link,
+                    ),
+                ] {
+                    assert!(contrast(indicator, fill) >= 3., "{mode:?} {name} indicator");
+                    assert!(contrast(palette.text.primary, fill) >= 4.5);
+                    assert!(contrast(palette.text.on_control_secondary, fill) >= 4.5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_code_theme_pairs_with_both_software_appearances() {
+        use crate::ui::code_theme::{self, CodeThemePairing};
+
+        for code in code_theme::builtin_catalog() {
+            let pairing = CodeThemePairing {
+                light: Some(code.id.clone()),
+                dark: Some(code.id.clone()),
+            };
+            for mode in [SoftwareThemeMode::Light, SoftwareThemeMode::Dark] {
+                let software = resolve_software_palette(mode);
+                let resolved = code_theme::resolve(mode, &pairing, code_theme::builtin_catalog());
+                assert_eq!(resolved.id, code.id);
+                assert_eq!(resolved.slots.paper, code.slots.paper);
+                assert_eq!(resolved.slots.search_hit, code.slots.search_hit);
+                assert_eq!(resolved.marks.drafting_band, code.marks.drafting_band);
+                assert!(contrast(software.text.placeholder, software.field.surface) >= 4.5);
+                assert!(contrast(software.scrollbar.idle, software.scrollbar.track) >= 3.);
+                assert!(contrast(software.scrollbar.drag, software.scrollbar.track) >= 3.);
             }
         }
     }

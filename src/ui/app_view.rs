@@ -1267,9 +1267,9 @@ impl Render for AppView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            // The window's one translucent layer; `#body`, `#repos` and `#stage`
-            // all stay clear so it is not painted twice.
-            .bg(theme::frost())
+            // The window's one full-width tint. The sidebar adds a bounded
+            // backing for labels; body and stage do not compound the material.
+            .bg(theme::software_palette().surface.window_backing)
             .font_family(appearance::ui_font(cx))
             // Unsized UI text inherits gpui's 1rem default (16px), scaled like the rest.
             .ui_text_size(16., cx)
@@ -1304,7 +1304,7 @@ impl Render for AppView {
                             .flex_1()
                             .min_w(px(splitter::MIN_COMMITS_WIDTH))
                             .overflow_hidden()
-                            .bg(theme::sidebar())
+                            .bg(theme::software_palette().surface.desk)
                             .when(!self.covering(), |d| d.child(render_commits(self, cx)))
                             .child(render_files(self, cx))
                             .when(self.repos_collapsed, |d| {
@@ -1574,7 +1574,7 @@ fn render_repo_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                     .p_1()
                     .flex()
                     .flex_col()
-                    .bg(theme::white())
+                    .bg(theme::software_palette().surface.popover)
                     .rounded_lg()
                     .shadow_lg()
                     .occlude()
@@ -1597,7 +1597,7 @@ fn render_repo_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .hover(|d| d.bg(theme::hover()))
+                                    .hover(|d| d.bg(theme::software_palette().control.hover))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         action(this, path.clone(), cx);
                                     }))
@@ -1606,12 +1606,12 @@ fn render_repo_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                                             .size(theme::ICON_SIZE)
                                             .flex_none()
                                             .path(icon)
-                                            .text_color(theme::muted()),
+                                            .text_color(theme::software_palette().text.secondary),
                                     )
                                     .child(
                                         div()
                                             .ui_label_size(14., cx)
-                                            .text_color(theme::text())
+                                            .text_color(theme::software_palette().text.primary)
                                             .child(label),
                                     )
                             }),
@@ -1641,7 +1641,7 @@ fn render_commit_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEle
                     .p_1()
                     .flex()
                     .flex_col()
-                    .bg(theme::white())
+                    .bg(theme::software_palette().surface.popover)
                     .rounded_lg()
                     .shadow_lg()
                     .occlude()
@@ -1660,7 +1660,7 @@ fn render_commit_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEle
                             .gap_2();
                         let item = if can_open {
                             item.cursor_pointer()
-                                .hover(|d| d.bg(theme::hover()))
+                                .hover(|d| d.bg(theme::software_palette().control.hover))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.commit_menu = None;
                                     this.open_diff(cx);
@@ -1674,18 +1674,18 @@ fn render_commit_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEle
                                 .flex_none()
                                 .path("diff_title.svg")
                                 .text_color(if can_open {
-                                    theme::muted()
+                                    theme::software_palette().text.secondary
                                 } else {
-                                    theme::faint()
+                                    theme::software_palette().text.disabled
                                 }),
                         )
                         .child(
                             div()
                                 .ui_label_size(14., cx)
                                 .text_color(if can_open {
-                                    theme::text()
+                                    theme::software_palette().text.primary
                                 } else {
-                                    theme::faint()
+                                    theme::software_palette().text.disabled
                                 })
                                 .child("Open Diff"),
                         )
@@ -1788,9 +1788,13 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                 .child(
                     div()
                         .flex_none()
+                        .px(px(4.))
+                        .py(px(2.))
+                        .rounded_md()
+                        .bg(theme::software_palette().surface.chrome_backing)
                         .font_family(mono.clone())
                         .text_xs()
-                        .text_color(theme::muted())
+                        .text_color(theme::software_palette().text.secondary)
                         .child(label),
                 )
                 .child(
@@ -1878,7 +1882,7 @@ fn render_entry_chrome(
                 .w(px(1.))
                 .h(px(14.))
                 .flex_none()
-                .bg(theme::faint()),
+                .bg(theme::software_palette().surface.divider),
         )
         .child(
             div()
@@ -1889,15 +1893,29 @@ fn render_entry_chrome(
                 .min_w(px(0.))
                 .max_w(px(260.))
                 .px_2()
+                .border_1()
+                .border_color(gpui::Rgba {
+                    a: 0.,
+                    ..theme::software_palette().control.pill_outline
+                })
                 .rounded_full()
-                .bg(theme::capsule())
+                .bg(theme::software_palette().control.pill)
                 .flex()
                 .items_center()
                 .gap_1()
                 .overflow_hidden()
                 .when(hide_value, |d| d.opacity(0.))
                 .when(!hide_value && kind != EntryKind::Uncommitted, |d| {
-                    d.hover(|d| d.bg(theme::capsule_track_hover()))
+                    d.hover(|d| {
+                        d.bg(theme::software_palette().control.pill_hover)
+                            .border_color(theme::software_palette().control.pill_outline)
+                    })
+                    .active(|d| {
+                        d.bg(theme::software_palette().control.pressed)
+                            .border_color(theme::software_palette().control.pill_outline)
+                            .border_l_2()
+                            .pl(px(7.))
+                    })
                 })
                 .child(
                     canvas(
@@ -1937,7 +1955,7 @@ fn render_entry_chrome(
                         .size(theme::ICON_SIZE)
                         .flex_none()
                         .path(value_icon)
-                        .text_color(theme::muted()),
+                        .text_color(theme::software_palette().text.secondary),
                 )
                 .child(
                     div()
@@ -1946,7 +1964,7 @@ fn render_entry_chrome(
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .ui_label_size(12., cx)
-                        .text_color(theme::text())
+                        .text_color(theme::software_palette().text.primary)
                         .child(value),
                 )
                 .when(kind != EntryKind::Uncommitted, |d| {
@@ -1955,7 +1973,7 @@ fn render_entry_chrome(
                             .size(theme::ICON_SIZE_SM)
                             .flex_none()
                             .path("chevron_down.svg")
-                            .text_color(theme::faint()),
+                            .text_color(theme::software_palette().text.secondary),
                     )
                 }),
         )
@@ -1970,9 +1988,9 @@ fn entry_kind_hit(
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let fg = if selected {
-        theme::on_sidebar_selected()
+        theme::software_palette().control.on_accent
     } else {
-        theme::muted()
+        theme::software_palette().text.secondary
     };
     div()
         .id(id)
@@ -1984,9 +2002,10 @@ fn entry_kind_hit(
         .gap_1()
         .flex_none()
         .cursor_pointer()
-        .when(selected, |d| d.bg(theme::sidebar_selected()))
+        .when(selected, |d| d.bg(theme::software_palette().control.accent))
         .when(!selected, |d| {
-            d.bg(theme::capsule()).hover(|d| d.bg(theme::hover()))
+            d.bg(theme::software_palette().control.pill)
+                .hover(|d| d.bg(theme::software_palette().control.hover))
         })
         .on_click(cx.listener(move |this, _, _, cx| {
             this.select_entry_kind(target, cx);
@@ -2503,6 +2522,49 @@ fn mr_metadata_items(detail: &MergeRequestDetail) -> Vec<metadata::Item> {
     items
 }
 
+fn picker_option_row(id: (&'static str, usize), width: f32, selected: bool) -> gpui::Stateful<Div> {
+    let palette = theme::software_palette();
+    let indicator = if selected {
+        palette.text.link
+    } else {
+        palette.text.secondary
+    };
+    div()
+        .id(id)
+        .w(px(width))
+        .px_3()
+        .py_2()
+        .border_1()
+        .border_color(if selected {
+            indicator
+        } else {
+            gpui::Rgba { a: 0., ..indicator }
+        })
+        .rounded_md()
+        .cursor_pointer()
+        .when(selected, |row| row.bg(palette.control.selected))
+        .hover(move |row| {
+            row.bg(if selected {
+                palette.control.selected_hover
+            } else {
+                palette.control.hover
+            })
+            .border_color(indicator)
+            .border_l_2()
+            .pl(px(11.))
+        })
+        .active(move |row| {
+            row.bg(if selected {
+                palette.control.selected_pressed
+            } else {
+                palette.control.pressed
+            })
+            .border_color(indicator)
+            .border_l_4()
+            .pl(px(9.))
+        })
+}
+
 fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let Some(picker) = &view.mr_picker else {
         return div().into_any_element();
@@ -2556,7 +2618,7 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                     .id("mr-picker-scroll")
                     .w(px(inner_w))
                     .h(px(inner_h))
-                    .bg(theme::white())
+                    .bg(theme::software_palette().surface.island)
                     .track_scroll(&scroll)
                     .overflow_y_scroll()
                     .flex()
@@ -2567,7 +2629,7 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                             .px_2()
                             .py_1()
                             .ui_text_size(12., cx)
-                            .text_color(theme::muted())
+                            .text_color(theme::software_palette().text.secondary)
                             .child(filter),
                     )
                     .when(matches.is_empty(), |d| {
@@ -2576,7 +2638,7 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                                 .px_3()
                                 .py_2()
                                 .ui_text_size(14., cx)
-                                .text_color(theme::muted())
+                                .text_color(theme::software_palette().text.secondary)
                                 .child("No matching merge requests."),
                         )
                     })
@@ -2584,20 +2646,23 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
                         let select_mr = mr.clone();
                         let title = format!("!{} · {}", mr.iid, mr.title);
                         let branches = format!("{} → {}", mr.source_branch, mr.target_branch);
-                        div()
-                            .id(("mr", i))
-                            .w(px(inner_w))
-                            .px_3()
-                            .py_2()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .when(i == *selected, |d| d.bg(theme::range()))
-                            .hover(|d| d.bg(theme::hover()))
+                        let selected = i == *selected;
+                        picker_option_row(("mr", i), inner_w, selected)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_mr(select_mr.clone(), cx);
                             }))
-                            .child(picker_line(theme::text(), true, title, cx))
-                            .child(picker_line(theme::muted(), false, branches, cx))
+                            .child(picker_line(
+                                theme::software_palette().text.primary,
+                                true,
+                                title,
+                                cx,
+                            ))
+                            .child(picker_line(
+                                theme::software_palette().text.on_control_secondary,
+                                false,
+                                branches,
+                                cx,
+                            ))
                     })),
                 sb,
             )
@@ -2645,7 +2710,7 @@ fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoE
             .id("branch-picker-scroll")
             .w(px(inner_w))
             .h(px(inner_h))
-            .bg(theme::white())
+            .bg(theme::software_palette().surface.island)
             .track_scroll(&scroll)
             .overflow_y_scroll()
             .flex()
@@ -2656,26 +2721,24 @@ fn render_branch_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoE
                     .px_2()
                     .py_1()
                     .ui_text_size(12., cx)
-                    .text_color(theme::muted())
+                    .text_color(theme::software_palette().text.secondary)
                     .child(format!("Filter: {}", picker.query)),
             )
             .children(picker.matches.iter().enumerate().map(|(i, branch)| {
                 let name = branch.name.clone();
-                div()
-                    .id(("branch", i))
-                    .w(px(inner_w))
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .when(i == picker.selected, |d| d.bg(theme::range()))
-                    .hover(|d| d.bg(theme::hover()))
+                let selected = i == picker.selected;
+                picker_option_row(("branch", i), inner_w, selected)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_branch(&name, cx);
                     }))
-                    .child(picker_line(theme::text(), true, branch.name.clone(), cx))
                     .child(picker_line(
-                        theme::muted(),
+                        theme::software_palette().text.primary,
+                        true,
+                        branch.name.clone(),
+                        cx,
+                    ))
+                    .child(picker_line(
+                        theme::software_palette().text.on_control_secondary,
                         false,
                         format!(
                             "{} · {} · {}",
@@ -2733,7 +2796,7 @@ fn picker_clip_shell(
             div()
                 .size_full()
                 .overflow_hidden()
-                .bg(theme::white())
+                .bg(theme::software_palette().surface.island)
                 .rounded(px(theme::CHANGES_RADIUS))
                 .child(div().w(px(width)).h(px(height)).p_1().child(body)),
         )
@@ -2859,7 +2922,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                 .h_full()
                 .flex()
                 .flex_col()
-                .bg(theme::white())
+                .bg(theme::software_palette().surface.island)
                 .rounded(px(theme::CHANGES_RADIUS))
                 .overflow_hidden()
                 // No titlebar — faint section label + Open Diff in the corner.
@@ -2881,7 +2944,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                     div()
                                         .ui_text_size(12., cx)
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(theme::faint())
+                                        .text_color(theme::software_palette().text.section)
                                         .child(if awaiting_paths {
                                             "Changes".to_string()
                                         } else {
@@ -3256,7 +3319,7 @@ fn loading_row(animation_id: &'static str, label: &'static str, cx: &App) -> imp
                 .path("refresh.svg")
                 .size(theme::ICON_SIZE_SM)
                 .flex_none()
-                .text_color(theme::muted())
+                .text_color(theme::software_palette().text.secondary)
                 .with_animation(
                     animation_id,
                     Animation::new(Duration::from_secs(2)).repeat(),
@@ -3268,7 +3331,7 @@ fn loading_row(animation_id: &'static str, label: &'static str, cx: &App) -> imp
         .child(
             div()
                 .ui_text_size(12., cx)
-                .text_color(theme::muted())
+                .text_color(theme::software_palette().text.secondary)
                 .child(label),
         )
 }

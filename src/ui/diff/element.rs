@@ -1937,7 +1937,7 @@ mod tests {
         use crate::syntax::CaptureId;
         let kw = rgb(0xaa00aa);
         let str_c = rgb(0x00aa00);
-        let def = theme::text();
+        let def = theme::software_palette().text.primary;
         let palette = [kw, str_c];
         let got = |line: &str, spans: &[(Range<usize>, CaptureId)]| {
             let tabs = TabExpansion::new(line);

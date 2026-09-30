@@ -922,16 +922,16 @@ impl Render for TextField {
                         .h(px(32.))
                         .line_height(px(32.))
                         .px_2()
-                        .bg(theme::white())
+                        .bg(theme::software_palette().field.surface)
                         .border_1()
-                        .border_color(theme::line())
+                        .border_color(theme::software_palette().field.border)
                         .rounded(px(6.))
                 };
                 match self.style {
                     TextFieldStyle::Default => framed(field).w_full(),
-                    TextFieldStyle::Settings => framed(field)
-                        .min_w(px(256.))
-                        .focus(|field| field.border_color(theme::border_focused())),
+                    TextFieldStyle::Settings => framed(field).min_w(px(256.)).focus(|field| {
+                        field.border_color(theme::software_palette().field.focused_border)
+                    }),
                     // NumberField outer is h(28)+p(2) → 24px content.
                     TextFieldStyle::Number => field.size_full().line_height(px(24.)).px_1(),
                     TextFieldStyle::Search => field
