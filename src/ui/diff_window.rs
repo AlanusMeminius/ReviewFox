@@ -1646,9 +1646,8 @@ fn render_tree_pane(
         .flex()
         .flex_col()
         .overflow_hidden()
-        // A clear column straight on the frosted desk, not an island - same role as
-        // the main window's workspace sidebar. Its chrome lives in `#diff-titlebar`.
-        .bg(theme::sidebar())
+        // Stable backing keeps ChangedPath labels readable over native material.
+        .bg(theme::software_palette().tree.desk.backing)
         .child({
             let (scroll, sb) = scrollbar::vertical("diff-tree-sb", cx);
             let pane_width = f32::from(width);

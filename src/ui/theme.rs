@@ -15,6 +15,7 @@ pub struct SoftwarePalette {
     pub field: FieldColors,
     pub scrollbar: ScrollbarColors,
     pub sidebar_row: SidebarRowColors,
+    pub tree: TreeColors,
 }
 
 #[derive(Clone, Copy)]
@@ -79,6 +80,31 @@ pub struct SidebarRowColors {
     pub selection_indicator: Rgba,
 }
 
+#[derive(Clone, Copy)]
+pub struct TreeColors {
+    pub island: TreeRowColors,
+    pub desk: TreeRowColors,
+    pub directory_text: Rgba,
+    pub added: Rgba,
+    pub deleted: Rgba,
+    pub modified: Rgba,
+}
+
+#[derive(Clone, Copy)]
+pub struct TreeRowColors {
+    pub backing: Rgba,
+    pub idle_indicator: Rgba,
+    pub hover: Rgba,
+    pub pressed: Rgba,
+    pub selected: Rgba,
+    pub selected_hover: Rgba,
+    pub selected_pressed: Rgba,
+    pub hover_indicator: Rgba,
+    pub pressed_indicator: Rgba,
+    pub selected_indicator: Rgba,
+    pub selected_text: Rgba,
+}
+
 /// Pure resolver for the built-in Software Theme palettes.
 pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
     match mode {
@@ -121,6 +147,38 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 selected_pressed: rgb(0xc3d9f4),
                 selection_indicator: rgb(0x2457d6),
             },
+            tree: TreeColors {
+                directory_text: rgb(0x4b5669),
+                island: TreeRowColors {
+                    backing: rgb(0xffffff),
+                    idle_indicator: gpui::rgba(0x00000000),
+                    hover: rgb(0xe9ebef),
+                    pressed: rgb(0xdde3ec),
+                    selected: rgb(0x2457d6),
+                    selected_hover: rgb(0x1e4ebf),
+                    selected_pressed: rgb(0x183f9e),
+                    hover_indicator: rgb(0x596579),
+                    pressed_indicator: rgb(0x2457d6),
+                    selected_indicator: rgb(0xffffff),
+                    selected_text: rgb(0xffffff),
+                },
+                desk: TreeRowColors {
+                    backing: gpui::rgba(0xf4f5f7e6),
+                    idle_indicator: gpui::rgba(0x00000000),
+                    hover: rgb(0xe9ebef),
+                    pressed: rgb(0xdde3ec),
+                    selected: rgb(0xdce8f8),
+                    selected_hover: rgb(0xd1e1f7),
+                    selected_pressed: rgb(0xc3d9f4),
+                    hover_indicator: rgb(0x596579),
+                    pressed_indicator: rgb(0x2457d6),
+                    selected_indicator: rgb(0x2457d6),
+                    selected_text: rgb(0x172033),
+                },
+                added: rgb(0x0e6137),
+                deleted: rgb(0xb42318),
+                modified: rgb(0x754a00),
+            },
         },
         SoftwareThemeMode::Dark => SoftwarePalette {
             surface: SurfaceColors {
@@ -160,6 +218,38 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 selected_hover: rgb(0x3b5574),
                 selected_pressed: rgb(0x435f81),
                 selection_indicator: rgb(0x89c7f7),
+            },
+            tree: TreeColors {
+                directory_text: rgb(0xc5cfde),
+                island: TreeRowColors {
+                    backing: rgb(0x30343d),
+                    idle_indicator: gpui::rgba(0x00000000),
+                    hover: rgb(0x414a59),
+                    pressed: rgb(0x4a5669),
+                    selected: rgb(0x2457a8),
+                    selected_hover: rgb(0x2b64bf),
+                    selected_pressed: rgb(0x1c4f9a),
+                    hover_indicator: rgb(0xc5cfde),
+                    pressed_indicator: rgb(0x89c7f7),
+                    selected_indicator: rgb(0xffffff),
+                    selected_text: rgb(0xffffff),
+                },
+                desk: TreeRowColors {
+                    backing: gpui::rgba(0x1d202780),
+                    idle_indicator: gpui::rgba(0x00000000),
+                    hover: rgb(0x343b47),
+                    pressed: rgb(0x414a59),
+                    selected: rgb(0x344a65),
+                    selected_hover: rgb(0x3b5574),
+                    selected_pressed: rgb(0x435f81),
+                    hover_indicator: rgb(0xc5cfde),
+                    pressed_indicator: rgb(0x89c7f7),
+                    selected_indicator: rgb(0x89c7f7),
+                    selected_text: rgb(0xd5dae3),
+                },
+                added: rgb(0xb2eabc),
+                deleted: rgb(0xffd2cb),
+                modified: rgb(0xffdb95),
             },
         },
     }
@@ -420,15 +510,15 @@ const CLEAR: Rgba = Rgba {
 };
 
 /// The window-wide frosted tint. Exactly one element per window paints it: the
-/// root. The workspace sidebar adds a bounded backing for text; other columns
-/// on the desk remain clear so their tint does not compound over this fill.
+/// root. The workspace sidebar and Diff ChangedPath tree add bounded backings
+/// for text; other desk columns remain clear so their tint does not compound.
 pub fn frost() -> Rgba {
     software_palette().surface.window_backing
 }
 
-/// Columns that sit directly on the frosted desk, such as the Diff file tree
-/// and stage between islands. The workspace sidebar uses the semantic
-/// `surface.sidebar_backing` role because its labels need a stable backdrop.
+/// Columns that sit directly on the frosted desk, such as the stage between
+/// islands. The workspace sidebar and Diff ChangedPath tree have semantic
+/// backings because their labels need a stable backdrop.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn sidebar() -> Rgba {
     // Columns on the frosted desk stay clear; in dark the desk is already
@@ -470,6 +560,7 @@ pub fn on_sidebar_selected() -> Rgba {
 }
 /// Workspace sidebar selected / pressed row fill. Translucent so macOS vibrancy
 /// (and Windows acrylic) shows through.
+#[allow(dead_code)] // Compatibility role until remaining callers are migrated in ticket 09.
 pub fn sidebar_row_selected() -> Rgba {
     Rgba {
         r: 0.,
@@ -479,6 +570,7 @@ pub fn sidebar_row_selected() -> Rgba {
     }
 }
 /// Workspace sidebar hover fill on a non-selected row.
+#[allow(dead_code)] // Compatibility role until remaining callers are migrated in ticket 09.
 pub fn sidebar_row_hover() -> Rgba {
     Rgba {
         r: 0.,
@@ -799,6 +891,86 @@ mod software_palette_tests {
                         "{mode:?} track boundary on {} band {band:?}",
                         code_theme.id
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn changed_path_tree_roles_are_readable_on_island_and_composed_desk() {
+        for mode in [SoftwareThemeMode::Light, SoftwareThemeMode::Dark] {
+            let palette = resolve_software_palette(mode);
+            for wallpaper in [rgb(0x000000), rgb(0xffffff)] {
+                let window = composite(palette.surface.window_backing, wallpaper);
+                let surfaces = [
+                    ("island", palette.tree.island, palette.tree.island.backing),
+                    (
+                        "desk",
+                        palette.tree.desk,
+                        composite(palette.tree.desk.backing, window),
+                    ),
+                ];
+                for (name, rows, idle) in surfaces {
+                    for (state, surface) in [
+                        ("idle", idle),
+                        ("hover", rows.hover),
+                        ("pressed", rows.pressed),
+                    ] {
+                        for (text_name, text) in [
+                            ("name", palette.text.primary),
+                            ("directory", palette.tree.directory_text),
+                            ("added", palette.tree.added),
+                            ("deleted", palette.tree.deleted),
+                            ("modified", palette.tree.modified),
+                        ] {
+                            assert!(
+                                contrast(text, surface) >= 4.5,
+                                "{mode:?} {name} {state} {text_name}: {}",
+                                contrast(text, surface)
+                            );
+                        }
+                    }
+                    for (state, fill, mark) in [
+                        ("hover", rows.hover, rows.hover_indicator),
+                        ("pressed", rows.pressed, rows.pressed_indicator),
+                        ("selected", rows.selected, rows.selected_indicator),
+                        (
+                            "selected hover",
+                            rows.selected_hover,
+                            rows.selected_indicator,
+                        ),
+                        (
+                            "selected pressed",
+                            rows.selected_pressed,
+                            rows.selected_indicator,
+                        ),
+                    ] {
+                        assert!(
+                            contrast(mark, fill) >= 3.,
+                            "{mode:?} {name} {state} indicator: {}",
+                            contrast(mark, fill)
+                        );
+                        if state.starts_with("selected") {
+                            assert!(
+                                contrast(rows.selected_text, fill) >= 4.5,
+                                "{mode:?} {name} {state} name: {}",
+                                contrast(rows.selected_text, fill)
+                            );
+                            if name == "desk" {
+                                for status in [
+                                    palette.tree.added,
+                                    palette.tree.deleted,
+                                    palette.tree.modified,
+                                ] {
+                                    assert!(
+                                        contrast(status, fill) >= 4.5,
+                                        "{mode:?} desk {state} status {status:?}: {}",
+                                        contrast(status, fill)
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

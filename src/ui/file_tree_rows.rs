@@ -3,7 +3,7 @@
 use gpui::{
     App, Div, ElementId, FontWeight, InteractiveElement, ObjectFit, ParentElement, Pixels, Rgba,
     SharedString, Stateful, StatefulInteractiveElement, Styled, StyledImage, TextRun, black, div,
-    font, img, prelude::FluentBuilder, px, rgb, svg,
+    font, img, prelude::FluentBuilder, px, svg,
 };
 
 use crate::domain::{ChangedPath, PathStatus};
@@ -16,7 +16,9 @@ use super::theme;
 const ROW_RADIUS: f32 = 4.;
 /// Base left padding before depth indent (`depth * 12`).
 const ROW_INDENT_BASE: f32 = 8.;
-const ROW_HOVER: u32 = 0xf6f8fb;
+const ROW_INDICATOR_IDLE_WIDTH: f32 = 2.;
+const ROW_INDICATOR_HOVER_WIDTH: f32 = 4.;
+const ROW_INDICATOR_PRESSED_WIDTH: f32 = 6.;
 /// Gap between [`RowSurface::Desk`] rows so neighbouring capsules never touch.
 const DESK_ROW_GAP: f32 = 2.;
 /// Scroll `px_1` (4×2) + row `mx_1` (4×2).
@@ -26,25 +28,31 @@ const ICON_SLOT: f32 = 16.;
 const STATUS_SLOT: f32 = 16.;
 const ROW_GAP: f32 = 4.;
 
+fn row_content_padding(depth: u32, indicator_width: f32) -> f32 {
+    ROW_INDENT_BASE + depth as f32 * 12. - indicator_width
+}
+
 /// What the tree sits on, which decides its hover / selected fills.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RowSurface {
-    /// Inside a white island (main Changes).
+    /// Inside the Changes island.
     Island,
-    /// Clear on the frosted desk (Diff tree): the workspace sidebar's translucent capsules.
+    /// On the Diff tree's bounded frosted-desk backing.
     Desk,
 }
 
 impl RowSurface {
-    fn hover(self) -> Rgba {
+    fn colors(self) -> theme::TreeRowColors {
+        let tree = theme::software_palette().tree;
         match self {
-            RowSurface::Island => rgb(ROW_HOVER),
-            RowSurface::Desk => theme::sidebar_row_hover(),
+            RowSurface::Island => tree.island,
+            RowSurface::Desk => tree.desk,
         }
     }
 }
 
 fn row_base(id: ElementId, depth: u32, surface: RowSurface, pane_width: f32) -> Stateful<Div> {
+    let colors = surface.colors();
     div()
         .id(id)
         .mx_1()
@@ -52,8 +60,10 @@ fn row_base(id: ElementId, depth: u32, surface: RowSurface, pane_width: f32) -> 
         .w(px((pane_width - ROW_H_INSET).max(0.)))
         .min_w(px(0.))
         .h(px(22.))
-        .pl(px(ROW_INDENT_BASE + depth as f32 * 12.))
+        .pl(px(row_content_padding(depth, ROW_INDICATOR_IDLE_WIDTH)))
         .pr_1()
+        .border_l(px(ROW_INDICATOR_IDLE_WIDTH))
+        .border_color(colors.idle_indicator)
         .rounded(px(ROW_RADIUS))
         .overflow_hidden()
         .flex()
@@ -136,6 +146,7 @@ pub fn dir_row(
     pane_width: f32,
     cx: &App,
 ) -> Stateful<Div> {
+    let colors = surface.colors();
     let name = name.into();
     let label = ellipsize(
         name.as_ref(),
@@ -145,10 +156,8 @@ pub fn dir_row(
     );
     row_base(id.into(), depth, surface, pane_width)
         .cursor_pointer()
-        .hover(move |d| d.bg(surface.hover()))
-        .when(surface == RowSurface::Desk, |d| {
-            d.active(|d| d.bg(theme::sidebar_row_selected()))
-        })
+        .hover(move |d| d.bg(colors.hover).border_color(colors.hover_indicator))
+        .active(move |d| d.bg(colors.pressed).border_color(colors.pressed_indicator))
         .child(
             div()
                 .size(px(16.))
@@ -164,12 +173,12 @@ pub fn dir_row(
                         } else {
                             "folder_open.svg"
                         })
-                        .text_color(theme::muted()),
+                        .text_color(theme::software_palette().tree.directory_text),
                 ),
         )
         .child(name_cell(
             label,
-            theme::muted(),
+            theme::software_palette().tree.directory_text,
             Some(FontWeight::MEDIUM),
             cx,
         ))
@@ -185,6 +194,8 @@ pub fn file_row(
     pane_width: f32,
     cx: &App,
 ) -> Stateful<Div> {
+    let palette = theme::software_palette();
+    let colors = surface.colors();
     let name = path.file_name().to_string();
     let status = path.status;
     let add = path.additions;
@@ -196,46 +207,51 @@ pub fn file_row(
         FontWeight::NORMAL,
         cx,
     );
-    // Solid accent selected fill kills status chroma — match sidebar icons: white on blue.
-    // The desk's translucent capsule keeps every colour as-is.
+    // Island selection uses text on blue; desk selection keeps status meanings.
     let on_accent = selected && surface == RowSurface::Island;
-    let on_selected = theme::on_sidebar_selected();
+    let on_selected = colors.selected_text;
     let name_color = if on_accent {
         on_selected
     } else {
-        theme::text()
+        palette.text.primary
     };
     let status_color = if on_accent {
         on_selected
     } else {
         match status {
-            PathStatus::Add => rgb(0x1a7f4b),
-            PathStatus::Delete => rgb(0xb42318),
-            PathStatus::Modify => rgb(0x9a6700),
+            PathStatus::Add => palette.tree.added,
+            PathStatus::Delete => palette.tree.deleted,
+            PathStatus::Modify => palette.tree.modified,
         }
     };
     let add_color = if on_accent {
         on_selected
     } else {
-        rgb(0x1a7f4b)
+        palette.tree.added
     };
     let del_color = if on_accent {
         on_selected
     } else {
-        rgb(0xb42318)
+        palette.tree.deleted
     };
-    let selected_fill = match surface {
-        RowSurface::Island => theme::sidebar_selected(),
-        RowSurface::Desk => theme::sidebar_row_selected(),
-    };
-
     row_base(id.into(), depth, surface, pane_width)
-        .when(selected, |d| d.bg(selected_fill))
-        .when(!selected, |d| {
-            d.hover(move |d| d.bg(surface.hover()))
-                .when(surface == RowSurface::Desk, |d| {
-                    d.active(|d| d.bg(theme::sidebar_row_selected()))
+        .when(selected, |d| {
+            d.bg(colors.selected)
+                .border_color(colors.selected_indicator)
+                .hover(|d| {
+                    d.bg(colors.selected_hover)
+                        .border_l(px(ROW_INDICATOR_HOVER_WIDTH))
+                        .pl(px(row_content_padding(depth, ROW_INDICATOR_HOVER_WIDTH)))
                 })
+                .active(|d| {
+                    d.bg(colors.selected_pressed)
+                        .border_l(px(ROW_INDICATOR_PRESSED_WIDTH))
+                        .pl(px(row_content_padding(depth, ROW_INDICATOR_PRESSED_WIDTH)))
+                })
+        })
+        .when(!selected, |d| {
+            d.hover(move |d| d.bg(colors.hover).border_color(colors.hover_indicator))
+                .active(move |d| d.bg(colors.pressed).border_color(colors.pressed_indicator))
         })
         .child(
             div()
@@ -282,6 +298,23 @@ pub fn file_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_row_cue_grows_without_moving_indented_content() {
+        let widths = [
+            ROW_INDICATOR_IDLE_WIDTH,
+            ROW_INDICATOR_HOVER_WIDTH,
+            ROW_INDICATOR_PRESSED_WIDTH,
+        ];
+        assert_eq!(widths, [2., 4., 6.]);
+        for depth in [0, 1, 3] {
+            let content_x = ROW_INDENT_BASE + depth as f32 * 12.;
+            for width in widths {
+                assert!(row_content_padding(depth, width) >= 0.);
+                assert_eq!(width + row_content_padding(depth, width), content_x);
+            }
+        }
+    }
 
     #[test]
     fn name_max_width_shrinks_with_depth_and_trailing() {
