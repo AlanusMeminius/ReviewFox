@@ -1210,12 +1210,30 @@ impl DualPane {
         let left = self.code_left[ix];
         let right = left + self.pane_w[ix];
         let (_, _, inset) = element::comment_bar_layout(side, left, right);
-        let mut origin = left + element::TEXT_PAD - self.x_offsets[ix];
-        if layout.side(side).has_comment(line.ln) {
-            origin += inset;
+        let comment = if layout.side(side).has_comment(line.ln) {
+            inset
+        } else {
+            0.
+        };
+        // Same origin paint uses, including the snapped horizontal scroll.
+        let origin = element::code_text_x(
+            left,
+            viewport::snap(self.x_offsets[ix], self.scale),
+            self.shapes.text_leading(side, line.row),
+            comment,
+        );
+        if let Some(column) = self.shapes.column_near(layout, side, line, x - origin) {
+            return column;
         }
         let advance = self.mono_advance.map(|(_, advance)| advance).unwrap_or(0.);
-        element::display_column(layout, side, line, origin, x, advance)
+        element::display_column(
+            layout,
+            side,
+            line,
+            origin - self.shapes.text_leading(side, line.row),
+            x,
+            advance,
+        )
     }
 
     /// Where the pointer sits relative to the pressed side's code column.

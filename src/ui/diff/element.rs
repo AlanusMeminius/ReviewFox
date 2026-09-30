@@ -119,6 +119,29 @@ impl ShapeCache {
         self.rows.clear();
     }
 
+    /// Continuation indent stored with the shaped row, so hit testing uses the
+    /// same text origin paint does. `0` when this row has not been shaped.
+    pub(super) fn text_leading(&self, side: Side, row: u32) -> f32 {
+        self.rows
+            .get(&(side, row))
+            .map(|shape| shape.text_leading)
+            .unwrap_or(0.)
+    }
+
+    /// Display column under a pointer whose x is already relative to the row's
+    /// text origin (the point glyphs are painted from). Uses the shaped glyph
+    /// edges, not a uniform advance.
+    pub(super) fn column_near(
+        &self,
+        layout: &Layout,
+        side: Side,
+        line: &LineRow,
+        local_x: f32,
+    ) -> Option<usize> {
+        let text = self.rows.get(&(side, line.row))?.text.as_ref()?;
+        Some(column_from_shaped(layout, side, line, text, local_x))
+    }
+
     fn retain(&mut self, keep: &[Range<usize>; 2]) {
         self.rows
             .retain(|&(side, row), _| keep[side_ix(side)].contains(&(row as usize)));
@@ -796,9 +819,20 @@ fn byte_spans(
     run_spans(&clipped, shaped)
 }
 
+/// x where this row's glyphs start. Paint and hit testing both use this.
+pub(super) fn code_text_x(
+    pane_left: f32,
+    x_offset: f32,
+    text_leading: f32,
+    comment_inset: f32,
+) -> f32 {
+    pane_left + TEXT_PAD - x_offset + text_leading + comment_inset
+}
+
 /// Display column under `pointer_x`. `origin_x` is the visual row's text origin
 /// (pane edge + pad − scroll + comment inset), before continuation indent.
 /// A tab's expanded spaces share one original character; that map lives in the model.
+/// Fallback when the row has not been shaped; visible rows use [`ShapeCache::column_near`].
 pub(super) fn display_column(
     layout: &Layout,
     side: Side,
@@ -829,9 +863,45 @@ pub(super) fn display_column(
     column_on_segment(base, extra, seg_cols, seg.end == tabs.text.len())
 }
 
-/// Pointer column inside one visual segment of a logical line.
-/// Blank past a non-final segment stays on that segment's last column.
-/// Blank past the final segment stays past the line, which the model reads as EOL.
+/// Map a byte index into one visual segment onto a full-line display column.
+/// `index >= segment.len()` is past that segment: the last segment reads as
+/// end-of-line, an earlier one stays on its last column.
+fn column_from_segment_index(base: usize, index: usize, segment: &str, last: bool) -> usize {
+    let cols = segment.chars().count();
+    if index >= segment.len() {
+        return column_on_segment(base, cols, cols, last);
+    }
+    let within = segment
+        .get(..index)
+        .map(|prefix| prefix.chars().count())
+        .unwrap_or(0);
+    base + within
+}
+
+fn column_from_shaped(
+    layout: &Layout,
+    side: Side,
+    line: &LineRow,
+    shaped: &ShapedLine,
+    local_x: f32,
+) -> usize {
+    let tabs = TabExpansion::new(layout.side(side).text(line));
+    let (seg, _) = wrap_segment(layout, side, line, &tabs, layout.side(side));
+    let base = tabs
+        .text
+        .get(..seg.start)
+        .map(|prefix| prefix.chars().count())
+        .unwrap_or(0);
+    let segment = tabs.text.get(seg.clone()).unwrap_or("");
+    let last = seg.end == tabs.text.len();
+    let index = if local_x < 0. {
+        0
+    } else {
+        shaped.index_for_x(px(local_x)).unwrap_or(shaped.len())
+    };
+    column_from_segment_index(base, index, segment, last)
+}
+
 fn column_on_segment(base: usize, extra: usize, seg_cols: usize, last: bool) -> usize {
     if seg_cols == 0 || extra < seg_cols {
         base + extra
@@ -1205,10 +1275,12 @@ impl Frame {
                     ));
                 }
                 let (bar_x0, bar_x1, bar_text_inset) = comment_bar_layout(side, x0, x1);
-                let mut text_x = x0 + TEXT_PAD - frame.x_offset + row.text_leading;
-                if row.commented {
-                    text_x += bar_text_inset;
-                }
+                let text_x = code_text_x(
+                    x0,
+                    frame.x_offset,
+                    row.text_leading,
+                    if row.commented { bar_text_inset } else { 0. },
+                );
                 // Back to front: line-span wash, intra-line marks, find hits,
                 // OccurrenceHighlight, TextSelection. They stack.
                 for &(a, b) in &row.marks {
@@ -2029,5 +2101,17 @@ mod tests {
         // Last row: past the glyphs is past the logical line.
         assert_eq!(column_on_segment(4, 2, 4, true), 6);
         assert_eq!(column_on_segment(4, 9, 4, true), 13);
+    }
+
+    #[test]
+    fn segment_index_follows_the_glyph_not_a_uniform_advance() {
+        // Shaped edges are 10px apart. A uniform advance of 8 would put x=25
+        // on column 3; the glyph that contains 25 is column 2.
+        assert_eq!(column_from_segment_index(0, 2, "abcdef", false), 2);
+        assert_eq!(column_from_segment_index(4, 1, "efgh", true), 5);
+        // Past a non-final segment stays on its last column.
+        assert_eq!(column_from_segment_index(0, 4, "abcd", false), 3);
+        // Past the final segment is end-of-line.
+        assert_eq!(column_from_segment_index(0, 4, "abcd", true), 4);
     }
 }
