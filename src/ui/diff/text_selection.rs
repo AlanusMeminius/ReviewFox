@@ -54,7 +54,10 @@ pub enum RowClass {
     Text {
         ln: u32,
     },
-    Omission,
+    /// Layout's [`super::layout::OmitRow`] id. The pane expands that separator.
+    Omission {
+        id: usize,
+    },
     Padding {
         ln: u32,
     },
@@ -130,6 +133,12 @@ pub struct Model {
     gutter: Option<(Side, u32, u32)>,
     press: Option<Press>,
     scroll: ScrollStep,
+    /// Omission separator this gesture expands. The pane calls the existing
+    /// expand path with this id.
+    expand: Option<usize>,
+    /// The press after an omission click is count 1, so the line that just
+    /// appeared is not word-selected when the platform reports a double-click.
+    single: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,15 +195,37 @@ impl Model {
         self.scroll
     }
 
+    /// Separator id from a press on an omission row, still set when release
+    /// stays on that same separator. The pane expands it; this model does not.
+    pub fn expand_separator(&self) -> Option<usize> {
+        self.expand
+    }
+
     /// Drop an in-progress gesture without changing the span.
     pub fn cancel_press(&mut self) {
         self.press = None;
+        self.expand = None;
+        self.single = false;
     }
 
     pub fn pointer<'a>(&mut self, sample: Sample, line: impl Fn(Side, u32) -> &'a str) {
         self.scroll = ScrollStep::default();
         match sample.phase {
             Phase::Press => {
+                let mut clicks = sample.clicks;
+                if self.single {
+                    clicks = 1;
+                    self.single = false;
+                }
+                let omit = match sample.class {
+                    RowClass::Omission { id } => Some(id),
+                    _ => None,
+                };
+                if omit.is_some() {
+                    self.selection = None;
+                    self.single = true;
+                }
+                self.expand = omit;
                 let cell = cell_at(sample.class, sample.column, sample.side, &line);
                 self.press = Some(Press {
                     side: sample.side,
@@ -202,16 +233,26 @@ impl Model {
                     head: None,
                     prior: self.selection,
                     text_row: matches!(cell, Cell::At { .. } | Cell::After { .. }),
-                    clicks: sample.clicks,
+                    clicks,
                 });
             }
             Phase::Move | Phase::Release => {
                 let side = self.press.as_ref().map(|p| p.side).unwrap_or(sample.side);
                 let mut cell = cell_at(sample.class, sample.column, side, &line);
+                let text_row = self.press.as_ref().is_some_and(|p| p.text_row);
                 if sample.phase == Phase::Move
+                    && text_row
                     && let Some(next) = self.outside_cell(sample.place, sample.class, side, &line)
                 {
                     cell = next;
+                }
+                if sample.phase == Phase::Release
+                    && let Some(id) = self.expand
+                {
+                    self.expand = match sample.class {
+                        RowClass::Omission { id: hit } if hit == id => Some(id),
+                        _ => None,
+                    };
                 }
                 self.track(cell, &line, sample.phase == Phase::Release);
             }
@@ -417,7 +458,7 @@ fn cell_at<'a>(
             None => Cell::After { ln },
         },
         RowClass::Padding { ln } => Cell::Pad { ln },
-        RowClass::Omission => Cell::Omit,
+        RowClass::Omission { .. } => Cell::Omit,
         RowClass::Hatch => Cell::Hatch,
         RowClass::Outside => Cell::Outside,
     }
@@ -2416,5 +2457,233 @@ mod tests {
                 end_byte: 5,
             })
         );
+    }
+
+    #[test]
+    fn press_on_an_omission_separator_expands_it_and_clears_the_selection() {
+        let pre = ["keep me", "hidden"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                sample(Phase::Move, Side::Preimage, RowClass::Text { ln: 1 }, 4),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 4),
+            ],
+        );
+        assert!(model.selection().is_some());
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(
+                    Phase::Press,
+                    Side::Preimage,
+                    RowClass::Omission { id: 3 },
+                    0,
+                ),
+                sample(
+                    Phase::Release,
+                    Side::Preimage,
+                    RowClass::Omission { id: 3 },
+                    0,
+                ),
+            ],
+        );
+        assert_eq!(model.selection(), None, "the separator is not a text span");
+        assert_eq!(model.expand_separator(), Some(3));
+        assert_eq!(model.clipboard(line(&pre, &[])), None);
+    }
+
+    #[test]
+    fn the_press_after_an_omission_is_a_single_click_even_when_reported_as_a_double_click() {
+        let pre = ["foo_bar"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(
+                    Phase::Press,
+                    Side::Preimage,
+                    RowClass::Omission { id: 1 },
+                    0,
+                ),
+                sample(
+                    Phase::Release,
+                    Side::Preimage,
+                    RowClass::Omission { id: 1 },
+                    0,
+                ),
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0, 2),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+            ],
+        );
+        assert_eq!(
+            model.selection(),
+            None,
+            "the line that just appeared is not word-selected"
+        );
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0, 2),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+            ],
+        );
+        assert_eq!(
+            model
+                .selection()
+                .map(|span| (span.start_byte, span.end_byte)),
+            Some((0, "foo_bar".len())),
+            "a later double-click still selects the word"
+        );
+    }
+
+    #[test]
+    fn only_a_press_on_a_text_row_can_drag_or_double_click() {
+        let pre = ["foo_bar", "tail"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(
+                    Phase::Press,
+                    Side::Preimage,
+                    RowClass::Omission { id: 2 },
+                    0,
+                    2,
+                ),
+                sample(Phase::Move, Side::Preimage, RowClass::Text { ln: 1 }, 1),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 1),
+            ],
+        );
+        assert_eq!(model.selection(), None);
+        assert_eq!(model.expand_separator(), None);
+
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                sample(Phase::Move, Side::Preimage, RowClass::Omission { id: 2 }, 0),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 2 }, 1),
+            ],
+        );
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 0,
+                end_line: 2,
+                end_byte: 2,
+            })
+        );
+        assert_eq!(model.expand_separator(), None);
+
+        let mut below = sample(Phase::Move, Side::Preimage, RowClass::Outside, 0);
+        below.place.vertical = Some(VerticalEdge {
+            dir: 1,
+            entering: Some(RowClass::Text { ln: 2 }),
+            column: 0,
+            room: true,
+        });
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(
+                    Phase::Press,
+                    Side::Preimage,
+                    RowClass::Omission { id: 2 },
+                    0,
+                ),
+                below,
+            ],
+        );
+        assert_eq!(model.scroll_step(), ScrollStep::default());
+        assert_eq!(model.selection(), None);
+    }
+
+    #[test]
+    fn a_drag_across_a_fold_includes_the_hidden_original_text() {
+        let pre = ["above", "hidden", "below"];
+        let post = ["hidden"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 2),
+                sample(Phase::Move, Side::Preimage, RowClass::Omission { id: 4 }, 0),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 3 }, 5),
+            ],
+        );
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 2,
+                end_line: 3,
+                end_byte: 5,
+            })
+        );
+        assert_eq!(
+            model.clipboard(line(&pre, &post)).as_deref(),
+            Some("ove\nhidden\nbelow")
+        );
+        let sel = model.selection().expect("span");
+        assert_eq!(sel.bytes_on(2, "hidden".len()), Some((0, "hidden".len())));
+        assert!(
+            highlights(&model, &pre, &post, |side, ln| {
+                side == Side::Preimage && ln == 2
+            })
+            .is_empty(),
+            "a span that covers a folded line is not an occurrence scan of that line"
+        );
+    }
+
+    #[test]
+    fn fold_and_expand_keep_the_span_and_its_bytes() {
+        let pre = ["above", "hidden", "below"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 2 }, 0, 3),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 2 }, 0),
+            ],
+        );
+        let sel = model.selection().expect("span");
+        assert_eq!(
+            (
+                sel.side,
+                sel.start_line,
+                sel.start_byte,
+                sel.end_line,
+                sel.end_byte,
+            ),
+            (Side::Preimage, 2, 0, 2, "hidden".len())
+        );
+        // Fold and expand do not sample the model, so the bytes stay. The
+        // pane paints them only on a text row; an omission row has none.
+        assert_eq!(model.selection(), Some(sel));
+        assert_eq!(sel.bytes_on(2, "hidden".len()), Some((0, "hidden".len())));
     }
 }

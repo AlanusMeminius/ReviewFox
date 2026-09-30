@@ -427,11 +427,20 @@ impl DualPane {
         self.text.gutter()
     }
 
-    /// Original text of the TextSelection, when there is one.
+    /// Original text of the TextSelection, including lines a fold is hiding.
     pub fn copied_text(&self) -> Option<String> {
-        let layout = self.layout.as_ref()?;
-        self.text
-            .clipboard(|side, ln| layout.side(side).line_text(ln).unwrap_or(""))
+        let file = self.file.as_ref()?;
+        let pre = split_lines(&file.preimage_text);
+        let post = split_lines(&file.postimage_text);
+        self.text.clipboard(|side, ln| {
+            let src = match side {
+                Side::Preimage => &pre,
+                Side::Postimage => &post,
+            };
+            src.get((ln as usize).wrapping_sub(1))
+                .copied()
+                .unwrap_or("")
+        })
     }
 
     /// Drop the wash without opening or closing the dock.
@@ -1250,7 +1259,7 @@ impl DualPane {
             .side(side)
             .row(self.entering_index(side, dir)?)?;
         Some(match row {
-            Row::Omit(_) => RowClass::Omission,
+            Row::Omit(o) => RowClass::Omission { id: o.id },
             Row::Line(line) if line.is_equal_padding() => RowClass::Padding { ln: line.ln },
             Row::Line(line) => RowClass::Text { ln: line.ln },
         })
@@ -1384,7 +1393,7 @@ impl DualPane {
             return (RowClass::Outside, 0);
         }
         match vp.hit(side, y) {
-            Some(Row::Omit(_)) => (RowClass::Omission, 0),
+            Some(Row::Omit(o)) => (RowClass::Omission { id: o.id }, 0),
             Some(Row::Line(line)) if line.is_equal_padding() => {
                 (RowClass::Padding { ln: line.ln }, 0)
             }
@@ -1458,6 +1467,7 @@ impl DualPane {
             let sample = self.text_sample(pressed, x, y, Phase::Release, 1);
             dirty = note_text(&mut self.text, self.layout.as_ref(), sample);
         }
+        let expand = self.text.expand_separator();
         let (Some(pressed), Some(side)) = (self.press.take(), side) else {
             if dirty {
                 cx.notify();
@@ -1470,11 +1480,7 @@ impl DualPane {
             }
             return;
         }
-        let omit = self.viewport().and_then(|vp| match vp.hit(side, y)? {
-            Row::Omit(o) if o.row == pressed.1 => Some(o.id),
-            _ => None,
-        });
-        if let Some(id) = omit {
+        if let Some(id) = expand {
             self.expand_omit(id, cx);
         } else if dirty {
             cx.notify();
