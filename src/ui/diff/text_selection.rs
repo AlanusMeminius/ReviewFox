@@ -502,7 +502,9 @@ fn anchor_of(cell: Cell) -> Option<Anchor> {
 fn text_anchor(cell: Cell) -> Option<Anchor> {
     match cell {
         Cell::At { ln, byte } => Some(Anchor::At { ln, byte }),
-        Cell::After { ln } | Cell::Pad { ln } => Some(Anchor::After { ln }),
+        Cell::After { ln } => Some(Anchor::After { ln }),
+        // A wrap padding row has no characters. Leaving the head where it was
+        // keeps the span from swallowing the rest of the logical line.
         _ => None,
     }
 }
@@ -1007,6 +1009,36 @@ mod tests {
             model.clipboard(line(&pre, &[])).as_deref(),
             Some("cdef\ngh")
         );
+    }
+
+    #[test]
+    fn drag_onto_a_padding_row_does_not_take_the_rest_of_the_line() {
+        let pre = ["abcdef"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                sample(Phase::Move, Side::Preimage, RowClass::Text { ln: 1 }, 2),
+                sample(Phase::Move, Side::Preimage, RowClass::Padding { ln: 1 }, 0),
+            ],
+        );
+        assert_eq!(model.clipboard(line(&pre, &[])).as_deref(), Some("abc"));
+
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[sample(
+                Phase::Release,
+                Side::Preimage,
+                RowClass::Padding { ln: 1 },
+                0,
+            )],
+        );
+        assert_eq!(model.clipboard(line(&pre, &[])).as_deref(), Some("abc"));
     }
 
     #[test]

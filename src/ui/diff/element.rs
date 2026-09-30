@@ -815,13 +815,31 @@ pub(super) fn display_column(
         .get(..seg.start)
         .map(|prefix| prefix.chars().count())
         .unwrap_or(0);
+    let seg_cols = tabs
+        .text
+        .get(seg.clone())
+        .map(|segment| segment.chars().count())
+        .unwrap_or(0);
     let local = pointer_x - (origin_x + leading);
     let extra = if advance <= 0. || local <= 0. {
         0
     } else {
         (local / advance).floor() as usize
     };
-    base + extra
+    column_on_segment(base, extra, seg_cols, seg.end == tabs.text.len())
+}
+
+/// Pointer column inside one visual segment of a logical line.
+/// Blank past a non-final segment stays on that segment's last column.
+/// Blank past the final segment stays past the line, which the model reads as EOL.
+fn column_on_segment(base: usize, extra: usize, seg_cols: usize, last: bool) -> usize {
+    if seg_cols == 0 || extra < seg_cols {
+        base + extra
+    } else if last {
+        base + extra
+    } else {
+        base + seg_cols - 1
+    }
 }
 
 fn shape_row(
@@ -2000,5 +2018,16 @@ mod tests {
         let line = "\"中文\"";
         assert_eq!(line.len(), 8);
         assert_eq!(got(line, &[(0..8, CaptureId(1))]), [(8, str_rgb)]);
+    }
+
+    #[test]
+    fn blank_beside_a_wrapped_segment_stays_on_that_segment() {
+        // "abcd|efgh": columns 0..4 are the first visual row.
+        assert_eq!(column_on_segment(0, 1, 4, false), 1);
+        assert_eq!(column_on_segment(0, 3, 4, false), 3);
+        assert_eq!(column_on_segment(0, 9, 4, false), 3);
+        // Last row: past the glyphs is past the logical line.
+        assert_eq!(column_on_segment(4, 2, 4, true), 6);
+        assert_eq!(column_on_segment(4, 9, 4, true), 13);
     }
 }
