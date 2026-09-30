@@ -292,11 +292,19 @@ pub fn selection_wash() -> Rgba {
         ..accent()
     }
 }
-/// Character TextSelection, painted above the line wash, word marks, and find
-/// hits. The color does not change when focus leaves the Diff.
+/// Character TextSelection, painted above the line wash, word marks, find
+/// hits, and OccurrenceHighlight. The color does not change when focus leaves
+/// the Diff.
 pub fn text_selection() -> Rgba {
     Rgba {
         a: 0.45,
+        ..accent()
+    }
+}
+/// Other Identifier occurrences. Lighter than [`text_selection`].
+pub fn occurrence_highlight() -> Rgba {
+    Rgba {
+        a: 0.22,
         ..accent()
     }
 }

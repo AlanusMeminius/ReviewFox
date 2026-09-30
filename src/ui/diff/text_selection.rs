@@ -38,6 +38,16 @@ impl TextSelection {
     }
 }
 
+/// Another whole-Identifier match of a settled TextSelection. The selected
+/// bytes themselves are not in this set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OccurrenceHighlight {
+    pub side: Side,
+    pub line: u32,
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
 /// What the pointer is on, already classified from Layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowClass {
@@ -173,6 +183,42 @@ impl Model {
         }
         let joined = parts.join("\n");
         (!joined.is_empty()).then_some(joined)
+    }
+
+    /// Lighter matches of a settled one-Identifier span. Empty while a gesture
+    /// is in progress. `pre` and `post` are 1-based logical lines. `folded`
+    /// lines are outside the scan.
+    /// ponytail: linear scan each call; index if a profile says so.
+    pub fn occurrences(
+        &self,
+        pre: &[&str],
+        post: &[&str],
+        folded: impl Fn(Side, u32) -> bool,
+    ) -> Vec<OccurrenceHighlight> {
+        if self.press.is_some() {
+            return Vec::new();
+        }
+        let Some(sel) = self.selection else {
+            return Vec::new();
+        };
+        let selected = side_lines(sel.side, pre, post)
+            .get(sel.start_line.wrapping_sub(1) as usize)
+            .copied()
+            .unwrap_or("");
+        let Some(needle) = exact_identifier(sel, selected) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for side in [Side::Preimage, Side::Postimage] {
+            for (i, text) in side_lines(side, pre, post).iter().copied().enumerate() {
+                let ln = (i as u32) + 1;
+                if folded(side, ln) {
+                    continue;
+                }
+                collect_matches(&mut out, side, ln, text, needle, sel);
+            }
+        }
+        out
     }
 
     fn track<'a>(&mut self, cell: Cell, line: &impl Fn(Side, u32) -> &'a str, release: bool) {
@@ -350,6 +396,81 @@ fn double_click<'a>(
     })
 }
 
+fn side_lines<'a>(side: Side, pre: &'a [&'a str], post: &'a [&'a str]) -> &'a [&'a str] {
+    match side {
+        Side::Preimage => pre,
+        Side::Postimage => post,
+    }
+}
+
+fn exact_identifier(sel: TextSelection, text: &str) -> Option<&str> {
+    if sel.start_line != sel.end_line {
+        return None;
+    }
+    let slice = text.get(sel.start_byte..sel.end_byte)?;
+    if slice.is_empty() || !slice.chars().all(is_ident_char) {
+        return None;
+    }
+    let before_ok = text[..sel.start_byte]
+        .chars()
+        .next_back()
+        .is_none_or(|c| !is_ident_char(c));
+    let after_ok = text[sel.end_byte..]
+        .chars()
+        .next()
+        .is_none_or(|c| !is_ident_char(c));
+    (before_ok && after_ok).then_some(slice)
+}
+
+fn collect_matches(
+    out: &mut Vec<OccurrenceHighlight>,
+    side: Side,
+    ln: u32,
+    text: &str,
+    needle: &str,
+    sel: TextSelection,
+) {
+    let mut byte = 0usize;
+    let mut start = None;
+    for c in text.chars() {
+        if is_ident_char(c) {
+            if start.is_none() {
+                start = Some(byte);
+            }
+        } else if let Some(s) = start.take() {
+            push_ident(out, side, ln, text, s, byte, needle, sel);
+        }
+        byte += c.len_utf8();
+    }
+    if let Some(s) = start {
+        push_ident(out, side, ln, text, s, byte, needle, sel);
+    }
+}
+
+fn push_ident(
+    out: &mut Vec<OccurrenceHighlight>,
+    side: Side,
+    ln: u32,
+    text: &str,
+    start: usize,
+    end: usize,
+    needle: &str,
+    sel: TextSelection,
+) {
+    if text.get(start..end) != Some(needle) {
+        return;
+    }
+    if side == sel.side && ln == sel.start_line && start == sel.start_byte && end == sel.end_byte {
+        return;
+    }
+    out.push(OccurrenceHighlight {
+        side,
+        line: ln,
+        start_byte: start,
+        end_byte: end,
+    });
+}
+
 fn is_ident_char(c: char) -> bool {
     (c == '_' || c.is_alphanumeric()) && !excluded_script(c)
 }
@@ -465,6 +586,19 @@ mod tests {
             clicks,
             ..sample(phase, side, class, column)
         }
+    }
+
+    fn no_fold(_: Side, _: u32) -> bool {
+        false
+    }
+
+    fn highlights(
+        model: &Model,
+        pre: &[&str],
+        post: &[&str],
+        folded: impl Fn(Side, u32) -> bool,
+    ) -> Vec<OccurrenceHighlight> {
+        model.occurrences(pre, post, folded)
     }
 
     #[test]
@@ -1239,5 +1373,478 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn drag_does_not_light_occurrences_until_release_and_then_both_sides() {
+        let pre = ["foo foo"];
+        let post = ["x foo y"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                sample(Phase::Move, Side::Preimage, RowClass::Text { ln: 1 }, 2),
+            ],
+        );
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 0,
+                end_line: 1,
+                end_byte: 3,
+            })
+        );
+        assert!(highlights(&model, &pre, &post, no_fold).is_empty());
+
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[sample(
+                Phase::Release,
+                Side::Preimage,
+                RowClass::Text { ln: 1 },
+                2,
+            )],
+        );
+        assert_eq!(
+            highlights(&model, &pre, &post, no_fold),
+            vec![
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 4,
+                    end_byte: 7,
+                },
+                OccurrenceHighlight {
+                    side: Side::Postimage,
+                    line: 1,
+                    start_byte: 2,
+                    end_byte: 5,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn double_click_lights_the_same_identifier_and_a_new_press_clears_it() {
+        let pre = ["foo foo"];
+        let post = ["foo"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[multi(
+                Phase::Press,
+                Side::Preimage,
+                RowClass::Text { ln: 1 },
+                0,
+                2,
+            )],
+        );
+        assert!(highlights(&model, &pre, &post, no_fold).is_empty());
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[sample(
+                Phase::Release,
+                Side::Preimage,
+                RowClass::Text { ln: 1 },
+                0,
+            )],
+        );
+        assert_eq!(
+            model.selection().map(|s| (s.start_byte, s.end_byte)),
+            Some((0, 3))
+        );
+        assert_eq!(
+            highlights(&model, &pre, &post, no_fold),
+            vec![
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 4,
+                    end_byte: 7,
+                },
+                OccurrenceHighlight {
+                    side: Side::Postimage,
+                    line: 1,
+                    start_byte: 0,
+                    end_byte: 3,
+                },
+            ]
+        );
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[sample(
+                Phase::Press,
+                Side::Preimage,
+                RowClass::Text { ln: 1 },
+                4,
+            )],
+        );
+        assert!(highlights(&model, &pre, &post, no_fold).is_empty());
+    }
+
+    #[test]
+    fn occurrence_match_is_case_sensitive_and_a_whole_identifier() {
+        let pre = ["Foo foo userId user_id foo foo_bar"];
+        let post = ["Foo", "userId", "foo"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0, 2),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+            ],
+        );
+        assert_eq!(
+            highlights(&model, &pre, &post, no_fold),
+            vec![OccurrenceHighlight {
+                side: Side::Postimage,
+                line: 1,
+                start_byte: 0,
+                end_byte: 3,
+            }]
+        );
+
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 8, 2),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 8),
+            ],
+        );
+        assert_eq!(
+            highlights(&model, &pre, &post, no_fold),
+            vec![OccurrenceHighlight {
+                side: Side::Postimage,
+                line: 2,
+                start_byte: 0,
+                end_byte: 6,
+            }]
+        );
+
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[
+                multi(
+                    Phase::Press,
+                    Side::Preimage,
+                    RowClass::Text { ln: 1 },
+                    23,
+                    2,
+                ),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 23),
+            ],
+        );
+        assert_eq!(
+            highlights(&model, &pre, &post, no_fold),
+            vec![
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 4,
+                    end_byte: 7,
+                },
+                OccurrenceHighlight {
+                    side: Side::Postimage,
+                    line: 3,
+                    start_byte: 0,
+                    end_byte: 3,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_prefix_of_an_identifier_lights_nothing() {
+        let pre = ["foo_bar foo"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 2),
+            ],
+        );
+        assert_eq!(
+            model.selection().map(|s| (s.start_byte, s.end_byte)),
+            Some((0, 3))
+        );
+        assert!(highlights(&model, &pre, &[], no_fold).is_empty());
+    }
+
+    #[test]
+    fn one_letter_identifier_lights_every_other_unfolded_copy() {
+        let pre = ["i i i i i i i i i i i i"];
+        let post = ["i"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0, 2),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+            ],
+        );
+        assert_eq!(
+            highlights(&model, &pre, &post, no_fold),
+            vec![
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 2,
+                    end_byte: 3,
+                },
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 4,
+                    end_byte: 5,
+                },
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 6,
+                    end_byte: 7,
+                },
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 8,
+                    end_byte: 9,
+                },
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 10,
+                    end_byte: 11,
+                },
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 12,
+                    end_byte: 13,
+                },
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 14,
+                    end_byte: 15,
+                },
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 16,
+                    end_byte: 17,
+                },
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 18,
+                    end_byte: 19,
+                },
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 20,
+                    end_byte: 21,
+                },
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 1,
+                    start_byte: 22,
+                    end_byte: 23,
+                },
+                OccurrenceHighlight {
+                    side: Side::Postimage,
+                    line: 1,
+                    start_byte: 0,
+                    end_byte: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_line_punctuation_and_single_cjk_light_nothing() {
+        let pre = ["foo", "bar", "foo"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 3 }, 2),
+            ],
+        );
+        assert_eq!(
+            model.selection().map(|s| (s.start_line, s.end_line)),
+            Some((1, 3))
+        );
+        assert!(highlights(&model, &pre, &[], no_fold).is_empty());
+
+        let pre = ["a=b=c"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 1, 2),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 1),
+            ],
+        );
+        assert_eq!(model.clipboard(line(&pre, &[])).as_deref(), Some("="));
+        assert!(highlights(&model, &pre, &[], no_fold).is_empty());
+
+        for text in ["中 中", "あ あ", "ア ア", "한 한"] {
+            let pre = [text];
+            let mut model = Model::default();
+            feed(
+                &mut model,
+                &pre,
+                &[],
+                &[
+                    multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0, 2),
+                    sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                ],
+            );
+            let one = text.chars().next().unwrap().len_utf8();
+            assert_eq!(
+                model.selection().map(|s| (s.start_byte, s.end_byte)),
+                Some((0, one)),
+                "{text}"
+            );
+            assert!(highlights(&model, &pre, &[], no_fold).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn triple_click_lights_only_when_the_line_is_exactly_one_identifier() {
+        let pre = ["foo", "foo bar"];
+        let post = ["foo"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0, 3),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+            ],
+        );
+        assert_eq!(
+            highlights(&model, &pre, &post, no_fold),
+            vec![
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 2,
+                    start_byte: 0,
+                    end_byte: 3,
+                },
+                OccurrenceHighlight {
+                    side: Side::Postimage,
+                    line: 1,
+                    start_byte: 0,
+                    end_byte: 3,
+                },
+            ]
+        );
+
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 2 }, 0, 3),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 2 }, 0),
+            ],
+        );
+        assert_eq!(
+            model.clipboard(line(&pre, &post)).as_deref(),
+            Some("foo bar")
+        );
+        assert!(highlights(&model, &pre, &post, no_fold).is_empty());
+    }
+
+    #[test]
+    fn folded_lines_stay_out_until_the_caller_says_they_are_unfolded() {
+        let pre = ["foo", "foo", "foo"];
+        let post = ["foo"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &post,
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0, 2),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+            ],
+        );
+        let hide_middle = |side: Side, ln: u32| side == Side::Preimage && ln == 2;
+        assert_eq!(
+            highlights(&model, &pre, &post, hide_middle),
+            vec![
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 3,
+                    start_byte: 0,
+                    end_byte: 3,
+                },
+                OccurrenceHighlight {
+                    side: Side::Postimage,
+                    line: 1,
+                    start_byte: 0,
+                    end_byte: 3,
+                },
+            ]
+        );
+        assert_eq!(
+            highlights(&model, &pre, &post, no_fold),
+            vec![
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 2,
+                    start_byte: 0,
+                    end_byte: 3,
+                },
+                OccurrenceHighlight {
+                    side: Side::Preimage,
+                    line: 3,
+                    start_byte: 0,
+                    end_byte: 3,
+                },
+                OccurrenceHighlight {
+                    side: Side::Postimage,
+                    line: 1,
+                    start_byte: 0,
+                    end_byte: 3,
+                },
+            ]
+        );
     }
 }

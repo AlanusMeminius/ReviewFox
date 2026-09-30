@@ -10,7 +10,7 @@ use gpui::{
     Timer, Window, div, font, px, size,
 };
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -19,13 +19,13 @@ use super::element::{
     insert_scrollbar_hitboxes, line_number_digits, ln_col_width, text_extent, thumb_for, top_at,
     wrap_plan_for_panes,
 };
-use super::layout::{HunkLand, Layout, Row, WrapPlan};
-use super::text_selection::{Model as TextModel, Phase, RowClass, Sample};
+use super::layout::{HunkLand, Layout, Row, SideLayout, WrapPlan};
+use super::text_selection::{Model as TextModel, OccurrenceHighlight, Phase, RowClass, Sample};
 use super::trace;
 use super::viewport::{self, Viewport};
 use crate::domain::{
     Alignment, AlignmentOp, Anchor, DiffFontSize, FoldState, HunkJumpTarget, SearchSide, Side,
-    first_match_byte, hunk_jump_target, match_jump_plan,
+    first_match_byte, hunk_jump_target, match_jump_plan, split_lines,
 };
 use crate::git::FileDiff;
 use crate::syntax::{self, Span};
@@ -1228,7 +1228,9 @@ impl DualPane {
             return;
         }
         let sample = self.text_sample(side, x, y, Phase::Press, clicks);
-        note_text(&mut self.text, self.layout.as_ref(), sample);
+        if note_text(&mut self.text, self.layout.as_ref(), sample) {
+            cx.notify();
+        }
     }
 
     /// Left press on `side`'s line-number column.
@@ -1380,6 +1382,7 @@ impl DualPane {
         self.sync_wrap_layout(self.pane_w, window, cx);
         let comment_starts = self.comment_starts();
         let layout = self.layout.as_ref()?;
+        let file = self.file.as_ref()?;
         let t_vp = trace::start();
         let vp = Viewport::new(layout, self.scroll_s, self.view_h, row_h).snapped(self.scale);
         let viewport_took = trace::since(t_vp);
@@ -1398,6 +1401,12 @@ impl DualPane {
                     drafting: self.drafting,
                     selection: self.text.gutter(),
                     text: self.text.selection(),
+                    occurrences: occurrence_paint(
+                        &self.text,
+                        layout,
+                        &file.preimage_text,
+                        &file.postimage_text,
+                    ),
                     comment_starts,
                     search_query: (!self.search_query.is_empty())
                         .then(|| Arc::from(self.search_query.as_str())),
@@ -1800,10 +1809,40 @@ fn note_text(text: &mut TextModel, layout: Option<&Layout>, sample: Sample) -> b
         return false;
     };
     let before = text.selection();
+    let pressing = text.press_side().is_some();
     text.pointer(sample, |side, ln| {
         layout.side(side).line_text(ln).unwrap_or("")
     });
-    text.selection() != before
+    text.selection() != before || text.press_side().is_some() != pressing
+}
+
+/// Unfolded logical lines are the layout's first visual rows. Folded lines
+/// are absent, so they stay out of the scan.
+fn open_line_numbers(side: &SideLayout) -> HashSet<u32> {
+    let mut open = HashSet::new();
+    for i in 0..side.rows() {
+        if let Some(Row::Line(line)) = side.row(i)
+            && line.shows_line_number()
+        {
+            open.insert(line.ln);
+        }
+    }
+    open
+}
+
+fn occurrence_paint(
+    text: &TextModel,
+    layout: &Layout,
+    preimage: &str,
+    postimage: &str,
+) -> Vec<OccurrenceHighlight> {
+    let pre = split_lines(preimage);
+    let post = split_lines(postimage);
+    let open = [
+        open_line_numbers(layout.side(Side::Preimage)),
+        open_line_numbers(layout.side(Side::Postimage)),
+    ];
+    text.occurrences(&pre, &post, |side, ln| !open[side_ix(side)].contains(&ln))
 }
 
 /// Inclusive line span of a drag from `anchor` to the line under the pointer,

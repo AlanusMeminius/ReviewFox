@@ -19,7 +19,7 @@ use gpui::{
 use super::layout::{Layout, LineKind, LineRow, Row};
 use super::pane::{DualPane, PointerMove};
 use super::tabs::TabExpansion;
-use super::text_selection::TextSelection;
+use super::text_selection::{OccurrenceHighlight, TextSelection};
 use super::trace::{self, FrameStats};
 use super::viewport::{Viewport, route_wheel, snap};
 use super::visual_wrap::WrapSide;
@@ -93,6 +93,8 @@ pub(super) struct Decorations {
     pub search_pulse: Option<f32>,
     /// Caret-free character span. A decoration: it does not rebuild Layout.
     pub text: Option<TextSelection>,
+    /// Other Identifier occurrences. A decoration: it does not rebuild Layout.
+    pub occurrences: Vec<OccurrenceHighlight>,
 }
 
 /// Shaped text and line number per `(side, visual row)`. Cleared on Layout
@@ -327,6 +329,8 @@ struct RowPaint {
     search: Vec<(f32, f32, bool)>,
     /// TextSelection runs, x relative to the text origin.
     chars: Vec<(f32, f32)>,
+    /// OccurrenceHighlight runs, x relative to the text origin.
+    occurrences: Vec<(f32, f32)>,
     label: Option<ShapedLine>,
     show_label: bool,
 }
@@ -599,6 +603,25 @@ pub(super) fn build_frame(
                 ),
                 _ => Vec::new(),
             };
+            let occurrences = match row {
+                Row::Line(l) if !l.is_equal_padding() => {
+                    let ranges: Vec<(usize, usize)> = decorations
+                        .occurrences
+                        .iter()
+                        .filter(|o| o.side == side && o.line == l.ln)
+                        .map(|o| (o.start_byte, o.end_byte))
+                        .collect();
+                    byte_spans(
+                        &ranges,
+                        side,
+                        l,
+                        shape.tabs.as_ref(),
+                        shape.text.as_ref(),
+                        layout,
+                    )
+                }
+                _ => Vec::new(),
+            };
             if let Row::Line(l) = row
                 && !l.is_equal_padding()
             {
@@ -627,6 +650,7 @@ pub(super) fn build_frame(
                 marks,
                 search,
                 chars,
+                occurrences,
                 label: shape.label.clone(),
                 show_label,
             });
@@ -741,7 +765,7 @@ fn char_spans(
     shaped: Option<&ShapedLine>,
     layout: &Layout,
 ) -> Vec<(f32, f32)> {
-    let (Some(sel), Some(tabs), Some(shaped)) = (sel, tabs, shaped) else {
+    let Some(sel) = sel else {
         return Vec::new();
     };
     if sel.side != side {
@@ -750,8 +774,25 @@ fn char_spans(
     let Some((start, end)) = sel.bytes_on(line.ln, line_text.len()) else {
         return Vec::new();
     };
+    byte_spans(&[(start, end)], side, line, tabs, shaped, layout)
+}
+
+fn byte_spans(
+    ranges: &[(usize, usize)],
+    side: Side,
+    line: &LineRow,
+    tabs: Option<&TabExpansion>,
+    shaped: Option<&ShapedLine>,
+    layout: &Layout,
+) -> Vec<(f32, f32)> {
+    let (Some(tabs), Some(shaped)) = (tabs, shaped) else {
+        return Vec::new();
+    };
+    if ranges.is_empty() {
+        return Vec::new();
+    }
     let (segment, _) = wrap_segment(layout, side, line, tabs, layout.side(side));
-    let clipped = clip_runs_to_display_segment(&[(start, end)], tabs, segment);
+    let clipped = clip_runs_to_display_segment(ranges, tabs, segment);
     run_spans(&clipped, shaped)
 }
 
@@ -1150,6 +1191,17 @@ impl Frame {
                 if row.commented {
                     text_x += bar_text_inset;
                 }
+                // Back to front: line-span wash, intra-line marks, find hits,
+                // OccurrenceHighlight, TextSelection. They stack.
+                for &(a, b) in &row.marks {
+                    let rect = hline(
+                        text_x + a,
+                        text_x + b,
+                        row.y0 + (self.row_h - mark_h) / 2.,
+                        mark_h,
+                    );
+                    window.paint_quad(fill(rect, theme::mod_chg()).corner_radii(px(2.)));
+                }
                 for &(a, b, is_cur) in &row.search {
                     let y = row.y0 + (self.row_h - mark_h) / 2.;
                     let rect = hline(text_x + a, text_x + b, y, mark_h);
@@ -1171,14 +1223,11 @@ impl Frame {
                         window.paint_quad(fill(rect, rgb(SEARCH_HIT_BG)).corner_radii(px(2.)));
                     }
                 }
-                for &(a, b) in &row.marks {
-                    let rect = hline(
-                        text_x + a,
-                        text_x + b,
-                        row.y0 + (self.row_h - mark_h) / 2.,
-                        mark_h,
-                    );
-                    window.paint_quad(fill(rect, theme::mod_chg()).corner_radii(px(2.)));
+                for &(a, b) in &row.occurrences {
+                    window.paint_quad(fill(
+                        hline(text_x + a, text_x + b, row.y0, row.y1 - row.y0),
+                        theme::occurrence_highlight(),
+                    ));
                 }
                 for &(a, b) in &row.chars {
                     window.paint_quad(fill(
