@@ -1106,8 +1106,12 @@ impl DiffView {
         window.remove_window();
     }
 
-    /// Esc: Find → cancel draft (clears wash) → clear selection → close window.
+    /// Esc: TextSelection, then find, cancel draft (clears wash), gutter line span, close.
     fn dismiss_or_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pane.read(cx).has_text_selection() {
+            self.with_pane(cx, |pane, cx| pane.clear_text_selection(cx));
+            return;
+        }
         if has_search(self) {
             self.close_search(window, cx);
             return;
@@ -1127,6 +1131,9 @@ impl DiffView {
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let mods = &event.keystroke.modifiers;
         if mods.secondary() && !mods.alt && !mods.shift && event.keystroke.key == "c" {
+            // A focused find field or draft body owns this key: TextField's Copy
+            // already wrote that field's selection. Only the Diff focus writes
+            // the TextSelection. A press in the code column focuses the Diff.
             if self.focus.is_focused(window)
                 && let Some(text) = self.pane.read(cx).copied_text()
             {

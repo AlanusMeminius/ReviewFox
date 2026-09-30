@@ -185,6 +185,16 @@ impl Model {
         self.gutter = None;
     }
 
+    /// Drop the TextSelection. The gutter line span stays.
+    /// The pane calls this when the ChangedPath changes, the Comparison
+    /// changes, or ignore-whitespace is toggled. Scroll, soft wrap, Code
+    /// Font size, fold, and expand do not.
+    pub fn clear_text(&mut self) {
+        self.selection = None;
+        self.cancel_press();
+        self.scroll = ScrollStep::default();
+    }
+
     pub fn press_side(&self) -> Option<Side> {
         self.press.as_ref().map(|p| p.side)
     }
@@ -2685,5 +2695,62 @@ mod tests {
         // pane paints them only on a text row; an omission row has none.
         assert_eq!(model.selection(), Some(sel));
         assert_eq!(sel.bytes_on(2, "hidden".len()), Some((0, "hidden".len())));
+    }
+
+    #[test]
+    fn clear_text_drops_the_span_and_keeps_the_gutter_line_span() {
+        let pre = ["alpha beta"];
+        let mut model = Model::default();
+        model.drag_gutter(Side::Postimage, 3, 4);
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                sample(Phase::Move, Side::Preimage, RowClass::Text { ln: 1 }, 5),
+            ],
+        );
+        assert_eq!(model.clipboard(line(&pre, &[])).as_deref(), Some("alpha "));
+        model.clear_text();
+        assert_eq!(model.selection(), None);
+        assert_eq!(model.clipboard(line(&pre, &[])), None);
+        assert!(highlights(&model, &pre, &[], no_fold).is_empty());
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[sample(
+                Phase::Move,
+                Side::Preimage,
+                RowClass::Text { ln: 1 },
+                8,
+            )],
+        );
+        assert_eq!(model.selection(), None);
+        assert_eq!(model.gutter(), Some((Side::Postimage, 3, 4)));
+    }
+
+    #[test]
+    fn scroll_soft_wrap_and_code_font_keep_the_same_original_bytes() {
+        // "café" is 4 display columns and 5 original bytes. Scroll, soft wrap,
+        // and Code Font size are not samples, so they cannot rewrite the span.
+        let pre = ["café bar"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                sample(Phase::Move, Side::Preimage, RowClass::Text { ln: 1 }, 3),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 3),
+            ],
+        );
+        let sel = model.selection().expect("span");
+        assert_eq!((sel.start_byte, sel.end_byte), (0, "café".len()));
+        assert_ne!(sel.end_byte, 4, "the span is original bytes, not columns");
+        assert_eq!(model.clipboard(line(&pre, &[])).as_deref(), Some("café"));
+        assert_eq!(model.selection(), Some(sel));
     }
 }

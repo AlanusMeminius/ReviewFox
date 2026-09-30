@@ -358,7 +358,8 @@ impl DualPane {
         self.text.cancel_press();
         self.text_autoscroll = false;
         self.sel_drag = None;
-        // ChangedPath clears TextSelection in a later ticket.
+        // ChangedPath and Comparison both reopen the file.
+        self.clear_text_selection(cx);
         self.fold = FoldState::collapsed();
         self.set_hunk_index(None, cx);
         self.hunk_s = Some(0.);
@@ -379,6 +380,8 @@ impl DualPane {
                 file.alignment = alignment;
             }
         });
+        // Ignore-whitespace. Scroll, soft wrap, and Code Font size do not.
+        self.clear_text_selection(cx);
         self.set_hunk_index(None, cx);
         cx.notify();
     }
@@ -441,6 +444,24 @@ impl DualPane {
                 .copied()
                 .unwrap_or("")
         })
+    }
+
+    /// TextSelection is present. Esc checks this before find, draft, or the gutter.
+    pub fn has_text_selection(&self) -> bool {
+        self.text.selection().is_some()
+    }
+
+    /// Drop TextSelection. `open` calls this for a ChangedPath or Comparison
+    /// change. `set_alignment` calls this for ignore-whitespace. Scroll, soft
+    /// wrap, and Code Font size do not.
+    pub fn clear_text_selection(&mut self, cx: &mut Context<Self>) {
+        if self.text.selection().is_none() && self.text.press_side().is_none() {
+            return;
+        }
+        self.text.clear_text();
+        self.text_drag = None;
+        self.text_autoscroll = false;
+        cx.notify();
     }
 
     /// Drop the wash without opening or closing the dock.
