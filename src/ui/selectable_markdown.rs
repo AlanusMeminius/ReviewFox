@@ -6,7 +6,7 @@ use std::ops::Range;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Entity, FocusHandle, Focusable, Global,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, Render, SharedString, Window, canvas, div, hsla, point, prelude::*,
+    Point, Render, SharedString, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 
 use super::appearance::{self, UiTextSize};
@@ -148,7 +148,7 @@ impl Render for SelectableMarkdown {
             .cursor(CursorStyle::IBeam)
             .font_family(appearance::ui_font(cx))
             .ui_text_size(appearance::UI_FONT_SIZE_DEFAULT as f32, cx)
-            .text_color(theme::text())
+            .text_color(theme::software_palette().markdown.body)
             .on_key_down(cx.listener(Self::on_key_down))
             .child(
                 div().relative().w_full().child(body).child(
@@ -305,51 +305,58 @@ fn paint_selection_quads(
     end_pos: Point<Pixels>,
     end_height: Pixels,
 ) {
-    let color = hsla(0.58, 0.55, 0.72, 0.35);
-    let clear = hsla(0., 0., 0., 0.);
+    let colors = theme::software_palette().markdown;
     if start_pos.y == end_pos.y {
-        window.paint_quad(gpui::PaintQuad {
-            bounds: Bounds::from_corners(start_pos, point(end_pos.x, end_pos.y + end_height)),
-            corner_radii: Default::default(),
-            background: color.into(),
-            border_widths: Default::default(),
-            border_color: clear,
-            border_style: Default::default(),
-        });
+        paint_selection_rect(
+            window,
+            Bounds::from_corners(start_pos, point(end_pos.x, end_pos.y + end_height)),
+            colors,
+        );
         return;
     }
-    window.paint_quad(gpui::PaintQuad {
-        bounds: Bounds::from_corners(start_pos, point(bounds.right(), start_pos.y + start_height)),
-        corner_radii: Default::default(),
-        background: color.into(),
-        border_widths: Default::default(),
-        border_color: clear,
-        border_style: Default::default(),
-    });
+    paint_selection_rect(
+        window,
+        Bounds::from_corners(start_pos, point(bounds.right(), start_pos.y + start_height)),
+        colors,
+    );
     if end_pos.y > start_pos.y + start_height {
-        window.paint_quad(gpui::PaintQuad {
-            bounds: Bounds::from_corners(
+        paint_selection_rect(
+            window,
+            Bounds::from_corners(
                 point(bounds.left(), start_pos.y + start_height),
                 point(bounds.right(), end_pos.y),
             ),
-            corner_radii: Default::default(),
-            background: color.into(),
-            border_widths: Default::default(),
-            border_color: clear,
-            border_style: Default::default(),
-        });
+            colors,
+        );
     }
-    window.paint_quad(gpui::PaintQuad {
-        bounds: Bounds::from_corners(
+    paint_selection_rect(
+        window,
+        Bounds::from_corners(
             point(bounds.left(), end_pos.y),
             point(end_pos.x, end_pos.y + end_height),
         ),
-        corner_radii: Default::default(),
-        background: color.into(),
-        border_widths: Default::default(),
-        border_color: clear,
-        border_style: Default::default(),
-    });
+        colors,
+    );
+}
+
+fn paint_selection_rect(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    colors: theme::MarkdownColors,
+) {
+    window.paint_quad(fill(bounds, colors.selection));
+    let width = bounds.size.width;
+    window.paint_quad(fill(
+        Bounds::new(point(bounds.left(), bounds.top()), size(width, px(1.))),
+        colors.selection_outline,
+    ));
+    window.paint_quad(fill(
+        Bounds::new(
+            point(bounds.left(), bounds.bottom() - px(1.)),
+            size(width, px(1.)),
+        ),
+        colors.selection_outline,
+    ));
 }
 
 fn index_for_position(

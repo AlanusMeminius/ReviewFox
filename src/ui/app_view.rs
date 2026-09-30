@@ -4,7 +4,7 @@ use gpui::{
     MouseDownEvent, ParentElement, Pixels, Point, Render, Size, StatefulInteractiveElement, Styled,
     TitlebarOptions, Transformation, Window, WindowBounds, WindowControlArea, WindowDecorations,
     WindowHandle, WindowOptions, anchored, canvas, deferred, div, ease_out_quint, percentage,
-    prelude::*, px, rgb, svg,
+    prelude::*, px, svg,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -2075,6 +2075,7 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
 
 fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let mono = appearance::code_font(cx);
+    let palette = theme::software_palette();
     let body = match &view.state {
         MainState::Empty => div().flex_1().into_any_element(),
         MainState::Error(msg) => div()
@@ -2082,7 +2083,7 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
             .px_3()
             .py_3()
             .ui_text_size(14., cx)
-            .text_color(rgb(0xb42318))
+            .text_color(palette.feedback.error.foreground)
             .child(msg.clone())
             .into_any_element(),
         MainState::Ready(loaded) => {
@@ -2100,6 +2101,11 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
                     .overflow_y_scroll()
                     .children(loaded.commits().iter().enumerate().map(|(i, commit)| {
                         let in_range = loaded.in_range().get(i).copied().unwrap_or(false);
+                        let indicator = if in_range {
+                            palette.metadata.range_indicator
+                        } else {
+                            palette.metadata.row_indicator
+                        };
                         let summary = commit.summary.clone();
                         let meta = format!(
                             "{} · {} · {}",
@@ -2113,15 +2119,34 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
                             .my_0p5()
                             .px_3()
                             .py_2()
+                            .border_1()
+                            .border_color(if in_range {
+                                indicator
+                            } else {
+                                gpui::Rgba { a: 0., ..indicator }
+                            })
                             .rounded_lg()
                             .cursor_pointer()
-                            .when(in_range, |d| d.bg(theme::range()))
+                            .when(in_range, |d| d.bg(palette.metadata.range))
                             .hover(move |d| {
                                 if in_range {
-                                    d.bg(theme::range())
+                                    d.bg(palette.metadata.range_hover)
                                 } else {
-                                    d.bg(theme::hover())
+                                    d.bg(palette.metadata.row_hover)
                                 }
+                                .border_color(indicator)
+                                .border_l_2()
+                                .pl(px(11.))
+                            })
+                            .active(move |d| {
+                                if in_range {
+                                    d.bg(palette.metadata.range_pressed)
+                                } else {
+                                    d.bg(palette.metadata.row_pressed)
+                                }
+                                .border_color(indicator)
+                                .border_l_4()
+                                .pl(px(9.))
                             })
                             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                                 // Double-click: always fold Comparison to this single
@@ -2150,7 +2175,7 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
                                             .min_w(px(0.))
                                             .ui_text_size(14., cx)
                                             .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(theme::text())
+                                            .text_color(palette.metadata.text)
                                             .overflow_hidden()
                                             .text_ellipsis()
                                             .whitespace_nowrap()
@@ -2162,7 +2187,7 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
                                             .min_w(px(0.))
                                             .font_family(mono.clone())
                                             .text_xs()
-                                            .text_color(theme::muted())
+                                            .text_color(palette.metadata.label)
                                             .overflow_hidden()
                                             .text_ellipsis()
                                             .whitespace_nowrap()
@@ -2182,7 +2207,7 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
         .min_h(px(0.))
         .flex()
         .flex_col()
-        .bg(theme::white())
+        .bg(palette.metadata.surface)
         .rounded(px(theme::CHANGES_RADIUS))
         .overflow_hidden()
         .child(body)
@@ -2327,13 +2352,17 @@ fn render_error_note(
         .flex()
         .flex_col()
         .gap_1()
-        .child(div().text_color(rgb(0xb42318)).child(note.message.clone()))
+        .child(
+            div()
+                .text_color(theme::software_palette().feedback.error.foreground)
+                .child(note.message.clone()),
+        )
         .when_some(note.open_settings, |d, target| {
             d.child(
                 div()
                     .id(id)
                     .cursor_pointer()
-                    .text_color(theme::accent())
+                    .text_color(theme::software_palette().metadata.link)
                     .hover(|d| d.underline())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if close_mr_picker {
@@ -2363,11 +2392,11 @@ fn render_mr_entry_detail(
         .flex_col()
         .px_3()
         .py_2()
-        .bg(theme::white())
+        .bg(theme::software_palette().metadata.surface)
         .rounded(px(theme::CHANGES_RADIUS))
         .overflow_hidden()
         .ui_text_size(12., cx)
-        .text_color(theme::muted())
+        .text_color(theme::software_palette().metadata.label)
         .child(scrollbar::overlay_flex(
             div()
                 .id("mr-entry-detail-body")
@@ -2413,7 +2442,7 @@ fn mr_entry_ready_lines(detail: &MergeRequestDetail, cx: &mut App) -> Vec<gpui::
         div()
             .ui_text_size(14., cx)
             .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(theme::text())
+            .text_color(theme::software_palette().metadata.text)
             .child(detail.title.clone())
             .into_any_element(),
         metadata::row(mr_metadata_items(detail), cx).into_any_element(),
@@ -2880,7 +2909,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                             .px_3()
                             .py_1()
                             .ui_text_size(12., cx)
-                            .text_color(theme::error())
+                            .text_color(theme::software_palette().feedback.error.foreground)
                             .child(message),
                     )
                 })
@@ -2955,6 +2984,7 @@ fn render_head_meta(
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let mono = appearance::code_font(cx);
+    let colors = theme::software_palette().metadata;
     let full_oid = meta.commit.oid.to_string();
     let short = meta.commit.oid.short();
     let body = meta.commit.body.clone();
@@ -2970,7 +3000,7 @@ fn render_head_meta(
         .pt_2()
         .pb_2()
         .gap_1()
-        .bg(theme::white())
+        .bg(colors.surface)
         // Parent overflow_hidden+rounded still paints square at the south edge in
         // GPUI; match capsule radii on the footer so the bottom corners read round.
         .rounded_b(px(theme::CHANGES_RADIUS))
@@ -2980,7 +3010,7 @@ fn render_head_meta(
                 .flex_none()
                 .ui_text_size(12., cx)
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::text())
+                .text_color(colors.text)
                 .child(meta.commit.summary.clone()),
         )
         .child(
@@ -2991,7 +3021,7 @@ fn render_head_meta(
                 .items_center()
                 .gap_1()
                 .ui_text_size(12., cx)
-                .text_color(theme::muted())
+                .text_color(colors.label)
                 .child(
                     div()
                         .id("head-meta-hash")
@@ -3000,7 +3030,7 @@ fn render_head_meta(
                         // Own size: the UI text around it scales, Code Font chrome does not.
                         .text_xs()
                         .cursor_pointer()
-                        .hover(|d| d.text_color(theme::accent()))
+                        .hover(move |d| d.text_color(colors.link).underline())
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(full_oid.clone()));
                         }))
@@ -3025,7 +3055,7 @@ fn render_head_meta(
                             .font_family(mono.clone())
                             // Own size: the UI text around it scales, Code Font chrome does not.
                             .text_xs()
-                            .text_color(theme::faint())
+                            .text_color(colors.label)
                             .child(label),
                     )
                 }),
@@ -3039,7 +3069,7 @@ fn render_head_meta(
                     .track_scroll(&scroll)
                     .overflow_y_scroll()
                     .ui_text_size(12., cx)
-                    .text_color(theme::muted())
+                    .text_color(colors.label)
                     .child(body),
                 sb,
             ))

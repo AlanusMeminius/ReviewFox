@@ -56,32 +56,31 @@ struct Colors {
 }
 
 impl ButtonStyle {
-    fn colors(self, palette: theme::ControlColors) -> Colors {
+    fn colors(self, palette: theme::SoftwarePalette) -> Colors {
         let (background, border, hover, active) = match self {
             ButtonStyle::Subtle => (
                 transparent_black(),
                 transparent_black(),
-                palette.hover.into(),
-                palette.pressed.into(),
+                palette.control.hover.into(),
+                palette.control.pressed.into(),
             ),
             ButtonStyle::Outlined => (
                 transparent_black(),
-                palette.outline.into(),
-                palette.hover.into(),
-                palette.pressed.into(),
+                palette.control.outline.into(),
+                palette.control.hover.into(),
+                palette.control.pressed.into(),
             ),
-            // Zed darkens the tint on hover; the tint's own border color is that step.
             ButtonStyle::Tinted(TintColor::Success) => (
-                theme::success_background().into(),
-                theme::success_border().into(),
-                theme::success_border().into(),
-                theme::success_border().into(),
+                palette.feedback.success.background.into(),
+                palette.feedback.success.border.into(),
+                palette.control.hover.into(),
+                palette.control.pressed.into(),
             ),
             ButtonStyle::Tinted(TintColor::Error) => (
-                theme::error_background().into(),
-                theme::error_border().into(),
-                theme::error_border().into(),
-                theme::error_border().into(),
+                palette.feedback.error.background.into(),
+                palette.feedback.error.border.into(),
+                palette.control.hover.into(),
+                palette.control.pressed.into(),
             ),
         };
         Colors {
@@ -224,7 +223,7 @@ impl Button {
 impl RenderOnce for Button {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let palette = theme::software_palette();
-        let colors = self.style.colors(palette.control);
+        let colors = self.style.colors(palette);
         let height = self.size.height();
         let icon_only = self.label.is_none();
         let (text_color, icon_color): (Hsla, Hsla) = if self.disabled {

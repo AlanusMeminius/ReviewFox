@@ -2,7 +2,7 @@
 
 use gpui::{
     AnyElement, App, ClipboardItem, Div, FontWeight, IntoElement, SharedString, Stateful, div,
-    prelude::*, px, rgb,
+    prelude::*, px,
 };
 
 use super::appearance::UiTextSize;
@@ -28,17 +28,20 @@ pub fn row(items: Vec<Item>, cx: &App) -> Div {
 /// Keep the palette intentionally soft so the text remains the primary signal.
 pub fn capsule(value: impl Into<String>, cx: &App) -> Div {
     let value = value.into();
-    let (background, foreground) = capsule_colors(&value);
+    let palette = theme::software_palette();
+    let colors = capsule_colors(&value, palette.feedback);
     div()
         .flex_none()
         .px(px(5.))
         .py(px(1.))
         .rounded(px(4.))
-        .bg(rgb(background))
+        .bg(colors.background)
+        .border_1()
+        .border_color(colors.border)
         .ui_text_size(12., cx)
         .line_height(px(15.))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(foreground))
+        .text_color(colors.foreground)
         .child(value)
 }
 
@@ -47,12 +50,24 @@ pub fn capsule(value: impl Into<String>, cx: &App) -> Div {
 fn copyable_capsule(value: impl Into<String>, cx: &App) -> Stateful<Div> {
     let value = value.into();
     let copied = value.clone();
+    let palette = theme::software_palette();
     capsule(value.clone(), cx)
         .id(SharedString::from(format!("copy-metadata-{value}")))
         .debug_selector(move || format!("metadata-copy-{value}"))
         .cursor_pointer()
-        .hover(|capsule| capsule.bg(theme::line()))
-        .active(|capsule| capsule.bg(theme::element_active()))
+        // Grow the left edge 1→2→4px, compensating padding so the ID stays put.
+        .hover(move |capsule| {
+            capsule
+                .bg(palette.metadata.copy_hover)
+                .border_l_2()
+                .pl(px(4.))
+        })
+        .active(move |capsule| {
+            capsule
+                .bg(palette.metadata.copy_pressed)
+                .border_l_4()
+                .pl(px(2.))
+        })
         .tooltip(Tooltip::text("Click to copy", None))
         .on_click(move |_, _, cx: &mut App| {
             cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
@@ -80,24 +95,44 @@ fn render_item(item: Item, cx: &App) -> Div {
         .child(
             div()
                 .flex_none()
-                .text_color(theme::faint())
+                .text_color(theme::software_palette().metadata.label)
                 .child(item.label),
         )
         .child(value)
 }
 
-fn capsule_colors(value: &str) -> (u32, u32) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tone {
+    Info,
+    Success,
+    Error,
+    Warning,
+    Neutral,
+}
+
+fn tone_for(value: &str) -> Tone {
     match value.to_ascii_lowercase().as_str() {
-        "open" | "opened" | "ready" | "running" | "pending" => (0xdbeafe, 0x1d4ed8),
-        "closed" | "merged" | "done" | "completed" | "success" => (0xdcfce7, 0x166534),
-        "blocked" | "failed" | "canceled" => (0xffe4e6, 0x9f1239),
-        _ => (0xf1f3f6, 0x4b5563),
+        "open" | "opened" | "ready" | "running" | "pending" => Tone::Info,
+        "merged" | "done" | "completed" | "success" => Tone::Success,
+        "failed" | "canceled" => Tone::Error,
+        "blocked" | "warning" | "conflict" | "conflicts" => Tone::Warning,
+        _ => Tone::Neutral,
+    }
+}
+
+fn capsule_colors(value: &str, colors: theme::FeedbackColors) -> theme::StatusColors {
+    match tone_for(value) {
+        Tone::Info => colors.info,
+        Tone::Success => colors.success,
+        Tone::Error => colors.error,
+        Tone::Warning => colors.warning,
+        Tone::Neutral => colors.neutral,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{capsule_colors, is_copyable};
+    use super::{Tone, is_copyable, tone_for};
 
     #[test]
     fn only_the_id_is_offered_as_a_copy_target() {
@@ -107,12 +142,14 @@ mod tests {
     }
 
     #[test]
-    fn merge_request_states_and_pipelines_read_as_green_or_red() {
-        assert_eq!(capsule_colors("merged"), capsule_colors("closed"));
-        assert_eq!(capsule_colors("success"), capsule_colors("closed"));
-        assert_eq!(capsule_colors("running"), capsule_colors("open"));
-        assert_eq!(capsule_colors("pending"), capsule_colors("open"));
-        assert_eq!(capsule_colors("canceled"), capsule_colors("failed"));
-        assert_eq!(capsule_colors("can_be_merged"), (0xf1f3f6, 0x4b5563));
+    fn merge_request_states_and_pipelines_keep_contextual_meaning() {
+        assert_eq!(tone_for("merged"), Tone::Success);
+        assert_eq!(tone_for("success"), Tone::Success);
+        assert_eq!(tone_for("closed"), Tone::Neutral);
+        assert_eq!(tone_for("running"), Tone::Info);
+        assert_eq!(tone_for("pending"), Tone::Info);
+        assert_eq!(tone_for("canceled"), Tone::Error);
+        assert_eq!(tone_for("blocked"), Tone::Warning);
+        assert_eq!(tone_for("can_be_merged"), Tone::Neutral);
     }
 }

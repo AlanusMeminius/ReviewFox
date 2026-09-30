@@ -714,8 +714,18 @@ impl SettingsView {
         let mut card = ConfiguredCard::new(label);
         match status {
             CardStatus::Verifying => {}
-            CardStatus::Connected => card = card.icon("check.svg", theme::success()),
-            CardStatus::Failed => card = card.icon("warning.svg", theme::error()),
+            CardStatus::Connected => {
+                card = card.icon(
+                    "check.svg",
+                    theme::software_palette().feedback.success.foreground,
+                )
+            }
+            CardStatus::Failed => {
+                card = card.icon(
+                    "warning.svg",
+                    theme::software_palette().feedback.error.foreground,
+                )
+            }
         }
         let mut tab_index = TAB_TOKEN;
         if can_retry {

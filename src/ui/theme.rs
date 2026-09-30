@@ -21,6 +21,57 @@ pub struct SoftwarePalette {
     pub tooltip: TooltipColors,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub window_control: WindowControlColors,
+    pub feedback: FeedbackColors,
+    pub metadata: MetadataColors,
+    pub markdown: MarkdownColors,
+}
+
+#[derive(Clone, Copy)]
+pub struct StatusColors {
+    pub foreground: Rgba,
+    pub background: Rgba,
+    pub border: Rgba,
+}
+
+#[derive(Clone, Copy)]
+pub struct FeedbackColors {
+    pub success: StatusColors,
+    pub error: StatusColors,
+    pub warning: StatusColors,
+    pub info: StatusColors,
+    pub neutral: StatusColors,
+}
+
+#[derive(Clone, Copy)]
+pub struct MetadataColors {
+    pub surface: Rgba,
+    pub label: Rgba,
+    pub text: Rgba,
+    pub copy_hover: Rgba,
+    pub copy_pressed: Rgba,
+    pub row_hover: Rgba,
+    pub row_pressed: Rgba,
+    pub range: Rgba,
+    pub range_hover: Rgba,
+    pub range_pressed: Rgba,
+    pub row_indicator: Rgba,
+    pub range_indicator: Rgba,
+    pub link: Rgba,
+}
+
+#[derive(Clone, Copy)]
+pub struct MarkdownColors {
+    pub body: Rgba,
+    pub secondary: Rgba,
+    pub code_surface: Rgba,
+    pub code_border: Rgba,
+    pub inline_code_surface: Rgba,
+    pub quote_border: Rgba,
+    pub table_border: Rgba,
+    pub table_header: Rgba,
+    pub link: Rgba,
+    pub selection: Rgba,
+    pub selection_outline: Rgba,
 }
 
 #[derive(Clone, Copy)]
@@ -172,6 +223,61 @@ pub struct TreeRowColors {
 pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
     match mode {
         SoftwareThemeMode::Light => SoftwarePalette {
+            feedback: FeedbackColors {
+                success: StatusColors {
+                    foreground: rgb(0x0e6137),
+                    background: rgb(0xe8f7ee),
+                    border: rgb(0x327e4e),
+                },
+                error: StatusColors {
+                    foreground: rgb(0xa3261d),
+                    background: rgb(0xfdeceb),
+                    border: rgb(0xa3261d),
+                },
+                warning: StatusColors {
+                    foreground: rgb(0x754a00),
+                    background: rgb(0xfff2cf),
+                    border: rgb(0x895a00),
+                },
+                info: StatusColors {
+                    foreground: rgb(0x1d4ed8),
+                    background: rgb(0xdbeafe),
+                    border: rgb(0x315eaf),
+                },
+                neutral: StatusColors {
+                    foreground: rgb(0x4b5669),
+                    background: rgb(0xf1f3f6),
+                    border: rgb(0x596579),
+                },
+            },
+            metadata: MetadataColors {
+                surface: rgb(0xffffff),
+                label: rgb(0x596579),
+                text: rgb(0x172033),
+                copy_hover: rgb(0xe9ebef),
+                copy_pressed: rgb(0xdde3ec),
+                row_hover: rgb(0xe9ebef),
+                row_pressed: rgb(0xdde3ec),
+                range: rgb(0xf1f5ff),
+                range_hover: rgb(0xe4edff),
+                range_pressed: rgb(0xd3e2ff),
+                row_indicator: rgb(0x596579),
+                range_indicator: rgb(0x2457d6),
+                link: rgb(0x2457d6),
+            },
+            markdown: MarkdownColors {
+                body: rgb(0x172033),
+                secondary: rgb(0x596579),
+                code_surface: rgb(0xe9ebef),
+                code_border: rgb(0x7c8798),
+                inline_code_surface: rgb(0xe9ebef),
+                quote_border: rgb(0x7c8798),
+                table_border: rgb(0x7c8798),
+                table_header: rgb(0xe9ebef),
+                link: rgb(0x2457d6),
+                selection: gpui::rgba(0xffffff1f),
+                selection_outline: rgb(0x2457d6),
+            },
             control: ControlColors {
                 idle: rgb(0xf4f5f7),
                 hover: rgb(0xe9ebef),
@@ -297,6 +403,61 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             },
         },
         SoftwareThemeMode::Dark => SoftwarePalette {
+            feedback: FeedbackColors {
+                success: StatusColors {
+                    foreground: rgb(0xb2eabc),
+                    background: rgb(0x1e3a2a),
+                    border: rgb(0x7acb98),
+                },
+                error: StatusColors {
+                    foreground: rgb(0xffb6ad),
+                    background: rgb(0x3d2422),
+                    border: rgb(0xe17c75),
+                },
+                warning: StatusColors {
+                    foreground: rgb(0xffdb95),
+                    background: rgb(0x423314),
+                    border: rgb(0xd7ac60),
+                },
+                info: StatusColors {
+                    foreground: rgb(0xa8cdfc),
+                    background: rgb(0x263b55),
+                    border: rgb(0x8cb7ed),
+                },
+                neutral: StatusColors {
+                    foreground: rgb(0xd5dae3),
+                    background: rgb(0x343b47),
+                    border: rgb(0xaeb7c5),
+                },
+            },
+            metadata: MetadataColors {
+                surface: rgb(0x30343d),
+                label: rgb(0xc5cfde),
+                text: rgb(0xd5dae3),
+                copy_hover: rgb(0x414a59),
+                copy_pressed: rgb(0x4a5669),
+                row_hover: rgb(0x414a59),
+                row_pressed: rgb(0x4a5669),
+                range: rgb(0x30384a),
+                range_hover: rgb(0x39465d),
+                range_pressed: rgb(0x435570),
+                row_indicator: rgb(0xc5cfde),
+                range_indicator: rgb(0x89c7f7),
+                link: rgb(0x89c7f7),
+            },
+            markdown: MarkdownColors {
+                body: rgb(0xd5dae3),
+                secondary: rgb(0xaeb7c5),
+                code_surface: rgb(0x343b47),
+                code_border: rgb(0x8993a3),
+                inline_code_surface: rgb(0x343b47),
+                quote_border: rgb(0x8993a3),
+                table_border: rgb(0x8993a3),
+                table_header: rgb(0x343b47),
+                link: rgb(0x89c7f7),
+                selection: gpui::rgba(0x0000001f),
+                selection_outline: rgb(0x89c7f7),
+            },
             control: ControlColors {
                 idle: rgb(0x1d2027),
                 hover: rgb(0x414a59),
@@ -767,6 +928,7 @@ pub fn accent() -> Rgba {
 // plays One Light's `border`.
 
 /// Row dividers and card outlines — a step lighter than [`line`].
+#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
 pub fn border_variant() -> Rgba {
     if crate::ui::code_theme::is_dark() {
         rgb(0x333842)
@@ -790,9 +952,11 @@ pub fn element_active() -> Rgba {
         rgb(0xdfe3e9)
     }
 }
+#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
 pub fn success() -> Rgba {
     rgb(0x2f8f55)
 }
+#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
 pub fn success_background() -> Rgba {
     if crate::ui::code_theme::is_dark() {
         rgb(0x1e3a2a)
@@ -800,6 +964,7 @@ pub fn success_background() -> Rgba {
         rgb(0xe8f7ee)
     }
 }
+#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
 pub fn success_border() -> Rgba {
     if crate::ui::code_theme::is_dark() {
         rgb(0x2f5c40)
@@ -807,9 +972,11 @@ pub fn success_border() -> Rgba {
         rgb(0xc3e5cf)
     }
 }
+#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
 pub fn error() -> Rgba {
     rgb(0xcf4a3c)
 }
+#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
 pub fn error_background() -> Rgba {
     if crate::ui::code_theme::is_dark() {
         rgb(0x3d2422)
@@ -817,6 +984,7 @@ pub fn error_background() -> Rgba {
         rgb(0xfdeceb)
     }
 }
+#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
 pub fn error_border() -> Rgba {
     if crate::ui::code_theme::is_dark() {
         rgb(0x5c3532)
@@ -1262,6 +1430,138 @@ mod software_palette_tests {
             }
             for surface in [caption.close_hover, caption.close_pressed] {
                 assert!(contrast(caption.close_icon, surface) >= 3.);
+            }
+        }
+    }
+
+    #[test]
+    fn feedback_metadata_and_markdown_meet_contrast_on_content_surfaces() {
+        for mode in [SoftwareThemeMode::Light, SoftwareThemeMode::Dark] {
+            let palette = resolve_software_palette(mode);
+            let content = palette.metadata;
+            let markdown = palette.markdown;
+            for (tone, colors) in [
+                ("success", palette.feedback.success),
+                ("error", palette.feedback.error),
+                ("warning", palette.feedback.warning),
+                ("info", palette.feedback.info),
+                ("neutral", palette.feedback.neutral),
+            ] {
+                for (surface, bg) in [
+                    ("badge", colors.background),
+                    ("metadata island", content.surface),
+                    ("settings card", palette.settings.card),
+                ] {
+                    assert!(
+                        contrast(colors.foreground, bg) >= 4.5,
+                        "{mode:?} {tone} foreground on {surface}: {}",
+                        contrast(colors.foreground, bg)
+                    );
+                }
+                assert!(
+                    contrast(colors.border, colors.background) >= 3.,
+                    "{mode:?} {tone} badge border"
+                );
+            }
+            for (surface, bg) in [
+                ("idle", content.surface),
+                ("hover", content.row_hover),
+                ("pressed", content.row_pressed),
+                ("range", content.range),
+                ("range hover", content.range_hover),
+                ("range pressed", content.range_pressed),
+                ("copy hover", content.copy_hover),
+                ("copy pressed", content.copy_pressed),
+            ] {
+                for (name, fg) in [("text", content.text), ("label", content.label)] {
+                    assert!(
+                        contrast(fg, bg) >= 4.5,
+                        "{mode:?} metadata {name} on {surface}: {}",
+                        contrast(fg, bg)
+                    );
+                }
+            }
+            assert!(contrast(content.link, content.surface) >= 4.5);
+            for (name, indicator, backgrounds) in [
+                (
+                    "commit row",
+                    content.row_indicator,
+                    [content.row_hover, content.row_pressed],
+                ),
+                (
+                    "selected commit row",
+                    content.range_indicator,
+                    [content.range_hover, content.range_pressed],
+                ),
+            ] {
+                for bg in backgrounds {
+                    assert!(
+                        contrast(indicator, bg) >= 3.,
+                        "{mode:?} {name} interaction indicator: {}",
+                        contrast(indicator, bg)
+                    );
+                }
+            }
+            assert!(contrast(content.range_indicator, content.range) >= 3.);
+            for (state, bg) in [
+                ("hover", content.copy_hover),
+                ("pressed", content.copy_pressed),
+            ] {
+                assert!(
+                    contrast(palette.feedback.neutral.foreground, bg) >= 4.5,
+                    "{mode:?} copy capsule {state} text"
+                );
+                assert!(
+                    contrast(palette.feedback.neutral.border, bg) >= 3.,
+                    "{mode:?} copy capsule {state} indicator"
+                );
+            }
+            for (surface, bg) in [
+                ("body", content.surface),
+                ("code block", markdown.code_surface),
+                ("inline code", markdown.inline_code_surface),
+                ("table heading", markdown.table_header),
+            ] {
+                for (name, fg) in [
+                    ("body", markdown.body),
+                    ("secondary", markdown.secondary),
+                    ("link", markdown.link),
+                ] {
+                    assert!(
+                        contrast(fg, bg) >= 4.5,
+                        "{mode:?} Markdown {name} on {surface}: {}",
+                        contrast(fg, bg)
+                    );
+                    let selected = composite(markdown.selection, bg);
+                    assert!(
+                        contrast(fg, selected) >= 4.5,
+                        "{mode:?} selected Markdown {name} on {surface}: {}",
+                        contrast(fg, selected)
+                    );
+                }
+                assert!(
+                    contrast(
+                        markdown.selection_outline,
+                        composite(markdown.selection, bg)
+                    ) >= 3.,
+                    "{mode:?} Markdown selection mark on {surface}"
+                );
+            }
+            for (name, mark, bg) in [
+                ("code border", markdown.code_border, markdown.code_surface),
+                ("quote border", markdown.quote_border, content.surface),
+                ("table border", markdown.table_border, content.surface),
+                (
+                    "table border on heading",
+                    markdown.table_border,
+                    markdown.table_header,
+                ),
+            ] {
+                assert!(
+                    contrast(mark, bg) >= 3.,
+                    "{mode:?} Markdown {name}: {}",
+                    contrast(mark, bg)
+                );
             }
         }
     }
