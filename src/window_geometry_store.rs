@@ -28,9 +28,10 @@ pub struct DiffReopen {
     pub base_oid: Option<String>,
     pub head_oid: String,
     pub selected_path: String,
-    /// Worktree Comparison (ADR-0014). Absent in older geometry files.
-    #[serde(default)]
-    pub worktree: bool,
+    /// Uncommitted Comparison (ADR-0014). Absent in older geometry files.
+    /// Previous files use the key `worktree` (ADR-0015).
+    #[serde(default, alias = "worktree")]
+    pub uncommitted: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -254,7 +255,7 @@ mod tests {
                 base_oid: Some("a".repeat(40)),
                 head_oid: "b".repeat(40),
                 selected_path: "src/a.rs".into(),
-                worktree: false,
+                uncommitted: false,
             }),
             repos_collapsed: false,
             tree_collapsed: false,
@@ -276,7 +277,7 @@ mod tests {
                 base_oid: None,
                 head_oid: "b".repeat(40),
                 selected_path: "README.md".into(),
-                worktree: false,
+                uncommitted: false,
             }),
             ..Default::default()
         };
@@ -297,8 +298,33 @@ mod tests {
         let reopen = loaded.diff_reopen.expect("diff_reopen");
         assert_eq!(reopen.base_oid, Some("a".repeat(40)));
         assert_eq!(reopen.head_oid, "b".repeat(40));
-        assert!(!reopen.worktree);
+        assert!(!reopen.uncommitted);
         assert!(loaded.diff_open);
+    }
+
+    #[test]
+    fn old_worktree_key_loads_as_uncommitted() {
+        let old = format!(
+            r#"{{"diff_reopen":{{"repository":"/repo","base_oid":"{}","head_oid":"{}","selected_path":"a.rs","worktree":true}}}}"#,
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        let loaded: WindowGeometryFile = serde_json::from_str(&old).unwrap();
+        assert!(loaded.diff_reopen.unwrap().uncommitted);
+
+        let file = WindowGeometryFile {
+            diff_reopen: Some(DiffReopen {
+                repository: PathBuf::from("/repo"),
+                base_oid: Some("a".repeat(40)),
+                head_oid: "b".repeat(40),
+                selected_path: "a.rs".into(),
+                uncommitted: true,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        assert!(json.contains("\"uncommitted\":true"));
+        assert!(!json.contains("worktree"));
     }
 
     #[test]
@@ -329,7 +355,7 @@ mod tests {
                 base_oid: Some("a".repeat(40)),
                 head_oid: "b".repeat(40),
                 selected_path: "src/a.rs".into(),
-                worktree: false,
+                uncommitted: false,
             }),
             repos_collapsed: true,
             tree_collapsed: true,
@@ -378,7 +404,7 @@ mod tests {
                 base_oid: Some("c".repeat(40)),
                 head_oid: "d".repeat(40),
                 selected_path: "src/b.rs".into(),
-                worktree: false,
+                uncommitted: false,
             }),
             repos_collapsed: false,
             tree_collapsed: false,

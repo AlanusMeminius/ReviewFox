@@ -12,7 +12,7 @@ use crate::workspace_store::MrEntryLabel;
 pub enum EntryKind {
     Branch,
     Mr,
-    Worktree,
+    Uncommitted,
 }
 
 /// Result of clicking a kind hit on the kind track.
@@ -22,8 +22,8 @@ pub enum KindSwitchAction {
     Stay,
     /// Select Branch Browser; clear selected MR Entry (keep last-MR memory).
     SelectBranch,
-    /// Read the checkout against HEAD. No picker, no last-Worktree memory.
-    SelectWorktree,
+    /// Read the checkout against HEAD. No picker, no last-Uncommitted memory.
+    SelectUncommitted,
     /// Restore MR Entry from last-MR memory via the existing restore path.
     /// Does not auto-open the picker.
     RestoreMr(MrEntryLabel),
@@ -40,10 +40,10 @@ pub enum RestoreFailureAction {
     EnterEmptyMrOpenPicker,
 }
 
-/// Active kind. Worktree wins; otherwise MR when an Entry is selected or empty-MR chrome is held.
-pub fn active_entry_kind(mr_selected: bool, empty_mr: bool, worktree: bool) -> EntryKind {
-    if worktree {
-        EntryKind::Worktree
+/// Active kind. Uncommitted wins; otherwise MR when an Entry is selected or empty-MR chrome is held.
+pub fn active_entry_kind(mr_selected: bool, empty_mr: bool, uncommitted: bool) -> EntryKind {
+    if uncommitted {
+        EntryKind::Uncommitted
     } else if mr_selected || empty_mr {
         EntryKind::Mr
     } else {
@@ -67,7 +67,7 @@ pub fn kind_switch_action(
     }
     match target {
         EntryKind::Branch => KindSwitchAction::SelectBranch,
-        EntryKind::Worktree => KindSwitchAction::SelectWorktree,
+        EntryKind::Uncommitted => KindSwitchAction::SelectUncommitted,
         EntryKind::Mr => match last_mr {
             Some(label) => KindSwitchAction::RestoreMr(label.clone()),
             None => KindSwitchAction::EnterEmptyMr,
@@ -118,7 +118,7 @@ pub fn restore_failure_action(from_kind_switch: bool) -> RestoreFailureAction {
 pub fn value_label(kind: EntryKind, branch: &str, mr_iid: Option<u64>, checkout: &str) -> String {
     match kind {
         EntryKind::Branch => branch.to_string(),
-        EntryKind::Worktree => checkout.to_string(),
+        EntryKind::Uncommitted => checkout.to_string(),
         EntryKind::Mr => match mr_iid {
             Some(iid) => format!("!{iid}"),
             None => "Select MR…".into(),
@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(active_entry_kind(true, false, false), EntryKind::Mr);
         assert_eq!(active_entry_kind(false, true, false), EntryKind::Mr);
         assert_eq!(active_entry_kind(true, true, false), EntryKind::Mr);
-        assert_eq!(active_entry_kind(true, true, true), EntryKind::Worktree);
+        assert_eq!(active_entry_kind(true, true, true), EntryKind::Uncommitted);
     }
 
     #[test]
@@ -194,17 +194,17 @@ mod tests {
     }
 
     #[test]
-    fn switching_to_worktree_does_not_restore_mr() {
+    fn switching_to_uncommitted_does_not_restore_mr() {
         assert_eq!(
             kind_switch_action(
                 EntryKind::Branch,
-                EntryKind::Worktree,
+                EntryKind::Uncommitted,
                 Some(&label("acme/app", 42))
             ),
-            KindSwitchAction::SelectWorktree
+            KindSwitchAction::SelectUncommitted
         );
         assert_eq!(
-            kind_switch_action(EntryKind::Worktree, EntryKind::Worktree, None),
+            kind_switch_action(EntryKind::Uncommitted, EntryKind::Uncommitted, None),
             KindSwitchAction::Stay
         );
     }
@@ -268,7 +268,7 @@ mod tests {
             "Select MR…"
         );
         assert_eq!(
-            value_label(EntryKind::Worktree, "feature/mr", None, "main"),
+            value_label(EntryKind::Uncommitted, "feature/mr", None, "main"),
             "main"
         );
     }

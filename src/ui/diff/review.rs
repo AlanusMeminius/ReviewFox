@@ -192,17 +192,17 @@ mod tests {
             repository: Repository::new(PathBuf::from("/tmp/repo")),
             base_oid: Some(Oid::from_bytes([1; 20])),
             head_oid: Oid::from_bytes([head; 20]),
-            worktree: false,
+            uncommitted: false,
         }
     }
 
-    fn worktree(head: u8) -> Comparison {
+    fn uncommitted(head: u8) -> Comparison {
         let oid = Oid::from_bytes([head; 20]);
         Comparison {
             repository: Repository::new(PathBuf::from("/tmp/repo")),
             base_oid: Some(oid),
             head_oid: oid,
-            worktree: true,
+            uncommitted: true,
         }
     }
 
@@ -406,25 +406,25 @@ mod tests {
     }
 
     #[test]
-    fn worktree_comparison_uses_partial_eq() {
-        let mut open = OpenReview::new(worktree(4), "a.rs");
+    fn uncommitted_comparison_uses_partial_eq() {
+        let mut open = OpenReview::new(uncommitted(4), "a.rs");
         open.begin_draft(Side::Postimage, 1, 1);
         open.commit("on checkout");
-        let kept = open.show(worktree(4), "b.rs");
+        let kept = open.show(uncommitted(4), "b.rs");
         assert!(kept.dock.is_none());
         assert!(kept.comments.is_empty());
         assert_eq!(open.review().comments.len(), 1);
 
-        let moved = open.show(worktree(5), "b.rs");
+        let moved = open.show(uncommitted(5), "b.rs");
         assert!(moved.comments.is_empty());
         assert!(moved.dock.is_none());
         assert!(open.review().comments.is_empty());
 
-        let mut open = OpenReview::new(worktree(4), "a.rs");
+        let mut open = OpenReview::new(uncommitted(4), "a.rs");
         open.begin_draft(Side::Postimage, 1, 1);
         open.commit("again");
-        let mut as_commit = worktree(4);
-        as_commit.worktree = false;
+        let mut as_commit = uncommitted(4);
+        as_commit.uncommitted = false;
         open.show(as_commit, "a.rs");
         assert!(open.review().comments.is_empty());
     }

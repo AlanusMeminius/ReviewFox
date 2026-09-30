@@ -56,11 +56,11 @@ pub struct AppView {
     /// In-memory MR Entry (list = GitLab commits; Comparison = diff_refs).
     mr_entry: Option<MrEntry>,
     /// Bumped on every scan start and every leave, so a late scan cannot repaint.
-    worktree_generation: u64,
+    uncommitted_generation: u64,
     /// Path scan is in flight. An empty list is not yet "clean checkout".
-    worktree_paths_pending: bool,
+    uncommitted_paths_pending: bool,
     /// Refresh scan failed. The previous path list stays on the island.
-    worktree_scan_error: Option<String>,
+    uncommitted_scan_error: Option<String>,
     /// MR kind held with no selected Entry (`Select MR…`); Comparison stays on Branch Browser.
     empty_mr: bool,
     /// Kind-switch restore in flight — failure clears to empty MR + picker.
@@ -137,9 +137,9 @@ impl AppView {
             branch_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_entry: None,
-            worktree_generation: 0,
-            worktree_paths_pending: false,
-            worktree_scan_error: None,
+            uncommitted_generation: 0,
+            uncommitted_paths_pending: false,
+            uncommitted_scan_error: None,
             empty_mr: false,
             pending_kind_restore: false,
             repo_menu: None,
@@ -431,37 +431,37 @@ impl AppView {
         }
     }
 
-    fn clear_worktree(&mut self) {
+    fn clear_uncommitted(&mut self) {
         if let MainState::Ready(loaded) = &mut self.state {
             loaded.uncover();
         }
-        self.worktree_paths_pending = false;
-        self.worktree_scan_error = None;
-        self.worktree_generation = self.worktree_generation.wrapping_add(1);
+        self.uncommitted_paths_pending = false;
+        self.uncommitted_scan_error = None;
+        self.uncommitted_generation = self.uncommitted_generation.wrapping_add(1);
     }
 
     /// HEAD is read here so the kind switches immediately. The workdir scan runs
     /// off the UI thread; a large checkout otherwise freezes the window.
-    fn spawn_worktree_paths(
+    fn spawn_uncommitted_paths(
         &mut self,
         repository: Repository,
         refresh: bool,
         cx: &mut Context<Self>,
     ) {
-        self.worktree_generation = self.worktree_generation.wrapping_add(1);
-        let generation = self.worktree_generation;
-        self.worktree_paths_pending = true;
-        self.worktree_scan_error = None;
+        self.uncommitted_generation = self.uncommitted_generation.wrapping_add(1);
+        let generation = self.uncommitted_generation;
+        self.uncommitted_paths_pending = true;
+        self.uncommitted_scan_error = None;
         cx.spawn(async move |this, cx| {
             let scanned = cx
                 .background_executor()
-                .spawn(async move { git::load_worktree(&repository) })
+                .spawn(async move { git::load_uncommitted(&repository) })
                 .await;
             this.update(cx, |this, cx| {
-                if this.worktree_generation != generation {
+                if this.uncommitted_generation != generation {
                     return;
                 }
-                this.worktree_paths_pending = false;
+                this.uncommitted_paths_pending = false;
                 match scanned {
                     Ok(entry) => {
                         if let MainState::Ready(loaded) = &mut this.state {
@@ -470,9 +470,9 @@ impl AppView {
                     }
                     Err(e) => {
                         if refresh {
-                            this.worktree_scan_error = Some(e.0);
+                            this.uncommitted_scan_error = Some(e.0);
                         } else {
-                            this.clear_worktree();
+                            this.clear_uncommitted();
                             this.state = MainState::Error(e.0);
                         }
                     }
@@ -486,7 +486,7 @@ impl AppView {
 
     /// Hold empty MR kind (`Select MR…`) and open the picker.
     fn enter_empty_mr(&mut self, cx: &mut Context<Self>) {
-        self.clear_worktree();
+        self.clear_uncommitted();
         self.branch_picker = None;
         self.mr_entry = None;
         self.empty_mr = true;
@@ -508,16 +508,16 @@ impl AppView {
         match entry_chrome::kind_switch_action(current, target, last_mr.as_ref()) {
             KindSwitchAction::Stay => {}
             KindSwitchAction::SelectBranch => {
-                self.clear_worktree();
+                self.clear_uncommitted();
                 self.branch_picker = None;
                 self.mr_picker = None;
                 self.empty_mr = false;
                 self.pending_kind_restore = false;
                 self.clear_mr_entry(cx);
             }
-            KindSwitchAction::SelectWorktree => self.enter_worktree(cx),
+            KindSwitchAction::SelectUncommitted => self.enter_uncommitted(cx),
             KindSwitchAction::RestoreMr(label) => {
-                self.clear_worktree();
+                self.clear_uncommitted();
                 self.branch_picker = None;
                 self.mr_picker = None;
                 self.begin_restore_mr(label, true, cx);
@@ -529,12 +529,12 @@ impl AppView {
         cx.notify();
     }
 
-    fn enter_worktree(&mut self, cx: &mut Context<Self>) {
+    fn enter_uncommitted(&mut self, cx: &mut Context<Self>) {
         let repository = match &self.state {
             MainState::Ready(loaded) => loaded.repository().clone(),
             MainState::Empty | MainState::Error(_) => return,
         };
-        let shell = match git::worktree_head(&repository) {
+        let shell = match git::uncommitted_head(&repository) {
             Ok(entry) => entry,
             Err(e) => {
                 self.state = MainState::Error(e.0);
@@ -546,7 +546,7 @@ impl AppView {
         if let MainState::Ready(loaded) = &mut self.state {
             loaded.cover(shell);
         }
-        self.spawn_worktree_paths(repository, false, cx);
+        self.spawn_uncommitted_paths(repository, false, cx);
         if self.mr_entry.is_some() {
             self.clear_mr_entry(cx);
         } else {
@@ -555,12 +555,12 @@ impl AppView {
         }
     }
 
-    fn refresh_worktree(&mut self, cx: &mut Context<Self>) {
+    fn refresh_uncommitted(&mut self, cx: &mut Context<Self>) {
         let repository = match &self.state {
             MainState::Ready(loaded) if loaded.covering() => loaded.repository().clone(),
             _ => return,
         };
-        self.spawn_worktree_paths(repository, true, cx);
+        self.spawn_uncommitted_paths(repository, true, cx);
         cx.notify();
     }
 
@@ -589,7 +589,7 @@ impl AppView {
                 self.branch_picker = None;
                 self.mr_picker = None;
                 self.mr_entry = None;
-                self.clear_worktree();
+                self.clear_uncommitted();
                 self.empty_mr = false;
                 self.pending_kind_restore = false;
                 self.restore_selected_entry(cx);
@@ -919,7 +919,7 @@ impl AppView {
     }
 
     fn open_branch(&mut self, name: &str, cx: &mut Context<Self>) {
-        self.clear_worktree();
+        self.clear_uncommitted();
         self.mr_entry = None;
         self.empty_mr = false;
         self.pending_kind_restore = false;
@@ -988,7 +988,7 @@ impl AppView {
         self.repo_menu = None;
         if removing_current {
             self.state = MainState::Empty;
-            self.clear_worktree();
+            self.clear_uncommitted();
             self.branch_picker = None;
             self.mr_picker = None;
             self.mr_entry = None;
@@ -1203,7 +1203,7 @@ impl AppView {
                     Ok(bb) => {
                         this.state = MainState::Ready(LoadedBrowser::install(bb));
                         this.mr_entry = None;
-                        this.clear_worktree();
+                        this.clear_uncommitted();
                         this.empty_mr = false;
                         this.pending_kind_restore = false;
                         this.mr_picker = None;
@@ -1286,7 +1286,7 @@ fn remember_diff_reopen_from_snapshot(snapshot: &DiffSnapshot) {
         base_oid: snapshot.comparison.base_oid.map(|o| o.to_string()),
         head_oid: snapshot.comparison.head_oid.to_string(),
         selected_path: snapshot.selected_path.clone(),
-        worktree: snapshot.comparison.worktree,
+        uncommitted: snapshot.comparison.uncommitted,
     });
 }
 
@@ -1300,7 +1300,7 @@ fn rebuild_diff_snapshot(reopen: &DiffReopen) -> Option<DiffSnapshot> {
         repository: Repository::new(reopen.repository.clone()),
         base_oid,
         head_oid,
-        worktree: reopen.worktree,
+        uncommitted: reopen.uncommitted,
     };
     let changed_paths = git::list_changed_paths_for(&comparison).ok()?;
     if changed_paths.is_empty() {
@@ -1929,7 +1929,7 @@ fn render_entry_chrome(
     let value_icon = match kind {
         EntryKind::Branch => "branch.svg",
         EntryKind::Mr => "gitlab.svg",
-        EntryKind::Worktree => "folder.svg",
+        EntryKind::Uncommitted => "folder.svg",
     };
 
     div()
@@ -1967,11 +1967,11 @@ fn render_entry_chrome(
                     ))
                 })
                 .child(entry_kind_hit(
-                    "entry-kind-worktree",
-                    "Worktree",
+                    "entry-kind-uncommitted",
+                    "Uncommitted",
                     "folder.svg",
-                    kind == EntryKind::Worktree,
-                    EntryKind::Worktree,
+                    kind == EntryKind::Uncommitted,
+                    EntryKind::Uncommitted,
                     cx,
                 )),
         )
@@ -1999,7 +1999,7 @@ fn render_entry_chrome(
                 .gap_1()
                 .overflow_hidden()
                 .when(hide_value, |d| d.opacity(0.))
-                .when(!hide_value && kind != EntryKind::Worktree, |d| {
+                .when(!hide_value && kind != EntryKind::Uncommitted, |d| {
                     d.hover(|d| d.bg(theme::capsule_track_hover()))
                 })
                 .child(
@@ -2013,12 +2013,12 @@ fn render_entry_chrome(
                     .absolute()
                     .size_full(),
                 )
-                .when(kind != EntryKind::Worktree, |d| {
+                .when(kind != EntryKind::Uncommitted, |d| {
                     d.cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| match kind {
                             EntryKind::Branch => this.toggle_branch_picker(cx),
                             EntryKind::Mr => this.toggle_mr_picker(cx),
-                            EntryKind::Worktree => {}
+                            EntryKind::Uncommitted => {}
                         }))
                 })
                 .when(kind == EntryKind::Mr && view.mr_entry.is_some(), |el| {
@@ -2027,7 +2027,7 @@ fn render_entry_chrome(
                         cx.listener(|this, _, _, cx| this.clear_mr_entry(cx)),
                     )
                 })
-                .when(kind == EntryKind::Worktree, |el| {
+                .when(kind == EntryKind::Uncommitted, |el| {
                     el.on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|this, _, _, cx| {
@@ -2052,7 +2052,7 @@ fn render_entry_chrome(
                         .text_color(theme::text())
                         .child(value),
                 )
-                .when(kind != EntryKind::Worktree, |d| {
+                .when(kind != EntryKind::Uncommitted, |d| {
                     d.child(
                         svg()
                             .size(theme::ICON_SIZE_SM)
@@ -2870,16 +2870,16 @@ fn picker_line(
 
 fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let mono = appearance::code_font(cx);
-    let worktree = view.covering();
+    let uncommitted = view.covering();
     let paths = view
         .loaded()
         .map(|loaded| loaded.changed_paths().to_vec())
         .unwrap_or_default();
     let can_open = view.can_open_diff();
-    let awaiting_paths = worktree && view.worktree_paths_pending && paths.is_empty();
-    let refresh_pending = worktree && view.worktree_paths_pending && !paths.is_empty();
-    let scan_error = if worktree {
-        view.worktree_scan_error.clone()
+    let awaiting_paths = uncommitted && view.uncommitted_paths_pending && paths.is_empty();
+    let refresh_pending = uncommitted && view.uncommitted_paths_pending && !paths.is_empty();
+    let scan_error = if uncommitted {
+        view.uncommitted_scan_error.clone()
     } else {
         None
     };
@@ -2892,7 +2892,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         }
         MrDetailState::Loading | MrDetailState::Failed(_) => None,
     });
-    let head_meta = if worktree {
+    let head_meta = if uncommitted {
         None
     } else {
         view.loaded()
@@ -2901,7 +2901,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let inset = px(theme::CHANGES_INSET);
     // Commit island is gone, so there is no Commit|Changes gap and no splitter.
     // Left edge is the Commit island's, which is also the kind pills' left edge.
-    let slot_w = if worktree {
+    let slot_w = if uncommitted {
         view.files_width
     } else {
         view.files_width + theme::CHANGES_SHADOW_GAP
@@ -2915,13 +2915,13 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .top(px(theme::CHANGES_TOP_INSET))
         .bottom(inset)
         .w(px(slot_w))
-        .when(worktree, |d| {
+        .when(uncommitted, |d| {
             d.left(px(theme::left_island_inset(!view.repos_collapsed)))
         })
-        .when(!worktree, |d| d.right(inset))
+        .when(!uncommitted, |d| d.right(inset))
         .flex()
         .flex_row()
-        .when(!worktree, |d| {
+        .when(!uncommitted, |d| {
             d.child(splitter::handle(
                 "files-resize-handle",
                 Axis::HorizontalTrailing,
@@ -2947,7 +2947,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                         .flex_none()
                         .pt_2()
                         .pl_3()
-                        .pr(px(if worktree { 64. } else { 36. }))
+                        .pr(px(if uncommitted { 64. } else { 36. }))
                         .pb_1()
                         .child(
                             div()
@@ -2967,7 +2967,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                         }),
                                 )
                                 .when(refresh_pending, |d| {
-                                    d.child(loading_row("worktree-loading-spin", "Loading", cx))
+                                    d.child(loading_row("uncommitted-loading-spin", "Loading", cx))
                                 }),
                         )
                         .child(
@@ -2977,7 +2977,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                 .right(px(8.))
                                 .flex()
                                 .gap_1()
-                                .when(worktree, |d| d.child(refresh_worktree_button(cx)))
+                                .when(uncommitted, |d| d.child(refresh_uncommitted_button(cx)))
                                 .child(open_diff_button(can_open, cx)),
                         ),
                 )
@@ -2994,13 +2994,13 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                 .when(awaiting_paths, |d| {
                     d.child(
                         div()
-                            .id("worktree-loading")
+                            .id("uncommitted-loading")
                             .flex_1()
                             .min_h(px(0.))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(loading_row("worktree-loading-spin", "Loading", cx)),
+                            .child(loading_row("uncommitted-loading-spin", "Loading", cx)),
                     )
                 })
                 .when(!awaiting_paths, |d| {
@@ -3400,9 +3400,9 @@ fn render_file_tree(
     )
 }
 
-fn refresh_worktree_button(cx: &mut Context<AppView>) -> impl IntoElement {
-    IconButton::new("refresh-worktree", "refresh.svg", "Refresh")
-        .on_click(cx.listener(|this, _, _, cx| this.refresh_worktree(cx)))
+fn refresh_uncommitted_button(cx: &mut Context<AppView>) -> impl IntoElement {
+    IconButton::new("refresh-uncommitted", "refresh.svg", "Refresh")
+        .on_click(cx.listener(|this, _, _, cx| this.refresh_uncommitted(cx)))
 }
 
 fn open_diff_button(enabled: bool, cx: &mut Context<AppView>) -> impl IntoElement {

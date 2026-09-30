@@ -123,7 +123,7 @@ impl BranchBrowser {
                 repository,
                 base_oid: None, // placeholder; set by fold
                 head_oid: commits[0].oid,
-                worktree: false,
+                uncommitted: false,
             },
             changed_paths: Vec::new(),
             branch,
@@ -217,7 +217,7 @@ impl BranchBrowser {
     pub fn set_comparison_oids(&mut self, base_oid: Option<Oid>, head_oid: Oid) -> Result<()> {
         self.comparison.base_oid = base_oid;
         self.comparison.head_oid = head_oid;
-        self.comparison.worktree = false;
+        self.comparison.uncommitted = false;
         let repo = open_repo(&self.comparison)?;
         self.changed_paths = list_changed_paths(&repo, &self.comparison)?;
         Ok(())
@@ -525,7 +525,7 @@ fn apply_range_fold(repo: &git2::Repository, bb: &mut BranchBrowser) -> Result<(
         repository: bb.comparison.repository.clone(),
         base_oid,
         head_oid,
-        worktree: false,
+        uncommitted: false,
     };
     bb.changed_paths = list_changed_paths(repo, &bb.comparison)?;
     Ok(())
@@ -604,7 +604,7 @@ fn head_branch_name(repo: &git2::Repository) -> String {
         .unwrap_or_else(|| "HEAD".into())
 }
 
-fn delta_status(delta: &git2::DiffDelta<'_>, worktree: bool) -> Option<PathStatus> {
+fn delta_status(delta: &git2::DiffDelta<'_>, uncommitted: bool) -> Option<PathStatus> {
     match delta.status() {
         git2::Delta::Added => Some(PathStatus::Add),
         git2::Delta::Deleted => Some(PathStatus::Delete),
@@ -612,10 +612,10 @@ fn delta_status(delta: &git2::DiffDelta<'_>, worktree: bool) -> Option<PathStatu
         | git2::Delta::Typechange
         | git2::Delta::Unreadable
         | git2::Delta::Unmodified => Some(PathStatus::Modify),
-        git2::Delta::Untracked if worktree => Some(PathStatus::Add),
-        git2::Delta::Conflicted if worktree => Some(PathStatus::Modify),
+        git2::Delta::Untracked if uncommitted => Some(PathStatus::Add),
+        git2::Delta::Conflicted if uncommitted => Some(PathStatus::Modify),
         // Copied/renamed shouldn't appear without find_similar; skip if they do.
-        // Ignored stays out. Untracked/conflicted only belong on a Worktree comparison.
+        // Ignored stays out. Untracked/conflicted only belong on an Uncommitted comparison.
         git2::Delta::Renamed
         | git2::Delta::Copied
         | git2::Delta::Ignored
@@ -642,7 +642,7 @@ pub fn list_changed_paths(
     comparison: &Comparison,
 ) -> Result<Vec<ChangedPath>> {
     let mut opts = git2::DiffOptions::new();
-    let diff = if comparison.worktree {
+    let diff = if comparison.uncommitted {
         opts.include_untracked(true);
         opts.recurse_untracked_dirs(true);
         opts.show_untracked_content(true);
@@ -677,7 +677,7 @@ pub fn list_changed_paths(
 
     diff.foreach(
         &mut |delta, _| {
-            let Some(status) = delta_status(&delta, comparison.worktree) else {
+            let Some(status) = delta_status(&delta, comparison.uncommitted) else {
                 return true;
             };
             let Some(path) = delta_path(&delta, status) else {
@@ -694,7 +694,7 @@ pub fn list_changed_paths(
         None,
         None,
         Some(&mut |delta, _hunk, line| {
-            let Some(status) = delta_status(&delta, comparison.worktree) else {
+            let Some(status) = delta_status(&delta, comparison.uncommitted) else {
                 return true;
             };
             let Some(path) = delta_path(&delta, status) else {
@@ -725,7 +725,7 @@ fn open_repo(comparison: &Comparison) -> Result<git2::Repository> {
     git2::Repository::open(comparison.repository.path()).map_err(map_git)
 }
 
-fn worktree_bytes(repo: &git2::Repository, path: &str) -> Result<Vec<u8>> {
+fn uncommitted_bytes(repo: &git2::Repository, path: &str) -> Result<Vec<u8>> {
     let Some(root) = repo.workdir() else {
         return Ok(Vec::new());
     };
@@ -737,7 +737,7 @@ fn worktree_bytes(repo: &git2::Repository, path: &str) -> Result<Vec<u8>> {
 }
 
 /// Checkout vs HEAD: on-disk net delta, plus unignored untracked files (ADR-0014).
-pub struct WorktreeEntry {
+pub struct UncommittedEntry {
     pub comparison: Comparison,
     pub changed_paths: Vec<ChangedPath>,
     pub checkout_label: String,
@@ -754,32 +754,32 @@ fn checkout_identity(repo: &git2::Repository) -> Result<(Oid, String)> {
     Ok((oid, checkout_label))
 }
 
-fn worktree_comparison(repository: &Repository, oid: Oid) -> Comparison {
+fn uncommitted_comparison(repository: &Repository, oid: Oid) -> Comparison {
     Comparison {
         repository: repository.clone(),
         base_oid: Some(oid),
         head_oid: oid,
-        worktree: true,
+        uncommitted: true,
     }
 }
 
-/// HEAD identity only. Path scan is `load_worktree` and must not run on the UI thread.
-pub fn worktree_head(repository: &Repository) -> Result<WorktreeEntry> {
+/// HEAD identity only. Path scan is `load_uncommitted` and must not run on the UI thread.
+pub fn uncommitted_head(repository: &Repository) -> Result<UncommittedEntry> {
     let repo = git2::Repository::open(repository.path()).map_err(map_git)?;
     let (oid, checkout_label) = checkout_identity(&repo)?;
-    Ok(WorktreeEntry {
-        comparison: worktree_comparison(repository, oid),
+    Ok(UncommittedEntry {
+        comparison: uncommitted_comparison(repository, oid),
         changed_paths: Vec::new(),
         checkout_label,
     })
 }
 
-pub fn load_worktree(repository: &Repository) -> Result<WorktreeEntry> {
+pub fn load_uncommitted(repository: &Repository) -> Result<UncommittedEntry> {
     let repo = git2::Repository::open(repository.path()).map_err(map_git)?;
     let (oid, checkout_label) = checkout_identity(&repo)?;
-    let comparison = worktree_comparison(repository, oid);
+    let comparison = uncommitted_comparison(repository, oid);
     let changed_paths = list_changed_paths(&repo, &comparison)?;
-    Ok(WorktreeEntry {
+    Ok(UncommittedEntry {
         comparison,
         changed_paths,
         checkout_label,
@@ -789,8 +789,8 @@ pub fn load_worktree(repository: &Repository) -> Result<WorktreeEntry> {
 /// Lines of the blob on `side` of `path` within the Comparison (1-based indexing for callers).
 pub fn side_lines(comparison: &Comparison, side: Side, path: &str) -> Result<Vec<String>> {
     let repo = open_repo(comparison)?;
-    let bytes = if comparison.worktree && side == Side::Postimage {
-        worktree_bytes(&repo, path)?
+    let bytes = if comparison.uncommitted && side == Side::Postimage {
+        uncommitted_bytes(&repo, path)?
     } else {
         let oid = match side {
             Side::Preimage => comparison.base_oid,
@@ -882,10 +882,10 @@ fn file_diff_inner(
         PathStatus::Add => Vec::new(),
         _ => blob_text_at(&repo, comparison.base_oid, path)?.unwrap_or_default(),
     };
-    let postimage_bytes = if comparison.worktree {
+    let postimage_bytes = if comparison.uncommitted {
         match status {
             PathStatus::Delete => Vec::new(),
-            _ => worktree_bytes(&repo, path)?,
+            _ => uncommitted_bytes(&repo, path)?,
         }
     } else {
         match status {
@@ -1160,7 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn worktree_lists_disk_against_head_not_the_index() {
+    fn uncommitted_lists_disk_against_head_not_the_index() {
         let dir = temp_repo();
         std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\nDIRTY\n").unwrap();
         std::fs::write(dir.join("new.txt"), "brand\n").unwrap();
@@ -1171,9 +1171,9 @@ mod tests {
         std::fs::write(dir.join("b.txt"), "new\n").unwrap();
 
         let bb = BranchBrowser::open(&dir).expect("open");
-        let shell = worktree_head(&bb.comparison.repository).expect("head");
+        let shell = uncommitted_head(&bb.comparison.repository).expect("head");
         assert!(shell.changed_paths.is_empty());
-        let wt = load_worktree(&bb.comparison.repository).expect("worktree");
+        let wt = load_uncommitted(&bb.comparison.repository).expect("uncommitted");
         assert_eq!(shell.comparison, wt.comparison);
         assert_eq!(shell.checkout_label, wt.checkout_label);
         let paths: Vec<&str> = wt.changed_paths.iter().map(|p| p.path.as_str()).collect();
@@ -1182,7 +1182,7 @@ mod tests {
         assert!(paths.contains(&".gitignore"));
         assert!(!paths.contains(&"skip.txt"));
         assert!(!paths.contains(&"b.txt"));
-        assert!(wt.comparison.label().ends_with("..worktree"));
+        assert!(wt.comparison.label().ends_with("..uncommitted"));
 
         match file_diff(
             &wt.comparison,

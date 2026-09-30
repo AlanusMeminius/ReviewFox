@@ -1,12 +1,12 @@
-//! Loaded Branch Browser, plus an optional Worktree cover.
+//! Loaded Branch Browser, plus an optional Uncommitted cover.
 //! The main window is the only caller. No UI, filesystem, or MR HTTP.
 
 use crate::domain::{ChangedPath, Comparison, Repository};
-use crate::git::{BranchBrowser, CommitInfo, WorktreeEntry};
+use crate::git::{BranchBrowser, CommitInfo, UncommittedEntry};
 
 pub struct LoadedBrowser {
     browser: BranchBrowser,
-    cover: Option<WorktreeEntry>,
+    cover: Option<UncommittedEntry>,
 }
 
 impl LoadedBrowser {
@@ -20,14 +20,14 @@ impl LoadedBrowser {
 
     pub fn comparison(&self) -> &Comparison {
         match &self.cover {
-            Some(worktree) => &worktree.comparison,
+            Some(uncommitted) => &uncommitted.comparison,
             None => &self.browser.comparison,
         }
     }
 
     pub fn changed_paths(&self) -> &[ChangedPath] {
         match &self.cover {
-            Some(worktree) => &worktree.changed_paths,
+            Some(uncommitted) => &uncommitted.changed_paths,
             None => &self.browser.changed_paths,
         }
     }
@@ -43,7 +43,7 @@ impl LoadedBrowser {
     pub fn checkout_label(&self) -> Option<&str> {
         self.cover
             .as_ref()
-            .map(|worktree| worktree.checkout_label.as_str())
+            .map(|uncommitted| uncommitted.checkout_label.as_str())
     }
 
     pub fn branch_name(&self) -> &str {
@@ -62,7 +62,7 @@ impl LoadedBrowser {
         &self.browser.comparison.repository
     }
 
-    pub fn cover(&mut self, shell: WorktreeEntry) {
+    pub fn cover(&mut self, shell: UncommittedEntry) {
         self.cover = Some(shell);
     }
 
@@ -70,8 +70,8 @@ impl LoadedBrowser {
         self.cover = None;
     }
 
-    /// Replaces the covering Worktree. Does nothing when uncovered.
-    pub fn replace_cover(&mut self, entry: WorktreeEntry) {
+    /// Replaces the covering Uncommitted. Does nothing when uncovered.
+    pub fn replace_cover(&mut self, entry: UncommittedEntry) {
         if self.cover.is_some() {
             self.cover = Some(entry);
         }
@@ -122,7 +122,7 @@ impl LoadedBrowser {
 mod tests {
     use super::LoadedBrowser;
     use crate::domain::{ChangedPath, Comparison, Oid, PathStatus, Repository};
-    use crate::git::{BranchBrowser, CommitInfo, WorktreeEntry};
+    use crate::git::{BranchBrowser, CommitInfo, UncommittedEntry};
     use std::path::PathBuf;
 
     fn oid(byte: u8) -> Oid {
@@ -138,7 +138,7 @@ mod tests {
             repository: repository(),
             base_oid: Some(oid(1)),
             head_oid: oid(2),
-            worktree: false,
+            uncommitted: false,
         }
     }
 
@@ -171,13 +171,13 @@ mod tests {
         }
     }
 
-    fn worktree(head: u8, paths: Vec<ChangedPath>, label: &str) -> WorktreeEntry {
-        WorktreeEntry {
+    fn uncommitted(head: u8, paths: Vec<ChangedPath>, label: &str) -> UncommittedEntry {
+        UncommittedEntry {
             comparison: Comparison {
                 repository: repository(),
                 base_oid: Some(oid(head)),
                 head_oid: oid(head),
-                worktree: true,
+                uncommitted: true,
             },
             changed_paths: paths,
             checkout_label: label.into(),
@@ -204,14 +204,14 @@ mod tests {
     }
 
     #[test]
-    fn cover_with_empty_paths_selects_the_worktree_and_keeps_the_browser() {
+    fn cover_with_empty_paths_selects_the_uncommitted_and_keeps_the_browser() {
         let mut loaded = LoadedBrowser::install(browser(vec![path("src/a.rs")]));
-        loaded.cover(worktree(9, Vec::new(), "feature"));
+        loaded.cover(uncommitted(9, Vec::new(), "feature"));
 
         assert!(loaded.covering());
         assert_eq!(loaded.checkout_label(), Some("feature"));
         assert_eq!(loaded.comparison().head_oid, oid(9));
-        assert!(loaded.comparison().worktree);
+        assert!(loaded.comparison().uncommitted);
         assert!(loaded.changed_paths().is_empty());
         assert!(!loaded.open_diff_allowed());
         assert_eq!(loaded.branch_name(), "main");
@@ -230,8 +230,8 @@ mod tests {
     #[test]
     fn replacing_the_cover_selects_the_new_head_and_allows_open_diff() {
         let mut loaded = LoadedBrowser::install(browser(Vec::new()));
-        loaded.cover(worktree(9, Vec::new(), "feature"));
-        let scanned = worktree(8, vec![path("src/b.rs")], "0808080");
+        loaded.cover(uncommitted(9, Vec::new(), "feature"));
+        let scanned = uncommitted(8, vec![path("src/b.rs")], "0808080");
         loaded.replace_cover(scanned);
 
         assert!(loaded.covering());
@@ -250,16 +250,16 @@ mod tests {
     }
 
     #[test]
-    fn select_commit_out_of_range_while_covered_leaves_the_worktree_selected() {
+    fn select_commit_out_of_range_while_covered_leaves_the_uncommitted_selected() {
         let mut loaded = LoadedBrowser::install(browser(vec![path("src/a.rs")]));
-        loaded.cover(worktree(9, Vec::new(), "feature"));
+        loaded.cover(uncommitted(9, Vec::new(), "feature"));
 
         let err = loaded.select_commit(9, false).expect_err("out of range");
         assert!(!err.to_string().is_empty());
 
         assert!(loaded.covering());
         assert_eq!(loaded.comparison().head_oid, oid(9));
-        assert!(loaded.comparison().worktree);
+        assert!(loaded.comparison().uncommitted);
         assert!(loaded.changed_paths().is_empty());
         assert_eq!(loaded.checkout_label(), Some("feature"));
         assert_eq!(loaded.branch_name(), "main");
@@ -271,9 +271,9 @@ mod tests {
     }
 
     #[test]
-    fn apply_mr_commits_with_no_commits_while_covered_leaves_the_worktree_selected() {
+    fn apply_mr_commits_with_no_commits_while_covered_leaves_the_uncommitted_selected() {
         let mut loaded = LoadedBrowser::install(browser(vec![path("src/a.rs")]));
-        loaded.cover(worktree(9, Vec::new(), "feature"));
+        loaded.cover(uncommitted(9, Vec::new(), "feature"));
 
         loaded
             .apply_mr_commits(Vec::new(), "not-used", "not-used")
@@ -281,7 +281,7 @@ mod tests {
 
         assert!(loaded.covering());
         assert_eq!(loaded.comparison().head_oid, oid(9));
-        assert!(loaded.comparison().worktree);
+        assert!(loaded.comparison().uncommitted);
         assert_eq!(loaded.branch_name(), "main");
         assert_eq!(
             loaded
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn uncover_selects_the_browser_comparison_again() {
         let mut loaded = LoadedBrowser::install(browser(vec![path("src/a.rs")]));
-        loaded.cover(worktree(9, Vec::new(), "feature"));
+        loaded.cover(uncommitted(9, Vec::new(), "feature"));
         loaded.uncover();
 
         assert!(!loaded.covering());

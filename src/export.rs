@@ -97,7 +97,7 @@ mod tests {
             repository: Repository::new(PathBuf::from("/tmp/repo")),
             base_oid: Some(Oid::from_bytes([1; 20])),
             head_oid: Oid::from_bytes([2; 20]),
-            worktree: false,
+            uncommitted: false,
         };
         let mut review = Review::new(comparison);
         // File anchor — no git needed for context
@@ -118,7 +118,7 @@ mod tests {
             repository: Repository::new(PathBuf::from("/tmp/repo")),
             base_oid: Some(Oid::from_bytes([1; 20])),
             head_oid: Oid::from_bytes([2; 20]),
-            worktree: false,
+            uncommitted: false,
         };
         assert!(export_review(&Review::new(comparison)).is_empty());
     }

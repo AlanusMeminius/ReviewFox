@@ -5,15 +5,15 @@ Local clipboard-oriented code review over a Git two-tree comparison: browse stru
 ## Language
 
 **Repository**:
-A local Git worktree root identified by its canonical absolute path (symlinks resolved).
-_Avoid_: project, clone, repo path (unspecified canonicalization), working copy
+A local Git worktree root identified by its canonical absolute path (symlinks resolved). Git's worktree is this checkout directory, not an Entry.
+_Avoid_: project, clone, repo path (unspecified canonicalization), working copy, Worktree
 
 **Workspace**:
-The user's current place in the app: which Repository is open and which single Entry is selected; not Comparison identity (OIDs). Survives relaunch as a set of Workspaces plus which one is last (persisted only; not a sidebar section) and which are pinned. Opening a Workspace restores its selected Entry, which is an MR Entry label when one is selected and Branch Browser otherwise; last is the Workspace opened on launch. The Worktree is not a persisted selected Entry, so an open never restores it. May also persist a last MR Entry label for return after the selected Entry is Branch Browser—that memory is not the selected Entry and does not drive Comparison until the user selects an MR Entry again.
+The user's current place in the app: which Repository is open and which single Entry is selected; not Comparison identity (OIDs). Survives relaunch as a set of Workspaces plus which one is last (persisted only; not a sidebar section) and which are pinned. Opening a Workspace restores its selected Entry, which is an MR Entry label when one is selected and Branch Browser otherwise; last is the Workspace opened on launch. Uncommitted is not a persisted selected Entry, so an open never restores it. May also persist a last MR Entry label for return after the selected Entry is Branch Browser—that memory is not the selected Entry and does not drive Comparison until the user selects an MR Entry again.
 _Avoid_: session, last opened (as a domain term), MRU, concurrent Entries, entry mode
 
 **Entry**:
-How the user arrives at a Comparison inside a Workspace: a Branch Browser selection, a forge Merge Request (MR) / Pull Request label, or the Worktree. Exactly one Entry is selected in a Workspace at a time. An MR Entry may carry read-only remote context—title, description, author, status, source/target branch labels, and forge check state (pipeline / approval)—to help understand the commits; that context is not Comparison identity and is never a publish target. Discussion threads are out of this context for now. MR Entries for a Repository are discovered from the forge (project MR list) and may also be opened by URL/IID; the Comparison OID pair for an MR Entry is the forge-reported diff pair (`diff_refs`), not branch-tip guesswork. Typical use: Branch Entry for reviewing one's own work, MR Entry for reviewing someone else's—capability is not restricted by that story.
+How the user arrives at a Comparison inside a Workspace: a Branch Browser selection, a forge Merge Request (MR) / Pull Request label, or Uncommitted. Exactly one Entry is selected in a Workspace at a time. An MR Entry may carry read-only remote context—title, description, author, status, source/target branch labels, and forge check state (pipeline / approval)—to help understand the commits; that context is not Comparison identity and is never a publish target. Discussion threads are out of this context for now. MR Entries for a Repository are discovered from the forge (project MR list) and may also be opened by URL/IID; the Comparison OID pair for an MR Entry is the forge-reported diff pair (`diff_refs`), not branch-tip guesswork. Typical use: Branch Entry for reviewing one's own work, MR Entry for reviewing someone else's—capability is not restricted by that story.
 _Avoid_: review mode, session mode, PR/MR as Comparison identity, workflow (as a domain type), published discussion, simultaneous selection of more than one Entry
 
 **Pin**:
@@ -21,16 +21,16 @@ A user-pinned Workspace shown in the Pin section and excluded from the Repositor
 _Avoid_: favorite, bookmark, starred
 
 **Comparison**:
-A reviewable surface identified by `(repository, base, head)`. For a commit Comparison, base and head are commit object IDs; the reviewable content is the trees those commits name. For a root commit there is no base commit, so the base is the empty tree (every path is an addition). For a Worktree Comparison, base is the checkout's HEAD commit and head is the Worktree (on-disk contents), not a commit object ID. The same repository and the same HEAD commit are the same Worktree Comparison; a new HEAD commit is a different one. Its label is the HEAD commit's short id and `worktree` (`e7a2ab7..worktree`), which is also the Export header; a branch name is not part of the label. Branch names and MR metadata are Entry labels, not identity. Diff is always over this two-tree pair (possibly folded from a commit selection), never “the MR” or a hash of the dirty checkout as another identity.
+A reviewable surface identified by `(repository, base, head)`. For a commit Comparison, base and head are commit object IDs; the reviewable content is the trees those commits name. For a root commit there is no base commit, so the base is the empty tree (every path is an addition). For an Uncommitted Comparison, base is the checkout's HEAD commit and head is the on-disk tree, not a commit object ID. The same repository and the same HEAD commit are the same Uncommitted Comparison; a new HEAD commit is a different one. Its label is the HEAD commit's short id and `uncommitted` (`e7a2ab7..uncommitted`), which is also the Export header; a branch name is not part of the label. Branch names and MR metadata are Entry labels, not identity. Diff is always over this two-tree pair (possibly folded from a commit selection), never “the MR” or a hash of the dirty checkout as another identity.
 _Avoid_: commit range (as identity), MR, branch tip (as identity), tree OID pair (as identity), per-commit review surface (as a second identity), content hash of the dirty checkout (as identity)
 
 **Branch Browser**:
-A read-only local branch/commit chooser that changes the displayed commit history and folds a default Comparison—without checking out or modifying the checkout. One kind of Entry into a Comparison; not the only Entry (MR labels, Worktree).
+A read-only local branch/commit chooser that changes the displayed commit history and folds a default Comparison—without checking out or modifying the checkout. One kind of Entry into a Comparison; not the only Entry (MR labels, Uncommitted).
 _Avoid_: branch switcher, checkout picker, the whole app shell, Comparison identity, LoadedComparison
 
-**Worktree**:
-An Entry for a Repository's current checkout against that checkout's HEAD: one on-disk surface (staged and unstaged together, unignored untracked paths as additions, gitignored paths omitted, unmerged paths as on-disk text), not the branch selected in the Branch Browser, and not a commit. Its Comparison is `(repository, that HEAD commit, the Worktree)`.
-_Avoid_: local changes, dirty files, working copy, unpushed commits, staged and unstaged as two review surfaces, conflict view
+**Uncommitted**:
+An Entry for a Repository's current checkout against that checkout's HEAD: one on-disk surface (staged and unstaged together, unignored untracked paths as additions, gitignored paths omitted, unmerged paths as on-disk text), not the branch selected in the Branch Browser, and not a commit. Its Comparison is `(repository, that HEAD commit, the on-disk tree)`.
+_Avoid_: worktree, working copy, local changes, dirty files, Changes, unpushed commits, staged and unstaged as two review surfaces, conflict view
 
 **Review**:
 A user's ongoing work against one Comparison, holding draft comments and surviving reopen of the same Comparison. Independent of whatever Entry currently drives the main window's Comparison until the user explicitly opens that Comparison for review again.

@@ -1,3 +1,5 @@
+Status: naming superseded by [ADR-0015](./0015-uncommitted-is-the-third-entry-kind.md). The behavior below stands; "Worktree" means Uncommitted.
+
 # Worktree is a third Entry kind
 
 Worktree sits on the exclusive kind track beside Branch and, when GitLab chrome applies, MR. The track is shown even when GitLab chrome is off, so a repository without a forge can still select Worktree (extends ADR-0011, which otherwise used a Branch-only pill in that case). The value pill names the checkout — branch name, or the short OID when HEAD is detached — and does not open a picker. Right-click returns to Branch Browser. There is no last-Worktree memory: the checkout is the only value. Opening a Workspace restores its selected MR Entry or Branch Browser, and does not restore the Worktree. The kind is not marked dirty while another Entry is selected; a background status read just to paint a badge was rejected.
