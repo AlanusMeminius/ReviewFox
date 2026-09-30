@@ -5,8 +5,8 @@ use crate::ui::theme;
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
-/// Settings nav sidebar shell: fixed 200px, 10px padding, sitting clear on the
-/// frosted desk; the content island beside it is the only boundary.
+/// Settings nav sidebar shell: fixed 200px, 10px padding, with a bounded
+/// backing so labels remain readable over the frosted desk.
 /// Focus, key context and actions live on the caller's wrapper.
 #[derive(IntoElement)]
 pub struct SettingsNav {
@@ -23,6 +23,7 @@ impl SettingsNav {
 
 impl RenderOnce for SettingsNav {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let palette = theme::software_palette();
         div()
             .flex()
             .flex_col()
@@ -30,7 +31,7 @@ impl RenderOnce for SettingsNav {
             .w(px(Self::WIDTH))
             .h_full()
             .p(px(10.))
-            .bg(theme::sidebar())
+            .bg(palette.settings.nav_backing)
             .overflow_hidden()
             .children(self.items)
     }
@@ -102,20 +103,23 @@ impl NavItem {
 
 impl RenderOnce for NavItem {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        // Selection is the white capsule alone (colour-only boundaries); the
-        // border only ever shows keyboard focus.
+        let palette = theme::software_palette();
+        let colors = palette.settings.nav_row;
+        let focused = self.focused;
         let border = if self.focused {
-            theme::border_focused()
+            palette.settings.focus_border
+        } else if self.selected {
+            colors.indicator
         } else {
             Rgba {
                 a: 0.,
-                ..theme::line()
+                ..colors.indicator
             }
         };
         let label_color = if self.selected {
-            theme::text()
+            palette.text.primary
         } else {
-            theme::muted()
+            palette.text.secondary
         };
         let label = div()
             .flex_1()
@@ -128,21 +132,39 @@ impl RenderOnce for NavItem {
 
         div()
             .id(self.id)
+            .relative()
             .flex()
             .flex_none()
             .items_center()
             .w_full()
             .h(px(28.))
             .gap_2()
-            .pl(px(2.))
+            // Left border grows 1→2→4px; compensate padding so the chevron
+            // and label keep the same x position in every state.
+            .pl(px(4.))
             .pr_1()
             // Same capsule as the main window's sidebar rows.
             .rounded_lg()
             .border_1()
             .border_color(border)
-            .when(self.selected, |row| row.bg(theme::capsule()))
+            .when(self.selected, |row| {
+                row.bg(colors.selected)
+                    .hover(move |row| row.bg(colors.selected_hover).border_l_2().pl(px(3.)))
+                    .active(move |row| row.bg(colors.selected_pressed).border_l_4().pl(px(1.)))
+            })
             .when(!self.selected, |row| {
-                row.hover(|row| row.bg(theme::settings_nav_hover()))
+                row.hover(move |row| {
+                    row.bg(colors.hover)
+                        .border_color(palette.text.secondary)
+                        .border_l_2()
+                        .pl(px(3.))
+                })
+                .active(move |row| {
+                    row.bg(colors.pressed)
+                        .border_color(colors.indicator)
+                        .border_l_4()
+                        .pl(px(1.))
+                })
             })
             .cursor_pointer()
             .font_family(appearance::ui_font(cx))
@@ -161,7 +183,7 @@ impl RenderOnce for NavItem {
                             .justify_center()
                             .size(px(16.))
                             .rounded(px(4.))
-                            .hover(|chevron| chevron.bg(theme::element_active()))
+                            .hover(move |chevron| chevron.bg(colors.pressed))
                             .when_some(self.on_toggle, |chevron, handler| {
                                 chevron.on_click(move |event, window, cx| {
                                     cx.stop_propagation();
@@ -176,7 +198,7 @@ impl RenderOnce for NavItem {
                                     } else {
                                         "chevron_right.svg"
                                     })
-                                    .text_color(theme::muted()),
+                                    .text_color(palette.text.secondary),
                             ),
                     )
                     .child(div().ui_label_size(14., cx).child(label)),
@@ -188,12 +210,25 @@ impl RenderOnce for NavItem {
                             .justify_center()
                             .w(px(22.))
                             .h_full()
-                            .child(div().w(px(1.)).h_full().bg(Rgba {
-                                a: 0.5,
-                                ..theme::line()
-                            })),
+                            .child(div().w(px(1.)).h_full().bg(palette.settings.divider)),
                     )
                     .child(div().ui_label_size(14., cx).child(label)),
             })
+            .child(
+                div()
+                    .absolute()
+                    .right(px(6.))
+                    .bottom(px(4.))
+                    .w(px(8.))
+                    .h(px(2.))
+                    .bg(if focused {
+                        palette.settings.focus_border
+                    } else {
+                        Rgba {
+                            a: 0.,
+                            ..palette.settings.focus_border
+                        }
+                    }),
+            )
     }
 }

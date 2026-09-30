@@ -61,6 +61,7 @@ impl SettingRow {
 
 impl RenderOnce for SettingRow {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let palette = theme::software_palette();
         div()
             .id(self.id)
             .flex()
@@ -77,7 +78,7 @@ impl RenderOnce for SettingRow {
                 } else {
                     row.pb(px(16.))
                         .border_b_1()
-                        .border_color(theme::border_variant())
+                        .border_color(palette.settings.divider)
                 }
             })
             .child(
@@ -94,7 +95,7 @@ impl RenderOnce for SettingRow {
                             .items_center()
                             .gap_1()
                             .ui_text_size(14., cx)
-                            .text_color(theme::text())
+                            .text_color(palette.text.primary)
                             .child(self.title)
                             .children(self.title_action),
                     )
@@ -102,7 +103,7 @@ impl RenderOnce for SettingRow {
                         left.child(
                             div()
                                 .ui_text_size(12., cx)
-                                .text_color(theme::muted())
+                                .text_color(palette.text.secondary)
                                 .child(description),
                         )
                     }),

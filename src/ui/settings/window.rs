@@ -633,7 +633,7 @@ impl SettingsView {
             .flex_1()
             .min_w(px(0.))
             .h_full()
-            .bg(theme::white())
+            .bg(theme::software_palette().settings.island)
             .rounded(px(theme::CHANGES_RADIUS))
             .overflow_hidden()
             // gpui clips the scrolling content to this rect, not to its radius, so
@@ -657,7 +657,7 @@ impl SettingsView {
                             .pt(px(8.))
                             .pb(px(12.))
                             .ui_text_size(16., cx)
-                            .text_color(theme::text())
+                            .text_color(theme::software_palette().text.primary)
                             .child(page.title),
                     )
                     .children(sections),
@@ -764,7 +764,7 @@ impl SettingsView {
                     .id("settings-gitlab-token-link")
                     .underline()
                     .cursor_pointer()
-                    .hover(|link| link.text_color(theme::text()))
+                    .hover(|link| link.text_color(theme::software_palette().text.primary))
                     .child(token_row::DESCRIPTION_LINK)
                     .on_click(move |_, _, cx| cx.open_url(&url)),
             )
@@ -850,7 +850,7 @@ impl SettingsView {
                     .pt(px(24.))
                     .ui_text_size(14., cx)
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme::text())
+                    .text_color(theme::software_palette().text.primary)
                     .child(group.title),
             )
             .child(render_family_row(group, controls, cx))
@@ -919,8 +919,8 @@ fn font_preview(lines: &'static [&'static str]) -> gpui::Div {
         .p(px(12.))
         .rounded(px(6.))
         .border_1()
-        .border_color(theme::border_variant())
-        .text_color(theme::text())
+        .border_color(theme::software_palette().settings.border)
+        .text_color(theme::software_palette().text.primary)
         .children(lines.iter().map(|&line| div().child(line)))
 }
 
@@ -976,13 +976,13 @@ impl Render for SettingsView {
             .flex_col()
             .size_full()
             .overflow_hidden()
-            // The window's one translucent layer; the nav and the gutters stay
-            // clear so it is not painted twice.
+            // The root tints the native material; the nav adds its own bounded
+            // backing so text contrast does not depend on the wallpaper.
             .bg(theme::frost())
             .font_family(appearance::ui_font(cx))
             // Unsized UI text inherits gpui's 1rem default (16px), scaled like the rest.
             .ui_text_size(16., cx)
-            .text_color(theme::text())
+            .text_color(theme::software_palette().text.primary)
             .child(render_titlebar(window))
             .child(
                 div()

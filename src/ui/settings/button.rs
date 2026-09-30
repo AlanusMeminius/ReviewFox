@@ -56,19 +56,19 @@ struct Colors {
 }
 
 impl ButtonStyle {
-    fn colors(self) -> Colors {
+    fn colors(self, palette: theme::ControlColors) -> Colors {
         let (background, border, hover, active) = match self {
             ButtonStyle::Subtle => (
                 transparent_black(),
                 transparent_black(),
-                theme::hover().into(),
-                theme::element_active().into(),
+                palette.hover.into(),
+                palette.pressed.into(),
             ),
             ButtonStyle::Outlined => (
                 transparent_black(),
-                theme::line().into(),
-                theme::hover().into(),
-                theme::element_active().into(),
+                palette.outline.into(),
+                palette.hover.into(),
+                palette.pressed.into(),
             ),
             // Zed darkens the tint on hover; the tint's own border color is that step.
             ButtonStyle::Tinted(TintColor::Success) => (
@@ -223,15 +223,20 @@ impl Button {
 
 impl RenderOnce for Button {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let colors = self.style.colors();
+        let palette = theme::software_palette();
+        let colors = self.style.colors(palette.control);
         let height = self.size.height();
         let icon_only = self.label.is_none();
         let (text_color, icon_color): (Hsla, Hsla) = if self.disabled {
-            (theme::faint().into(), theme::faint().into())
+            (
+                palette.settings.text_disabled.into(),
+                palette.settings.text_disabled.into(),
+            )
         } else {
             (
-                theme::text().into(),
-                self.icon_color.unwrap_or_else(|| theme::muted().into()),
+                palette.text.primary.into(),
+                self.icon_color
+                    .unwrap_or_else(|| palette.text.secondary.into()),
             )
         };
         let on_click = self.on_click.filter(|_| !self.disabled);
@@ -278,7 +283,7 @@ impl RenderOnce for Button {
                     .active(|button| button.bg(colors.active))
             })
             .when(focusable, |button| {
-                button.focus(|button| button.border_color(theme::border_focused()))
+                button.focus(|button| button.border_color(palette.settings.focus_border))
             })
             .when_some(self.tab_index, |button, index| button.tab_index(index))
             .when_some(self.focus_handle, |button, handle| {
@@ -304,7 +309,7 @@ impl RenderOnce for Button {
                 button.child(
                     div()
                         .ui_text_size(12., cx)
-                        .text_color(theme::muted())
+                        .text_color(palette.control.hint)
                         .child(hint),
                 )
             })

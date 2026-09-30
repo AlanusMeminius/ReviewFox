@@ -10,7 +10,7 @@ use gpui::{
     deferred, div, point, prelude::*, px, relative,
 };
 
-use super::{Button, ButtonSize, ButtonStyle};
+use super::{Button, ButtonSize, ButtonStyle, option_row::option_row};
 use crate::ui::appearance::{self, Appearance, UiTextSize};
 use crate::ui::code_theme::{self, CodeThemePairing, SoftwareThemeMode};
 use crate::ui::theme;
@@ -190,6 +190,7 @@ impl OptionsPicker {
     fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let trigger_bounds = self.trigger_bounds.clone();
         let list_context = format!("{}-list", self.id_prefix);
+        let palette = theme::software_palette();
         div()
             .id(self.element_id("popover"))
             .key_context(KeyContext::try_from(list_context.as_str()).unwrap())
@@ -200,14 +201,15 @@ impl OptionsPicker {
             .w(px(WIDTH))
             .overflow_hidden()
             .py_1()
-            .bg(theme::white())
+            .bg(palette.settings.popover)
             .border_1()
-            .border_color(theme::border_variant())
+            .border_color(palette.settings.border)
+            .focus(move |list| list.border_color(palette.settings.focus_border))
             .rounded(px(6.))
             .shadow_lg()
             .font_family(appearance::ui_font(cx))
             .ui_text_size(14., cx)
-            .text_color(theme::text())
+            .text_color(palette.text.primary)
             .on_action(cx.listener(|picker, _: &SelectPrev, _, cx| picker.nudge(-1, cx)))
             .on_action(cx.listener(|picker, _: &SelectNext, _, cx| picker.nudge(1, cx)))
             .on_action(cx.listener(|picker, _: &Confirm, window, cx| picker.confirm(window, cx)))
@@ -234,25 +236,7 @@ impl OptionsPicker {
                     .id(ix)
                     .px_1()
                     .h(px(ROW_HEIGHT))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .size_full()
-                            .px_2()
-                            .rounded(px(4.))
-                            .cursor_pointer()
-                            .when(selected, |row| row.bg(theme::element_active()))
-                            .when(!selected, |row| row.hover(|row| row.bg(theme::hover())))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .child(label),
-                            ),
-                    )
+                    .child(option_row(("option", ix), selected, label))
                     .on_click(cx.listener(move |picker, _, window, cx| {
                         picker.selected = ix;
                         picker.confirm(window, cx);

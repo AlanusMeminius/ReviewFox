@@ -1,4 +1,4 @@
-use gpui::{App, Rgba, SharedString, Window, div, prelude::*, px};
+use gpui::{App, SharedString, Window, div, prelude::*, px};
 
 use crate::ui::{appearance, theme};
 
@@ -19,6 +19,7 @@ impl SectionHeader {
 
 impl RenderOnce for SectionHeader {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let palette = theme::software_palette();
         div()
             .flex()
             .flex_col()
@@ -28,12 +29,9 @@ impl RenderOnce for SectionHeader {
                 div()
                     .font_family(appearance::code_font(cx))
                     .text_size(px(12.))
-                    .text_color(theme::muted())
+                    .text_color(palette.text.secondary)
                     .child(self.label),
             )
-            .child(div().w_full().h(px(1.)).bg(Rgba {
-                a: 0.6,
-                ..theme::line()
-            }))
+            .child(div().w_full().h(px(1.)).bg(palette.settings.divider))
     }
 }

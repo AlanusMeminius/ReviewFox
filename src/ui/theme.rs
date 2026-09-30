@@ -16,6 +16,69 @@ pub struct SoftwarePalette {
     pub scrollbar: ScrollbarColors,
     pub sidebar_row: SidebarRowColors,
     pub tree: TreeColors,
+    pub settings: SettingsColors,
+    pub control: ControlColors,
+    pub tooltip: TooltipColors,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub window_control: WindowControlColors,
+}
+
+#[derive(Clone, Copy)]
+pub struct SettingsColors {
+    pub nav_backing: Rgba,
+    pub island: Rgba,
+    pub card: Rgba,
+    pub popover: Rgba,
+    pub border: Rgba,
+    pub divider: Rgba,
+    pub focus_border: Rgba,
+    pub text_disabled: Rgba,
+    pub nav_row: SettingsRowColors,
+    pub option_row: SettingsRowColors,
+}
+
+#[derive(Clone, Copy)]
+pub struct SettingsRowColors {
+    pub hover: Rgba,
+    pub pressed: Rgba,
+    pub selected: Rgba,
+    pub selected_hover: Rgba,
+    pub selected_pressed: Rgba,
+    pub indicator: Rgba,
+}
+
+#[derive(Clone, Copy)]
+pub struct ControlColors {
+    pub idle: Rgba,
+    pub hover: Rgba,
+    pub pressed: Rgba,
+    pub selected: Rgba,
+    pub selected_hover: Rgba,
+    pub selected_pressed: Rgba,
+    pub outline: Rgba,
+    pub disabled_surface: Rgba,
+    pub disabled_icon: Rgba,
+    pub disabled_outline: Rgba,
+    pub hint: Rgba,
+}
+
+#[derive(Clone, Copy)]
+pub struct TooltipColors {
+    pub surface: Rgba,
+    pub text: Rgba,
+    pub shortcut: Rgba,
+}
+
+#[derive(Clone, Copy)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub struct WindowControlColors {
+    pub idle: Rgba,
+    pub hover: Rgba,
+    pub pressed: Rgba,
+    pub icon: Rgba,
+    pub close_hover: Rgba,
+    pub close_pressed: Rgba,
+    pub close_icon: Rgba,
 }
 
 #[derive(Clone, Copy)]
@@ -109,6 +172,59 @@ pub struct TreeRowColors {
 pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
     match mode {
         SoftwareThemeMode::Light => SoftwarePalette {
+            control: ControlColors {
+                idle: rgb(0xf4f5f7),
+                hover: rgb(0xe9ebef),
+                pressed: rgb(0xdde3ec),
+                selected: rgb(0xdce8f8),
+                selected_hover: rgb(0xd1e1f7),
+                selected_pressed: rgb(0xc3d9f4),
+                outline: rgb(0x7c8798),
+                disabled_surface: rgb(0xd0d7e2),
+                disabled_icon: rgb(0x657184),
+                disabled_outline: rgb(0x536073),
+                hint: rgb(0x4b5669),
+            },
+            tooltip: TooltipColors {
+                surface: rgb(0x273142),
+                text: rgb(0xffffff),
+                shortcut: rgb(0xc5cfde),
+            },
+            window_control: WindowControlColors {
+                idle: rgb(0xf4f5f7),
+                hover: rgb(0xdde3ec),
+                pressed: rgb(0xc3d9f4),
+                icon: rgb(0x4b5669),
+                close_hover: rgb(0xb42318),
+                close_pressed: rgb(0x8d1c14),
+                close_icon: rgb(0xffffff),
+            },
+            settings: SettingsColors {
+                nav_backing: gpui::rgba(0xf4f5f7f5),
+                island: rgb(0xffffff),
+                card: rgb(0xf4f5f7),
+                popover: rgb(0xffffff),
+                border: rgb(0x7c8798),
+                divider: rgb(0xc3c9d3),
+                focus_border: rgb(0x2457d6),
+                text_disabled: rgb(0x596579),
+                nav_row: SettingsRowColors {
+                    hover: rgb(0xe9ebef),
+                    pressed: rgb(0xdde3ec),
+                    selected: rgb(0xdce8f8),
+                    selected_hover: rgb(0xd1e1f7),
+                    selected_pressed: rgb(0xc3d9f4),
+                    indicator: rgb(0x596579),
+                },
+                option_row: SettingsRowColors {
+                    hover: rgb(0xe9ebef),
+                    pressed: rgb(0xdde3ec),
+                    selected: rgb(0xdce8f8),
+                    selected_hover: rgb(0xd1e1f7),
+                    selected_pressed: rgb(0xc3d9f4),
+                    indicator: rgb(0x2457d6),
+                },
+            },
             surface: SurfaceColors {
                 window_backing: window_backing(mode),
                 sidebar_backing: gpui::rgba(0xf4f5f7e6),
@@ -181,6 +297,59 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             },
         },
         SoftwareThemeMode::Dark => SoftwarePalette {
+            control: ControlColors {
+                idle: rgb(0x1d2027),
+                hover: rgb(0x414a59),
+                pressed: rgb(0x4a5669),
+                selected: rgb(0x344a65),
+                selected_hover: rgb(0x3b5574),
+                selected_pressed: rgb(0x435f81),
+                outline: rgb(0x8993a3),
+                disabled_surface: rgb(0x343b47),
+                disabled_icon: rgb(0x96a1b0),
+                disabled_outline: rgb(0xb8c4d4),
+                hint: rgb(0xd5dae3),
+            },
+            tooltip: TooltipColors {
+                surface: rgb(0x39475b),
+                text: rgb(0xffffff),
+                shortcut: rgb(0xd5dae3),
+            },
+            window_control: WindowControlColors {
+                idle: rgb(0x1d2027),
+                hover: rgb(0x414a59),
+                pressed: rgb(0x4a5669),
+                icon: rgb(0xc5cfde),
+                close_hover: rgb(0xb42318),
+                close_pressed: rgb(0x8d1c14),
+                close_icon: rgb(0xffffff),
+            },
+            settings: SettingsColors {
+                nav_backing: gpui::rgba(0x1d2027e6),
+                island: rgb(0x30343d),
+                card: rgb(0x343b47),
+                popover: rgb(0x30343d),
+                border: rgb(0x8993a3),
+                divider: rgb(0x596579),
+                focus_border: rgb(0x89c7f7),
+                text_disabled: rgb(0xaeb7c5),
+                nav_row: SettingsRowColors {
+                    hover: rgb(0x343b47),
+                    pressed: rgb(0x3e4654),
+                    selected: rgb(0x344a65),
+                    selected_hover: rgb(0x3b5574),
+                    selected_pressed: rgb(0x435f81),
+                    indicator: rgb(0xaeb7c5),
+                },
+                option_row: SettingsRowColors {
+                    hover: rgb(0x414a59),
+                    pressed: rgb(0x4a5669),
+                    selected: rgb(0x344a65),
+                    selected_hover: rgb(0x3b5574),
+                    selected_pressed: rgb(0x435f81),
+                    indicator: rgb(0x89c7f7),
+                },
+            },
             surface: SurfaceColors {
                 window_backing: window_backing(mode),
                 sidebar_backing: gpui::rgba(0x1d202780),
@@ -657,6 +826,7 @@ pub fn error_border() -> Rgba {
 }
 /// Settings nav row under the pointer: a half-step toward the white
 /// [`capsule`] that marks the selected row, so hover never reads as selection.
+#[allow(dead_code)] // Compatibility helper until ticket 09 retires old color accessors.
 pub fn settings_nav_hover() -> Rgba {
     if crate::ui::code_theme::is_dark() {
         Rgba {
@@ -972,6 +1142,126 @@ mod software_palette_tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn settings_and_shared_controls_are_readable_on_their_actual_surfaces() {
+        for mode in [SoftwareThemeMode::Light, SoftwareThemeMode::Dark] {
+            let palette = resolve_software_palette(mode);
+            let settings = palette.settings;
+            for wallpaper in [rgb(0x000000), rgb(0xffffff)] {
+                let root = composite(palette.surface.window_backing, wallpaper);
+                let nav = composite(settings.nav_backing, root);
+                for (name, surface) in [
+                    ("nav", nav),
+                    ("island", settings.island),
+                    ("card", settings.card),
+                    ("popover", settings.popover),
+                    ("control idle", palette.control.idle),
+                    ("control hover", palette.control.hover),
+                    ("control pressed", palette.control.pressed),
+                    ("control selected", palette.control.selected),
+                    ("control selected hover", palette.control.selected_hover),
+                    ("control selected pressed", palette.control.selected_pressed),
+                ] {
+                    for (text_name, text) in [
+                        ("primary", palette.text.primary),
+                        ("secondary", palette.text.secondary),
+                    ] {
+                        let target = if name.starts_with("control ") && text_name == "secondary" {
+                            3.
+                        } else {
+                            4.5
+                        };
+                        assert!(
+                            contrast(text, surface) >= target,
+                            "{mode:?} {text_name} on {name}: {}",
+                            contrast(text, surface)
+                        );
+                    }
+                    if name.starts_with("control ") {
+                        assert!(
+                            contrast(palette.control.hint, surface) >= 4.5,
+                            "{mode:?} control hint on {name}"
+                        );
+                    }
+                }
+                for (name, rows, idle) in [
+                    ("nav row", settings.nav_row, nav),
+                    ("option row", settings.option_row, settings.popover),
+                ] {
+                    for (state, fill) in [
+                        ("idle", idle),
+                        ("hover", rows.hover),
+                        ("pressed", rows.pressed),
+                        ("selected", rows.selected),
+                        ("selected hover", rows.selected_hover),
+                        ("selected pressed", rows.selected_pressed),
+                    ] {
+                        assert!(
+                            contrast(palette.text.primary, fill) >= 4.5,
+                            "{mode:?} {name} {state} primary text"
+                        );
+                        let secondary_target =
+                            if name == "nav row" && !state.starts_with("selected") {
+                                4.5
+                            } else {
+                                3.
+                            };
+                        assert!(
+                            contrast(palette.text.secondary, fill) >= secondary_target,
+                            "{mode:?} {name} {state} secondary icon/text"
+                        );
+                    }
+                    for fill in [rows.selected, rows.selected_hover, rows.selected_pressed] {
+                        assert!(
+                            contrast(rows.indicator, fill) >= 3.,
+                            "{mode:?} {name} selected indicator"
+                        );
+                    }
+                    if name == "nav row" {
+                        assert!(contrast(settings.focus_border, rows.selected) >= 3.);
+                        assert!(contrast(settings.focus_border, rows.selected_hover) >= 3.);
+                        assert!(contrast(settings.focus_border, rows.selected_pressed) >= 3.);
+                    }
+                    assert!(contrast(palette.text.secondary, rows.hover) >= 3.);
+                    assert!(contrast(rows.indicator, rows.pressed) >= 3.);
+                }
+                for surface in [settings.island, settings.card, settings.popover] {
+                    assert!(contrast(settings.border, surface) >= 3.);
+                    assert!(contrast(settings.focus_border, surface) >= 3.);
+                    assert!(contrast(palette.control.outline, surface) >= 3.);
+                    assert!(contrast(settings.text_disabled, surface) >= 4.5);
+                }
+                assert!(
+                    contrast(
+                        palette.control.disabled_icon,
+                        palette.control.disabled_surface
+                    ) >= 3.
+                );
+                assert!(
+                    contrast(
+                        palette.control.disabled_outline,
+                        palette.control.disabled_surface
+                    ) >= 3.,
+                    "{mode:?} disabled outline on disabled control surface"
+                );
+                assert!(
+                    contrast(palette.control.disabled_surface, palette.control.idle) >= 1.2,
+                    "{mode:?} disabled control backing must be distinguishable from enabled idle"
+                );
+            }
+            let tooltip = palette.tooltip;
+            assert!(contrast(tooltip.text, tooltip.surface) >= 4.5);
+            assert!(contrast(tooltip.shortcut, tooltip.surface) >= 4.5);
+            let caption = palette.window_control;
+            for surface in [caption.idle, caption.hover, caption.pressed] {
+                assert!(contrast(caption.icon, surface) >= 3.);
+            }
+            for surface in [caption.close_hover, caption.close_pressed] {
+                assert!(contrast(caption.close_icon, surface) >= 3.);
             }
         }
     }

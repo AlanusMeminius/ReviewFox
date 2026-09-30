@@ -10,6 +10,7 @@ use gpui::{
 };
 
 use super::font_list::FontList;
+use super::option_row::option_row;
 use super::{Button, ButtonSize, ButtonStyle};
 use crate::ui::appearance::{self, Appearance, Family, FontRole, UiTextSize};
 use crate::ui::scrollbar;
@@ -243,6 +244,7 @@ impl FontPicker {
     }
 
     fn render_popover(&self, popover: &Popover, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = theme::software_palette();
         let (_, scrollbar) = scrollbar::vertical(self.scrollbar_id.clone(), cx);
         let count = popover.list.len();
         let trigger_bounds = self.trigger_bounds.clone();
@@ -252,7 +254,7 @@ impl FontPicker {
                 .px_2()
                 .py(px(6.))
                 .ui_text_size(14., cx)
-                .text_color(theme::muted())
+                .text_color(palette.text.secondary)
                 .child("No matches")
                 .into_any_element()
         } else {
@@ -276,15 +278,16 @@ impl FontPicker {
             .flex_col()
             .w(px(WIDTH))
             .overflow_hidden()
-            .bg(theme::white())
+            .bg(palette.settings.popover)
             .border_1()
-            .border_color(theme::border_variant())
+            .border_color(palette.settings.border)
+            .focus(move |list| list.border_color(palette.settings.focus_border))
             .rounded(px(6.))
             .shadow_lg()
             // Deferred content does not inherit the window's text style.
             .font_family(appearance::ui_font(cx))
             .ui_text_size(14., cx)
-            .text_color(theme::text())
+            .text_color(palette.text.primary)
             .on_action(
                 cx.listener(|picker, _: &SelectPrev, _, cx| {
                     picker.select(cx, FontList::select_prev)
@@ -315,7 +318,7 @@ impl FontPicker {
                 div()
                     .flex_none()
                     .border_b_1()
-                    .border_color(theme::border_variant())
+                    .border_color(palette.settings.divider)
                     .child(popover.search.clone()),
             )
             .child(
@@ -348,25 +351,7 @@ impl FontPicker {
                         .id(ix)
                         .px_1()
                         .h(px(ROW_HEIGHT))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .size_full()
-                                .px_2()
-                                .rounded(px(4.))
-                                .cursor_pointer()
-                                .when(selected, |row| row.bg(theme::element_active()))
-                                .when(!selected, |row| row.hover(|row| row.bg(theme::hover())))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .whitespace_nowrap()
-                                        .child(name),
-                                ),
-                        )
+                        .child(option_row(("font-option", ix), selected, name))
                         .on_click(cx.listener(move |picker, _, window, cx| {
                             if let Some(popover) = &mut picker.popover {
                                 popover.list.select(ix);

@@ -68,13 +68,15 @@ impl IconButton {
 
 impl RenderOnce for IconButton {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let palette = theme::software_palette();
         let color = if self.disabled {
-            theme::faint()
+            palette.control.disabled_icon
         } else if self.pressed {
-            theme::accent()
+            palette.field.focused_border
         } else {
-            theme::muted()
+            palette.text.secondary
         };
+        let pressed = self.pressed;
         let enabled = !self.disabled;
         div()
             .id(self.id)
@@ -85,12 +87,42 @@ impl RenderOnce for IconButton {
             .items_center()
             .justify_center()
             .rounded_md()
-            .when(self.pressed, |button| button.bg(theme::range()))
+            // Reserve the outline in every state so the disabled cue does not
+            // move the glyph or change the button's size.
+            .border_1()
+            .border_color(if self.disabled {
+                palette.control.disabled_outline
+            } else {
+                gpui::Rgba {
+                    a: 0.,
+                    ..palette.control.disabled_outline
+                }
+            })
+            .bg(if self.disabled {
+                palette.control.disabled_surface
+            } else {
+                palette.control.idle
+            })
+            .when(pressed && enabled, |button| {
+                button.bg(palette.control.selected)
+            })
             .tooltip(Tooltip::text(self.tooltip, self.shortcut))
             .when(enabled, |button| {
                 button
-                    .hover(|button| button.bg(theme::hover()))
-                    .active(|button| button.bg(theme::element_active()))
+                    .hover(move |button| {
+                        button.bg(if pressed {
+                            palette.control.selected_hover
+                        } else {
+                            palette.control.hover
+                        })
+                    })
+                    .active(move |button| {
+                        button.bg(if pressed {
+                            palette.control.selected_pressed
+                        } else {
+                            palette.control.pressed
+                        })
+                    })
             })
             .when_some(self.on_click.filter(|_| enabled), |button, handler| {
                 button

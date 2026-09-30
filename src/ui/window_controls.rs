@@ -5,7 +5,8 @@
 
 #[cfg(target_os = "windows")]
 use gpui::{
-    Div, InteractiveElement, ParentElement, Styled, Window, WindowControlArea, div, px, rgb,
+    Div, InteractiveElement, ParentElement, StatefulInteractiveElement, Styled, Window,
+    WindowControlArea, div, px,
 };
 #[cfg(not(target_os = "windows"))]
 use gpui::{Div, Window};
@@ -16,6 +17,7 @@ use super::theme;
 /// Minimize / maximize / close, laid out left to right; caller places them in the corner.
 #[cfg(target_os = "windows")]
 pub fn window_controls(window: &Window) -> Vec<gpui::Stateful<Div>> {
+    let colors = theme::software_palette().window_control;
     let maximize_glyph = if window.is_maximized() {
         "\u{e923}"
     } else {
@@ -38,16 +40,26 @@ pub fn window_controls(window: &Window) -> Vec<gpui::Stateful<Div>> {
             .justify_center()
             .font_family("Segoe Fluent Icons")
             .text_size(px(10.))
-            .text_color(theme::muted())
+            .bg(colors.idle)
+            .text_color(colors.icon)
             .window_control_area(area)
             // Blocks the hit test from reaching the root's focus hitbox, whose mouse-down
             // listener calls `prevent_default` and makes Windows treat the click as consumed.
             .occlude()
             .hover(move |button| {
                 if area == WindowControlArea::Close {
-                    button.bg(rgb(0xe5484d)).text_color(rgb(0xffffff))
+                    button.bg(colors.close_hover).text_color(colors.close_icon)
                 } else {
-                    button.bg(rgb(0xe2e5e9))
+                    button.bg(colors.hover)
+                }
+            })
+            .active(move |button| {
+                if area == WindowControlArea::Close {
+                    button
+                        .bg(colors.close_pressed)
+                        .text_color(colors.close_icon)
+                } else {
+                    button.bg(colors.pressed)
                 }
             })
             .child(glyph)

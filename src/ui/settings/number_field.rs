@@ -143,6 +143,7 @@ impl EventEmitter<NumberFieldEvent> for NumberField {}
 impl Render for NumberField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+        let palette = theme::software_palette();
         div()
             .id(self.id.clone())
             .key_context(CONTEXT)
@@ -153,12 +154,12 @@ impl Render for NumberField {
             .gap(px(2.))
             .h(px(28.))
             .p(px(2.))
-            .bg(theme::white())
+            .bg(palette.field.surface)
             .border_1()
             .border_color(if focused {
-                theme::border_focused()
+                palette.settings.focus_border
             } else {
-                theme::line()
+                palette.settings.border
             })
             .rounded(px(6.))
             .on_action(cx.listener(|field, _: &StepUp, _, cx| field.step(true, cx)))
