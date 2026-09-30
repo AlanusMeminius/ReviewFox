@@ -2,6 +2,7 @@
 mod app_icon;
 mod app_view;
 mod appearance;
+mod code_theme;
 mod diff;
 mod diff_window;
 mod entry_chrome;
@@ -130,7 +131,7 @@ pub fn run() {
             // Compile highlight queries off the UI thread before the first open.
             cx.background_spawn(async {
                 crate::syntax::warm();
-                let _ = theme::syntax_colors();
+                let _ = code_theme::capture_colors(&code_theme::active());
             })
             .detach();
             #[cfg(target_os = "macos")]

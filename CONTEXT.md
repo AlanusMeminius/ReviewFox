@@ -79,3 +79,15 @@ _Avoid_: app font, system font, sans font
 **Code Font**:
 The user-chosen family and size for code: Diff text, Diff line numbers and monospace chrome/meta text (hashes, paths, section headers). Only Diff text follows its size; per-pane A−/A+ override that size for the session only.
 _Avoid_: mono font, buffer font, editor font, diff font (as a separate setting)
+
+**Software Theme**:
+The light or dark appearance of the application chrome: sidebar, settings, and the window material.
+_Avoid_: dark mode (as a name for code colors), Code Theme
+
+**Code Theme**:
+One palette for Diff code: the paper behind unchanged lines, the line-number color, syntax foregrounds, the band fills behind added, deleted, and replaced lines (including the stronger mark on words that differ inside a replace), search-hit marks, the selection wash, and comment markers. A light theme and a dark theme that share a name are two Code Themes; that shared name is not something the user selects.
+_Avoid_: theme family, brand (as a selectable object), color scheme pair, Software Theme
+
+**Code Theme Pairing**:
+Which Code Theme is in effect while the Software Theme is light, and which is in effect while it is dark. The two choices are independent.
+_Avoid_: theme family, pairing by shared name

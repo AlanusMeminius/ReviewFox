@@ -25,7 +25,9 @@ use super::visual_wrap::WrapSide;
 use super::wrap::{clip_runs_to_display_segment, display_row_segments};
 use crate::domain::Side;
 use crate::syntax::Span;
+use crate::ui::code_theme::{self, ResolvedCodeTheme};
 use crate::ui::scrollbar::{self, ThumbGeom};
+#[cfg(test)]
 use crate::ui::theme;
 
 pub(super) const LN_FONT_PX: f32 = 10.;
@@ -49,12 +51,6 @@ const EDGE_W: f32 = 1.;
 /// How far a culled bridge's tab reaches into the middle gutter; also its corner radius.
 const TAB_W: f32 = 3.;
 const DRAFTING_BG: u32 = 0xdbe4ff;
-/// Non-current search hit (`--hit` in find-capsule prototype).
-const SEARCH_HIT_BG: u32 = 0xffe08a;
-/// Current search hit (`--hit-cur`).
-const SEARCH_HIT_CUR_BG: u32 = 0xffc53d;
-/// Outline on the current hit (`box-shadow: 0 0 0 1px #e6a800`).
-const SEARCH_HIT_CUR_RING: u32 = 0xe6a800;
 
 /// Current Diff find occurrence for paint (side + line + byte range).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -409,6 +405,8 @@ pub struct Frame {
     bridges: Vec<WinBridge>,
     /// Omission separator joins: (preimage y, postimage y), window.
     waves: Vec<(f32, f32)>,
+    /// One resolved Code Theme for both sides of this frame.
+    code_theme: ResolvedCodeTheme,
     /// Frame-trace numbers (zeros unless `REVIEWFOX_FRAME_TRACE=1`).
     pub(super) stats: FrameStats,
 }
@@ -426,6 +424,7 @@ pub(super) struct FrameInput<'a> {
     pub scale: f32,
     pub decorations: Decorations,
     pub bars: &'a BarState,
+    pub code_theme: ResolvedCodeTheme,
 }
 
 /// Shape and place the visible rows of both sides; evict far cache entries.
@@ -445,7 +444,15 @@ pub(super) fn build_frame(
         scale,
         decorations,
         bars,
+        code_theme,
     } = input;
+    // Queries are compiled beside the first highlight. Recolor here only once
+    // a side already has spans, so a plain first paint does not compile them.
+    let capture_colors = if highlights.iter().any(|side| side.is_some()) {
+        code_theme::capture_colors(&code_theme)
+    } else {
+        Vec::new()
+    };
     let search_pulse = decorations.search_pulse;
     let t_build = trace::start();
     let mut stats = FrameStats::default();
@@ -481,7 +488,17 @@ pub(super) fn build_frame(
             let Some(row) = rows.row(i) else { continue };
             let shape = shapes.rows.entry((side, i as u32)).or_insert_with(|| {
                 let t = trace::start();
-                let shape = shape_row(layout, side, row, side_spans, font_px, code_family, window);
+                let shape = shape_row(
+                    layout,
+                    side,
+                    row,
+                    side_spans,
+                    font_px,
+                    code_family,
+                    &code_theme,
+                    &capture_colors,
+                    window,
+                );
                 stats.shaped += 1;
                 stats.shape += trace::since(t);
                 shape
@@ -574,7 +591,7 @@ pub(super) fn build_frame(
                 }
                 Row::Omit(_) => (None, false, false, Vec::new(), Vec::new(), false, 0.),
             };
-            let kind_bg = kind_bg(kind);
+            let kind_bg = kind_bg(kind, &code_theme);
             if let Some(text) = &shape.text {
                 widest = widest.max(shape.text_leading + f32::from(text.width));
             }
@@ -693,6 +710,7 @@ pub(super) fn build_frame(
         sides,
         bridges,
         waves,
+        code_theme,
         stats,
     }
 }
@@ -704,6 +722,8 @@ fn shape_row(
     spans: Option<&[Span]>,
     font_px: f32,
     family: &SharedString,
+    theme: &ResolvedCodeTheme,
+    capture_colors: &[Rgba],
     window: &mut Window,
 ) -> RowShape {
     let Row::Line(line) = row else {
@@ -738,12 +758,18 @@ fn shape_row(
                         &line_spans,
                         &tabs,
                         segment,
-                        theme::syntax_colors(),
-                        theme::text(),
+                        capture_colors,
+                        theme.slots.default_foreground,
                     );
                     shape_runs(window, display, family.clone(), font_px, &runs)
                 }
-                None => shape(window, display, family.clone(), font_px, theme::text()),
+                None => shape(
+                    window,
+                    display,
+                    family.clone(),
+                    font_px,
+                    theme.slots.default_foreground,
+                ),
             }
         }),
         tabs: Some(tabs),
@@ -753,7 +779,7 @@ fn shape_row(
                 SharedString::from(line.ln.to_string()),
                 family.clone(),
                 LN_FONT_PX,
-                theme::faint(),
+                theme.slots.line_number,
             )
         }),
         text_leading,
@@ -947,29 +973,29 @@ fn side_ix(side: Side) -> usize {
     }
 }
 
-fn kind_bg(kind: Option<LineKind>) -> Rgba {
+fn kind_bg(kind: Option<LineKind>, theme: &ResolvedCodeTheme) -> Rgba {
     match kind {
-        Some(LineKind::Replace) => theme::mod_bg(),
-        Some(LineKind::Insert) => theme::add_bg(),
-        Some(LineKind::Delete) => theme::del_bg(),
-        Some(LineKind::Equal) | None => theme::white(),
+        Some(LineKind::Replace) => theme.slots.replaced_band,
+        Some(LineKind::Insert) => theme.slots.added_band,
+        Some(LineKind::Delete) => theme.slots.deleted_band,
+        Some(LineKind::Equal) | None => theme.slots.paper,
     }
 }
 
-fn kind_edge(kind: LineKind) -> Rgba {
+fn kind_edge(kind: LineKind, theme: &ResolvedCodeTheme) -> Rgba {
     match kind {
-        LineKind::Replace => theme::mod_edge(),
-        LineKind::Insert => theme::add_edge(),
-        LineKind::Delete => theme::del_edge(),
-        LineKind::Equal => theme::line(),
+        LineKind::Replace => theme.derived.replaced_edge,
+        LineKind::Insert => theme.derived.added_edge,
+        LineKind::Delete => theme.derived.deleted_edge,
+        LineKind::Equal => theme.derived.unchanged_edge,
     }
 }
 
 /// A seam on the old side is an insertion point, on the new side a deletion point.
-fn seam_color(side: Side) -> Rgba {
+fn seam_color(side: Side, theme: &ResolvedCodeTheme) -> Rgba {
     match side {
-        Side::Preimage => theme::add_edge(),
-        Side::Postimage => theme::del_edge(),
+        Side::Preimage => theme.derived.added_edge,
+        Side::Postimage => theme.derived.deleted_edge,
     }
 }
 
@@ -1008,7 +1034,7 @@ impl Frame {
 
     fn paint(&self, window: &mut Window, cx: &mut App) {
         let geom = self.geom;
-        window.paint_quad(fill(geom.bounds, theme::white()));
+        window.paint_quad(fill(geom.bounds, self.code_theme.slots.paper));
         for side in [Side::Preimage, Side::Postimage] {
             self.paint_code(side, window, cx);
         }
@@ -1056,7 +1082,7 @@ impl Frame {
                 if row.selected {
                     window.paint_quad(fill(
                         hline(x0, x1, row.y0, row.y1 - row.y0),
-                        theme::selection_wash(),
+                        self.code_theme.slots.selection,
                     ));
                 }
                 let (bar_x0, bar_x1, bar_text_inset) = comment_bar_layout(side, x0, x1);
@@ -1078,11 +1104,16 @@ impl Frame {
                             mark_h + ring * 2.,
                         );
                         window.paint_quad(
-                            fill(ring_rect, rgb(SEARCH_HIT_CUR_RING)).corner_radii(px(2. + ring)),
+                            fill(ring_rect, self.code_theme.slots.search_ring)
+                                .corner_radii(px(2. + ring)),
                         );
-                        window.paint_quad(fill(rect, rgb(SEARCH_HIT_CUR_BG)).corner_radii(px(2.)));
+                        window.paint_quad(
+                            fill(rect, self.code_theme.slots.search_current).corner_radii(px(2.)),
+                        );
                     } else {
-                        window.paint_quad(fill(rect, rgb(SEARCH_HIT_BG)).corner_radii(px(2.)));
+                        window.paint_quad(
+                            fill(rect, self.code_theme.slots.search_hit).corner_radii(px(2.)),
+                        );
                     }
                 }
                 for &(a, b) in &row.marks {
@@ -1092,7 +1123,9 @@ impl Frame {
                         row.y0 + (self.row_h - mark_h) / 2.,
                         mark_h,
                     );
-                    window.paint_quad(fill(rect, theme::mod_chg()).corner_radii(px(2.)));
+                    window.paint_quad(
+                        fill(rect, self.code_theme.slots.word_difference).corner_radii(px(2.)),
+                    );
                 }
                 if let Some(text) = &row.text {
                     text.paint(point(px(text_x), px(row.y0)), row_h, window, cx)
@@ -1102,13 +1135,16 @@ impl Frame {
                 if row.commented {
                     window.paint_quad(fill(
                         hline(bar_x0, bar_x1, row.y0, row.y1 - row.y0),
-                        theme::accent(),
+                        self.code_theme.slots.comment,
                     ));
                 }
             }
-            paint_gaps(window, pane, &frame.gaps);
+            paint_gaps(window, pane, &frame.gaps, &self.code_theme);
             for y in frame.seams.iter().map(|&(y, _)| y).chain(frame.empty_seam) {
-                window.paint_quad(fill(hline(x0, x1, y, EDGE_W), seam_color(side)));
+                window.paint_quad(fill(
+                    hline(x0, x1, y, EDGE_W),
+                    seam_color(side, &self.code_theme),
+                ));
             }
             self.paint_block_edges(side, x0, x1, window);
         });
@@ -1122,7 +1158,7 @@ impl Frame {
             if y1 - y0 < EDGE_W {
                 continue;
             }
-            let color = kind_edge(bridge.kind);
+            let color = kind_edge(bridge.kind, &self.code_theme);
             window.paint_quad(fill(hline(x0, x1, y0, EDGE_W), color));
             window.paint_quad(fill(hline(x0, x1, y1 - EDGE_W, EDGE_W), color));
         }
@@ -1130,7 +1166,7 @@ impl Frame {
 
     fn paint_gutter(&self, window: &mut Window, cx: &mut App) {
         let g = self.geom.gutter;
-        window.paint_quad(fill(g, theme::white()));
+        window.paint_quad(fill(g, self.code_theme.slots.paper));
         for side in [Side::Preimage, Side::Postimage] {
             // Kind tint covers the line-number column; the bridge starts at its
             // inner edge.
@@ -1141,12 +1177,15 @@ impl Frame {
             }
             for &(y, in_rows) in &frame.seams {
                 if in_rows {
-                    window.paint_quad(fill(hline(c0, c1, y, EDGE_W), seam_color(side)));
+                    window.paint_quad(fill(
+                        hline(c0, c1, y, EDGE_W),
+                        seam_color(side, &self.code_theme),
+                    ));
                 }
             }
             self.paint_block_edges(side, c0, c1, window);
         }
-        paint_bridges(window, &self.bridges, self.geom.flat_w());
+        paint_bridges(window, &self.bridges, self.geom.flat_w(), &self.code_theme);
         let row_h = px(self.row_h);
         for side in [Side::Preimage, Side::Postimage] {
             let (c0, c1) = self.geom.ln_col(side);
@@ -1162,7 +1201,7 @@ impl Frame {
             }
         }
         for icon in &self.icons {
-            paint_comment_icon(window, icon);
+            paint_comment_icon(window, icon, &self.code_theme);
         }
     }
 }
@@ -1183,7 +1222,7 @@ fn bridge_aligned_x(left: f32, right: f32, side: Side, width: f32) -> f32 {
 /// digits do, so swapping a number for a bubble does not jump sideways. An
 /// existing comment reads accent like its [`COMMENT_BAR`]; `open` adds an
 /// [`ICON_WASH`] square centred on the bubble while the dock is on this line.
-fn paint_comment_icon(window: &mut Window, icon: &IconSlot) {
+fn paint_comment_icon(window: &mut Window, icon: &IconSlot, theme: &ResolvedCodeTheme) {
     let slot = icon.slot;
     let unit = ICON_GLYPH / 16.;
     let x0 = bridge_aligned_x(
@@ -1202,7 +1241,7 @@ fn paint_comment_icon(window: &mut Window, icon: &IconSlot) {
         let wy = y0 - (wash - ICON_GLYPH) / 2.;
         let wash_bounds =
             Bounds::from_corners(point(px(wx), px(wy)), point(px(wx + wash), px(wy + wash)));
-        window.paint_quad(fill(wash_bounds, theme::range()).corner_radii(px(4.)));
+        window.paint_quad(fill(wash_bounds, theme.derived.open_comment_pad).corner_radii(px(4.)));
     }
     match icon.mark {
         IconMark::Empty => {
@@ -1223,9 +1262,9 @@ fn paint_comment_icon(window: &mut Window, icon: &IconSlot) {
                 window.paint_path(
                     path,
                     if icon.open {
-                        theme::accent()
+                        theme.slots.comment
                     } else {
-                        theme::muted()
+                        theme.slots.idle_comment
                     },
                 );
             }
@@ -1245,7 +1284,7 @@ fn paint_comment_icon(window: &mut Window, icon: &IconSlot) {
             }
             bubble.close();
             if let Ok(path) = bubble.build() {
-                window.paint_path(path, theme::accent());
+                window.paint_path(path, theme.slots.comment);
             }
             // Two text rules knocked out of the bubble, so a filled icon reads
             // as a written comment rather than a solid blob.
@@ -1254,24 +1293,29 @@ fn paint_comment_icon(window: &mut Window, icon: &IconSlot) {
                 stroke.move_to(at(5.2, y));
                 stroke.line_to(at(x1, y));
                 if let Ok(path) = stroke.build() {
-                    window.paint_path(path, theme::white());
+                    window.paint_path(path, theme.derived.knockout);
                 }
             }
         }
     }
 }
 
-fn paint_bridges(window: &mut Window, placed: &[WinBridge], flat_w: f32) {
+fn paint_bridges(
+    window: &mut Window,
+    placed: &[WinBridge],
+    flat_w: f32,
+    theme: &ResolvedCodeTheme,
+) {
     for bridge in placed {
         let (fill_path, edges) = match bridge.tab_side {
             None => ribbon(bridge, flat_w),
             Some(side) => tab(bridge, side, flat_w),
         };
         if let Ok(path) = fill_path.build() {
-            window.paint_path(path, kind_bg(Some(bridge.kind)));
+            window.paint_path(path, kind_bg(Some(bridge.kind), theme));
         }
         if let Ok(path) = edges.build() {
-            window.paint_path(path, kind_edge(bridge.kind));
+            window.paint_path(path, kind_edge(bridge.kind, theme));
         }
     }
 }
@@ -1364,6 +1408,7 @@ fn paint_omit_waves(window: &mut Window, geom: Geom, folds: &[(f32, f32)]) {
             let flat = geom.flat_w();
             let path = joined_wave(x0, x1, y_l, gutter_l + flat, gutter_r - flat, y_r);
             if let Ok(path) = path.build() {
+                // Center omission sine, pinned to today's paint.
                 window.paint_path(path, rgb(0xb5b5b5));
             }
         }
@@ -1415,13 +1460,18 @@ fn joined_wave(x0: f32, x1: f32, y_l: f32, gap_l: f32, gap_r: f32, y_r: f32) -> 
     path
 }
 
-fn paint_gaps(window: &mut Window, pane: Bounds<Pixels>, gaps: &[(f32, f32)]) {
+fn paint_gaps(
+    window: &mut Window,
+    pane: Bounds<Pixels>,
+    gaps: &[(f32, f32)],
+    theme: &ResolvedCodeTheme,
+) {
     for &(y0, y1) in gaps {
         if y1 - y0 < 0.5 {
             continue;
         }
         let rect = hline(f32::from(pane.left()), f32::from(pane.right()), y0, y1 - y0);
-        window.paint_quad(fill(rect, theme::gap_bg()));
+        window.paint_quad(fill(rect, theme.derived.omission_fill));
         window.with_content_mask(Some(ContentMask { bounds: rect }), |window| {
             let width = f32::from(rect.size.width);
             let left = f32::from(rect.left());
@@ -1433,7 +1483,7 @@ fn paint_gaps(window: &mut Window, pane: Bounds<Pixels>, gaps: &[(f32, f32)]) {
                 stroke.move_to(point(px(left), px(y)));
                 stroke.line_to(point(px(left + width), px(y + width)));
                 if let Ok(path) = stroke.build() {
-                    window.paint_path(path, theme::faint());
+                    window.paint_path(path, theme.derived.omission_wave);
                 }
                 y += 7.;
             }
