@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Diff prototype — 文件树搜索与全展开</title>
+  <!--
+    PROTOTYPE — throwaway. Not production.
+    Question: Diff 窗口左侧文件树怎么放「文件搜索」和「全收起 / 全展开」。
+    Three variants of that sidebar, switchable via ?variant=, in this file.
+    VERDICT (2026-09-30, user confirmed): A.
+    Filter field on its own row, search icon inside the field (from B).
+    Collapse All / Expand All on the row under the field.
+    Non-matching rows hide. Matching dirs open only when the query goes
+    from empty to non-empty. Folded into the Diff tree pane.
+    Assumption: 应用是 GPUI，没有可嵌的网页路由，沿用 prototype/*.html。
+    侧栏宽 200px（DIFF_TREE_WIDTH），标题栏左侧 212px（树宽 + 12px 缝）。
+    打开: prototype/diff-tree-filter.html
+    本文件不进应用包，底部切换条不会被编进正式界面。
+  -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --text: #172033;
+      --muted: #596579;
+      --faint: #98a2b3;
+      --frost: #f4f5f7;
+      --line: #dfe3ea;
+      --hover: #e9ebef;
+      --accent: #2457d6;
+      --desk-selected: rgba(0, 0, 0, 0.07);
+      --desk-hover: rgba(0, 0, 0, 0.04);
+      --focus-ring: 0 0 0 2px rgba(36, 87, 214, 0.22);
+      --island-shadow:
+        0 4px 12px rgba(23, 32, 51, 0.08),
+        0 12px 32px rgba(23, 32, 51, 0.12);
+      --tree-w: 200px;
+      --leading-w: 212px;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: "IBM Plex Sans", sans-serif;
+      font-size: 13px;
+      color: var(--text);
+      background: #c5ccd6;
+    }
+    button, input { font: inherit; color: inherit; }
+    .proto-root {
+      height: 100%;
+      padding: 16px 16px 78px;
+      display: flex;
+      justify-content: center;
+    }
+    .desk { width: min(1100px, 100%); height: 100%; min-width: 0; }
+    .win {
+      height: 100%;
+      background: var(--frost);
+      border: 1px solid #b4bcc8;
+      border-radius: 10px;
+      box-shadow: 0 16px 36px rgba(23, 32, 51, 0.16);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .titlebar { height: 32px; flex-shrink: 0; display: flex; align-items: stretch; }
+    .titlebar-leading {
+      width: var(--leading-w);
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 0 0 12px;
+      overflow: hidden;
+    }
+    .titlebar-main {
+      flex: 1; min-width: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 12px 0 0;
+      font-size: 12px; color: var(--muted);
+    }
+    .titlebar-main strong { color: var(--text); font-weight: 500; }
+    .titlebar-main .path {
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .traffic { width: 76px; display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+    .traffic i { width: 10px; height: 10px; border-radius: 50%; display: block; }
+    .traffic .r { background: #ff5f57; }
+    .traffic .y { background: #febc2e; }
+    .traffic .g { background: #28c840; }
+    .drag { flex: 1; min-width: 0; height: 100%; }
+    .fold-pair { display: flex; gap: 2px; flex-shrink: 0; }
+    .icon-btn {
+      width: 26px; height: 26px; border: 0; border-radius: 6px;
+      background: transparent; color: var(--muted); cursor: pointer;
+      display: grid; place-items: center; padding: 0; flex-shrink: 0;
+    }
+    .icon-btn.sm { width: 22px; height: 22px; }
+    .icon-btn:hover { background: var(--hover); color: var(--text); }
+    .body { flex: 1; min-height: 0; display: flex; }
+    .side {
+      width: var(--tree-w);
+      flex-shrink: 0;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .seam { width: 12px; flex-shrink: 0; }
+    .diff-stage {
+      flex: 1; min-width: 0; min-height: 0;
+      padding: 6px 12px 12px 0;
+      display: flex;
+    }
+    .island {
+      flex: 1; min-width: 0;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: var(--island-shadow);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .file-head {
+      flex-shrink: 0;
+      padding: 10px 12px 8px;
+      font-size: 12px;
+    }
+    .file-head .meta { display: flex; align-items: center; gap: 6px; }
+    .file-head .sub { margin-top: 2px; color: var(--faint); font-size: 11px; }
+    .code {
+      margin: 0; padding: 4px 12px 12px;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 12px; line-height: 22px;
+      white-space: pre; color: var(--text);
+    }
+
+    .stack-A {
+      flex-shrink: 0;
+      display: flex; flex-direction: column; gap: 4px;
+      padding: 6px 8px 2px;
+    }
+    .stack-A .fold-row { display: flex; gap: 2px; }
+    .stack-A .field.has-glyph {
+      border: 1px solid var(--line); border-radius: 6px;
+      background: #fff; padding-left: 8px; gap: 4px;
+    }
+    .stack-A .field.has-glyph input {
+      border: 0; padding-left: 0; background: transparent; box-shadow: none;
+    }
+    .stack-A .field.has-glyph:focus-within {
+      border-color: var(--accent); box-shadow: var(--focus-ring);
+    }
+    .stack-A .field.has-glyph input:focus { border: 0; box-shadow: none; }
+    .stack-C {
+      flex-shrink: 0;
+      display: flex; flex-direction: column; gap: 6px;
+      padding: 8px 8px 4px;
+    }
+    .seg {
+      display: flex; gap: 2px; padding: 2px;
+      background: #fff; border-radius: 8px;
+      box-shadow: var(--island-shadow);
+    }
+    .seg button {
+      flex: 1; height: 22px; border: 0; border-radius: 6px;
+      background: transparent; color: var(--muted);
+      font-size: 11px; cursor: pointer;
+    }
+    .seg button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+    .seg button:disabled { opacity: 0.4; cursor: default; }
+    .float-search {
+      position: absolute; z-index: 2;
+      top: 6px; left: 6px; right: 6px; height: 28px;
+      display: flex; align-items: center; gap: 6px;
+      padding: 0 6px 0 8px;
+      background: #fff; border-radius: 8px;
+      box-shadow: var(--island-shadow);
+    }
+    .float-search:focus-within { box-shadow: var(--island-shadow), var(--focus-ring); }
+    .field { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; }
+    .stack-C .field { width: 100%; }
+    .field input {
+      width: 100%; height: 24px;
+      border: 1px solid var(--line); border-radius: 6px;
+      background: #fff; padding: 0 52px 0 8px;
+      font-size: 12px; outline: none;
+    }
+    .field input:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
+    .float-search .field input {
+      border: 0; background: transparent; height: 26px;
+      padding-left: 0; box-shadow: none;
+    }
+    .field .count {
+      position: absolute; right: 20px;
+      font-size: 10px; color: var(--faint);
+      font-variant-numeric: tabular-nums;
+      pointer-events: none;
+    }
+    .clear {
+      position: absolute; right: 1px; top: 0; bottom: 0;
+      width: 18px; border: 0; background: transparent;
+      color: var(--faint); cursor: pointer; padding: 0; font-size: 14px;
+    }
+    .clear:hover { color: var(--text); }
+    .clear[hidden] { display: none; }
+    .search-glyph { color: var(--faint); display: grid; flex-shrink: 0; }
+
+    .side-scroll { flex: 1; min-height: 0; overflow: auto; padding: 4px 0 8px; }
+    .side-scroll.under-float { padding-top: 40px; scroll-padding-top: 40px; }
+    .row {
+      display: flex; align-items: center; gap: 4px;
+      width: calc(100% - 8px); margin: 0 4px 2px;
+      height: 22px; padding-right: 4px;
+      border: 0; border-radius: 4px; background: transparent;
+      text-align: left; cursor: pointer; font-size: 12px;
+    }
+    .row:hover { background: var(--desk-hover); }
+    .row.selected { background: var(--desk-selected); }
+    .row.selected:hover { background: var(--desk-selected); }
+    .row.dim { opacity: 0.38; }
+    .glyph { width: 14px; height: 14px; flex-shrink: 0; color: var(--muted); display: grid; place-items: center; }
+    .file-glyph {
+      width: 12px; height: 14px; flex-shrink: 0;
+      border: 1.4px solid var(--faint); border-radius: 2px;
+      box-shadow: inset 0 -5px 0 -3px var(--faint);
+    }
+    .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row.dir .name { color: var(--muted); font-weight: 500; }
+    .badge-status {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px; font-weight: 500; width: 12px; text-align: center; flex-shrink: 0;
+    }
+    .badge-status.M { color: #9a6700; }
+    .badge-status.A { color: #1a7f4b; }
+    .badge-status.D { color: #b42318; }
+    .deltas { display: flex; gap: 4px; flex-shrink: 0; font-family: "IBM Plex Mono", monospace; font-size: 10px; }
+    .delta.add { color: #1a7f4b; }
+    .delta.del { color: #b42318; }
+    .hit-badge {
+      min-width: 16px; height: 16px; padding: 0 4px;
+      border-radius: 8px; background: var(--accent); color: #fff;
+      font-size: 10px; font-weight: 600;
+      display: inline-flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    mark { background: #ffe08a; color: inherit; padding: 0 1px; border-radius: 2px; }
+    .empty { padding: 18px 10px; text-align: center; color: var(--faint); font-size: 12px; }
+
+    .state-dump {
+      position: fixed; right: 12px; bottom: 64px; z-index: 40;
+      width: 320px; max-height: 38vh; overflow: auto;
+      background: #0f172a; color: #e2e8f0;
+      font-family: "IBM Plex Mono", monospace; font-size: 10px;
+      line-height: 1.45; padding: 10px; border-radius: 8px;
+      opacity: 0.94; white-space: pre-wrap;
+    }
+    .switcher {
+      position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+      z-index: 9999;
+      display: flex; align-items: center; gap: 10px;
+      background: #111827; color: #f9fafb;
+      border-radius: 999px; padding: 8px 12px;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+      font-size: 13px; user-select: none;
+    }
+    .switcher button {
+      width: 28px; height: 28px; border: 0; border-radius: 999px;
+      background: #374151; color: #fff; cursor: pointer;
+      display: grid; place-items: center; flex-shrink: 0;
+    }
+    .switcher button:hover { background: #4b5563; }
+    .switcher .label { min-width: 260px; max-width: 440px; text-align: center; }
+    .switcher .sub { color: #9ca3af; font-size: 11px; margin-top: 2px; line-height: 1.35; }
+  </style>
+</head>
+<body>
+  <div class="proto-root"><div class="desk" id="desk"></div></div>
+  <pre class="state-dump" id="stateDump"></pre>
+  <div class="switcher">
+    <button type="button" id="prevVar" aria-label="上一个方案">←</button>
+    <div class="label">
+      <div id="varLabel">A</div>
+      <div class="sub" id="varSub"></div>
+    </div>
+    <button type="button" id="nextVar" aria-label="下一个方案">→</button>
+  </div>
+  <script>
+    /**
+     * Three variants of the Diff file sidebar, switchable via ?variant=.
+     * A 搜索在上，全收起 / 全展开在输入框下方，不匹配的行隐藏。
+     * B 折叠在标题栏，搜索胶囊浮在树上，不匹配变淡。
+     * C 文字分段 + 搜索框，有词时改成平铺路径。
+     */
+    const VARIANTS = [
+      { key: "A", name: "搜索在上 · 折叠在下" },
+      { key: "B", name: "标题栏按钮 · 变淡" },
+      { key: "C", name: "分段 · 平铺" },
+    ];
+    const BLURB = {
+      A: "搜索占满一行，全收起和全展开在输入框下方，不匹配的行隐藏",
+      B: "折叠在标题栏，搜索浮在树上，不匹配变淡",
+      C: "文字分段加搜索框，有词时改成平铺路径",
+    };
+    const RULES = {
+      A: "从空框开始输入时，含命中的目录会展开。之后仍可点目录再收起。清空搜索后，收起状态还在。",
+      B: "搜索不改动收起状态。收起的目录若里面有命中，行右侧是命中数。树可以滚到胶囊下面。",
+      C: "有搜索词时只列出命中路径，全收起 / 全展开停用。清空后回到原来的树。",
+    };
+
+    const FILES = [
+      { path: "Cargo.toml", status: "M", add: 2, del: 1 },
+      { path: "README.md", status: "M", add: 12, del: 3 },
+      { path: "assets/icons/folder.svg", status: "M", add: 0, del: 1 },
+      { path: "assets/icons/search.svg", status: "A", add: 1, del: 0 },
+      { path: "docs/adr/0012-tree-filter.md", status: "A", add: 40, del: 0 },
+      { path: "docs/dual-pane-diff.md", status: "M", add: 8, del: 2 },
+      { path: "src/domain/mod.rs", status: "M", add: 6, del: 1 },
+      { path: "src/domain/review.rs", status: "A", add: 80, del: 0 },
+      { path: "src/git/blame.rs", status: "D", add: 0, del: 44 },
+      { path: "src/git/mod.rs", status: "M", add: 15, del: 4 },
+      { path: "src/ui/diff/element.rs", status: "M", add: 22, del: 9 },
+      { path: "src/ui/diff/layout.rs", status: "A", add: 110, del: 0 },
+      { path: "src/ui/diff/pane.rs", status: "M", add: 7, del: 3 },
+      { path: "src/ui/diff_window.rs", status: "M", add: 30, del: 11 },
+      { path: "src/ui/file_tree.rs", status: "M", add: 4, del: 0 },
+      { path: "src/ui/file_tree_rows.rs", status: "M", add: 9, del: 2 },
+      { path: "src/ui/theme.rs", status: "M", add: 3, del: 1 },
+    ];
+
+    const ICON = {
+      fold: '<svg width="16" height="16" viewBox="-1.33 -1.33 26.67 26.67" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.22" d="M12 22v-6m0-8V2M4 12H2m8 0H8m8 0h-2m8 0h-2m-5 7l-3-3l-3 3m6-14l-3 3l-3-3"/></svg>',
+      unfold: '<svg width="16" height="16" viewBox="-1.33 -1.33 26.67 26.67" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.22" d="M12 22v-6m0-8V2M4 12H2m8 0H8m8 0h-2m8 0h-2m-5 7l-3 3l-3-3m6-14l-3-3l-3 3"/></svg>',
+      folder: '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M1.8 4.2c0-.9.7-1.6 1.6-1.6h2.2l1.1 1.3h5.9c.9 0 1.6.7 1.6 1.6v6.6c0 .9-.7 1.6-1.6 1.6H3.4c-.9 0-1.6-.7-1.6-1.6V4.2z"/></svg>',
+      folderOpen: '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M1.8 3.6c0-.7.6-1.3 1.3-1.3h2.3l1.1 1.2h6.2c.7 0 1.3.6 1.3 1.3v1H6.1c-.4 0-.8.2-1.1.6L1.8 11.1V3.6z"/><path fill="currentColor" d="M2.4 7.3h11l-2.5 5c-.2.4-.6.6-1 .6H2.6c-.6 0-1-.6-.8-1.1l.6-4.5z"/></svg>',
+      search: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="7" cy="7" r="3.25"/><path d="M9.6 9.6 12.5 12.5" stroke-linecap="round"/></svg>',
+      panel: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6.2 2.5v11"/></svg>',
+    };
+
+    function buildTree(files) {
+      const root = { dirs: new Map(), files: [] };
+      for (const file of files) {
+        const parts = file.path.split("/");
+        let node = root;
+        for (let i = 0; i < parts.length - 1; i++) {
+          const name = parts[i];
+          if (!node.dirs.has(name)) node.dirs.set(name, { dirs: new Map(), files: [] });
+          node = node.dirs.get(name);
+        }
+        node.files.push(file);
+      }
+      const sortNode = (node) => {
+        node.files.sort((a, b) => a.path.localeCompare(b.path));
+        node.dirs = new Map([...node.dirs.entries()].sort((a, b) => a[0].localeCompare(b[0])));
+        for (const kid of node.dirs.values()) sortNode(kid);
+      };
+      sortNode(root);
+      return root;
+    }
+
+    const TREE = buildTree(FILES);
+    const ALL_DIRS = [];
+    (function collect(node, prefix) {
+      for (const [name, kid] of node.dirs) {
+        const path = prefix ? prefix + "/" + name : name;
+        ALL_DIRS.push(path);
+        collect(kid, path);
+      }
+    })(TREE, "");
+
+    const state = {
+      query: "",
+      collapsed: new Set(["docs/adr", "src/git"]),
+      selected: "src/ui/diff_window.rs",
+    };
+
+    function getVariant() {
+      const key = new URLSearchParams(location.search).get("variant");
+      return VARIANTS.some((v) => v.key === key) ? key : "A";
+    }
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      }[c]));
+    }
+
+    function markSub(text, query) {
+      const q = query.trim();
+      if (!q) return esc(text);
+      const i = text.toLowerCase().indexOf(q.toLowerCase());
+      if (i < 0) return esc(text);
+      return esc(text.slice(0, i)) + "<mark>" + esc(text.slice(i, i + q.length)) + "</mark>" + esc(text.slice(i + q.length));
+    }
+
+    function matchingFileCount(node, q) {
+      let n = 0;
+      for (const f of node.files) if (f.path.toLowerCase().includes(q)) n++;
+      for (const kid of node.dirs.values()) n += matchingFileCount(kid, q);
+      return n;
+    }
+
+    function matchTotal() {
+      const q = state.query.trim().toLowerCase();
+      if (!q) return FILES.length;
+      return FILES.filter((f) => f.path.toLowerCase().includes(q)).length;
+    }
+
+    function expandMatchingDirs(query) {
+      const q = query.trim().toLowerCase();
+      if (!q) return;
+      const walk = (node, prefix) => {
+        for (const [name, kid] of node.dirs) {
+          const path = prefix ? prefix + "/" + name : name;
+          if (matchingFileCount(kid, q) > 0) {
+            state.collapsed.delete(path);
+            walk(kid, path);
+          }
+        }
+      };
+      walk(TREE, "");
+    }
+
+    function modeFor(variant) {
+      if (variant === "B") return "dim";
+      if (variant === "C" && state.query.trim()) return "flat";
+      return "hide";
+    }
+
+    function walkRows(mode) {
+      const q = state.query.trim().toLowerCase();
+      const out = [];
+      const walk = (node, prefix, depth) => {
+        for (const [name, kid] of node.dirs) {
+          const path = prefix ? prefix + "/" + name : name;
+          const hits = q ? matchingFileCount(kid, q) : 0;
+          const relevant = !q || hits > 0;
+          if (mode === "hide" && q && !relevant) continue;
+          const collapsed = state.collapsed.has(path);
+          out.push({
+            kind: "dir", name, path, depth, collapsed,
+            dim: mode === "dim" && !!q && !relevant,
+            badge: mode === "dim" && !!q && collapsed && hits > 0 ? hits : 0,
+          });
+          if (!collapsed) walk(kid, path, depth + 1);
+        }
+        for (const file of node.files) {
+          const hit = !q || file.path.toLowerCase().includes(q);
+          if (mode === "hide" && q && !hit) continue;
+          out.push({
+            kind: "file", file, depth,
+            dim: mode === "dim" && !!q && !hit,
+            flat: false,
+          });
+        }
+      };
+      walk(TREE, "", 0);
+      return out;
+    }
+
+    function flatHits() {
+      const q = state.query.trim().toLowerCase();
+      return FILES.filter((f) => f.path.toLowerCase().includes(q))
+        .slice()
+        .sort((a, b) => a.path.localeCompare(b.path));
+    }
+
+    function listVisible() {
+      const mode = modeFor(getVariant());
+      if (mode === "flat") {
+        return flatHits().map((file) => ({ kind: "file", file, depth: 0, dim: false, flat: true }));
+      }
+      return walkRows(mode);
+    }
+
+    function iconBtn(act, svg, label, cls) {
+      return '<button type="button" class="icon-btn ' + (cls || "") + '" data-act="' + act + '" title="' + esc(label) + '" aria-label="' + esc(label) + '">' + svg + "</button>";
+    }
+
+    function fieldHtml(glyph) {
+      return '<label class="field' + (glyph ? " has-glyph" : "") + '">'
+        + (glyph ? '<span class="search-glyph">' + glyph + "</span>" : "")
+        + '<input class="filter-input" type="text" placeholder="过滤文件…" value="' + esc(state.query) + '" spellcheck="false" autocomplete="off" aria-label="过滤文件" />'
+        + '<span class="count" id="matchCount"></span>'
+        + '<button type="button" class="clear" data-act="clear" aria-label="清除过滤"' + (state.query ? "" : " hidden") + ">×</button>"
+        + "</label>";
+    }
+
+    function sideChrome(variant) {
+      if (variant === "A") {
+        return '<div class="stack-A">' + fieldHtml(ICON.search)
+          + '<div class="fold-row">'
+          + iconBtn("collapse-all", ICON.fold, "全收起", "sm")
+          + iconBtn("expand-all", ICON.unfold, "全展开", "sm")
+          + "</div></div>";
+      }
+      if (variant === "B") {
+        return '<div class="float-search"><span class="search-glyph">' + ICON.search + "</span>" + fieldHtml() + "</div>";
+      }
+      const dis = state.query.trim() ? " disabled" : "";
+      return '<div class="stack-C"><div class="seg" role="group" aria-label="折叠">'
+        + '<button type="button" data-act="collapse-all"' + dis + ">全收起</button>"
+        + '<button type="button" data-act="expand-all"' + dis + ">全展开</button>"
+        + "</div>" + fieldHtml() + "</div>";
+    }
+
+    function leadingHtml(variant) {
+      const folds = variant === "B"
+        ? '<div class="fold-pair">' + iconBtn("collapse-all", ICON.fold, "全收起") + iconBtn("expand-all", ICON.unfold, "全展开") + "</div>"
+        : "";
+      return '<div class="titlebar-leading"><div class="traffic"><i class="r"></i><i class="y"></i><i class="g"></i></div>'
+        + iconBtn("noop", ICON.panel, "文件树")
+        + folds
+        + '<div class="drag"></div></div>';
+    }
+
+    function rowHtml(row) {
+      const pad = 8 + row.depth * 12;
+      if (row.kind === "dir") {
+        const dim = row.dim ? " dim" : "";
+        const badge = row.badge ? '<span class="hit-badge">' + row.badge + "</span>" : "";
+        return '<button type="button" class="row dir' + dim + '" style="padding-left:' + pad + 'px" data-act="toggle-dir" data-path="' + esc(row.path) + '" title="' + esc(row.path) + '">'
+          + '<span class="glyph">' + (row.collapsed ? ICON.folder : ICON.folderOpen) + "</span>"
+          + '<span class="name">' + markSub(row.name, state.query) + "</span>"
+          + badge + "</button>";
+      }
+      const file = row.file;
+      const label = row.flat ? file.path : file.path.split("/").pop();
+      const sel = state.selected === file.path ? " selected" : "";
+      const dim = row.dim ? " dim" : "";
+      return '<button type="button" class="row file' + sel + dim + '" style="padding-left:' + pad + 'px" data-act="select" data-path="' + esc(file.path) + '" title="' + esc(file.path) + '">'
+        + '<span class="file-glyph" aria-hidden="true"></span>'
+        + '<span class="name">' + markSub(label, state.query) + "</span>"
+        + '<span class="badge-status ' + file.status + '">' + file.status + "</span>"
+        + '<span class="deltas"><span class="delta add">+' + file.add + '</span><span class="delta del">−' + file.del + "</span></span>"
+        + "</button>";
+    }
+
+    function islandHtml() {
+      const file = FILES.find((f) => f.path === state.selected);
+      if (!file) return '<div class="island"></div>';
+      const base = file.path.split("/").pop();
+      const body = "// " + file.path + "\n\nfn review() {\n    // " + file.status + "\n    let next = 1;\n}\n";
+      return '<div class="island"><div class="file-head"><div class="meta"><strong>' + esc(base) + "</strong>"
+        + '<span class="badge-status ' + file.status + '">' + file.status + "</span>"
+        + '<span class="deltas"><span class="delta add">+' + file.add + '</span><span class="delta del">−' + file.del + "</span></span>"
+        + '</div><div class="sub">' + esc(file.path) + "</div></div><pre class=\"code\">" + esc(body) + "</pre></div>";
+    }
+
+    function describe(row) {
+      if (row.kind === "dir") {
+        const bits = [row.collapsed ? "收起" : "展开"];
+        if (row.dim) bits.push("淡");
+        if (row.badge) bits.push("命中 " + row.badge);
+        return "dir  " + row.path + "  (" + bits.join(", ") + ")";
+      }
+      const flags = [];
+      if (row.dim) flags.push("淡");
+      if (row.flat) flags.push("平铺");
+      if (state.selected === row.file.path) flags.push("选中");
+      return "file " + row.file.path + (flags.length ? "  (" + flags.join(", ") + ")" : "");
+    }
+
+    function dumpState() {
+      const v = getVariant();
+      const rows = listVisible();
+      const q = state.query.trim();
+      document.getElementById("stateDump").textContent = JSON.stringify({
+        variant: v,
+        rule: RULES[v],
+        query: state.query,
+        matches: q ? matchTotal() + "/" + FILES.length : FILES.length,
+        collapsed: [...state.collapsed],
+        selected: state.selected,
+        visible: rows.map(describe),
+      }, null, 2);
+    }
+
+    function paintRows() {
+      const host = document.getElementById("rows");
+      if (!host) return;
+      const rows = listVisible();
+      host.innerHTML = rows.length
+        ? rows.map(rowHtml).join("")
+        : '<div class="empty">没有匹配的文件</div>';
+    }
+
+    function paintCount() {
+      const el = document.getElementById("matchCount");
+      if (!el) return;
+      const q = state.query.trim();
+      el.textContent = q ? matchTotal() + "/" + FILES.length : String(FILES.length);
+    }
+
+    function render() {
+      const scroller = document.querySelector(".side-scroll");
+      const prevScroll = scroller ? scroller.scrollTop : 0;
+      const prevInput = document.querySelector(".filter-input");
+      const keepFocus = !!(prevInput && document.activeElement === prevInput);
+      const caret = keepFocus ? prevInput.selectionStart : null;
+      const v = getVariant();
+      const meta = VARIANTS.find((x) => x.key === v);
+      const file = FILES.find((f) => f.path === state.selected);
+      document.getElementById("varLabel").textContent = meta.key + " (" + meta.name + ")";
+      document.getElementById("varSub").textContent = BLURB[v];
+      const scrollCls = v === "B" ? "side-scroll under-float" : "side-scroll";
+      document.getElementById("desk").innerHTML = '<div class="win"><header class="titlebar">'
+        + leadingHtml(v)
+        + '<div class="titlebar-main"><strong>' + esc(file ? file.path.split("/").pop() : "") + '</strong><span class="path">' + esc(file ? file.path : "") + "</span></div>"
+        + "</header><div class=\"body\"><aside class=\"side\">"
+        + sideChrome(v)
+        + '<div class="' + scrollCls + '" id="sideScroll"><div id="rows"></div></div>'
+        + '</aside><div class="seam"></div><div class="diff-stage">' + islandHtml() + "</div></div></div>";
+      const next = document.getElementById("sideScroll");
+      if (next) next.scrollTop = prevScroll;
+      paintRows();
+      paintCount();
+      const input = document.querySelector(".filter-input");
+      if (keepFocus && input) {
+        input.focus();
+        const pos = caret == null ? input.value.length : caret;
+        input.setSelectionRange(pos, pos);
+      }
+      dumpState();
+    }
+
+    function syncFoldLock() {
+      document.querySelectorAll(".seg button").forEach((btn) => {
+        btn.disabled = foldsLocked();
+      });
+    }
+
+    function onFilterInput(value) {
+      const wasEmpty = !state.query.trim();
+      state.query = value;
+      if (wasEmpty && value.trim() && getVariant() === "A") expandMatchingDirs(value);
+      const input = document.querySelector(".filter-input");
+      if (input && input.value !== value) input.value = value;
+      const clear = document.querySelector(".clear");
+      if (clear) clear.hidden = !state.query;
+      syncFoldLock();
+      paintRows();
+      paintCount();
+      dumpState();
+    }
+
+    function foldsLocked() {
+      return getVariant() === "C" && !!state.query.trim();
+    }
+
+    function onClick(e) {
+      const el = e.target.closest("[data-act]");
+      if (!el || el.disabled) return;
+      const act = el.getAttribute("data-act");
+      if (act === "collapse-all") {
+        if (foldsLocked()) return;
+        state.collapsed = new Set(ALL_DIRS);
+        render();
+        return;
+      }
+      if (act === "expand-all") {
+        if (foldsLocked()) return;
+        state.collapsed = new Set();
+        render();
+        return;
+      }
+      if (act === "toggle-dir") {
+        const path = el.getAttribute("data-path");
+        if (state.collapsed.has(path)) state.collapsed.delete(path);
+        else state.collapsed.add(path);
+        render();
+        return;
+      }
+      if (act === "select") {
+        state.selected = el.getAttribute("data-path");
+        render();
+        return;
+      }
+      if (act === "clear") onFilterInput("");
+    }
+
+    function cycle(step) {
+      const i = VARIANTS.findIndex((v) => v.key === getVariant());
+      const next = VARIANTS[(i + step + VARIANTS.length) % VARIANTS.length];
+      const url = new URL(location.href);
+      url.searchParams.set("variant", next.key);
+      try { history.replaceState(null, "", url); } catch (err) { /* file URL */ }
+      render();
+    }
+
+    const desk = document.getElementById("desk");
+    desk.addEventListener("click", onClick);
+    desk.addEventListener("input", (e) => {
+      if (e.target.classList && e.target.classList.contains("filter-input")) onFilterInput(e.target.value);
+    });
+    desk.addEventListener("mousedown", (e) => {
+      if (e.target.closest && e.target.closest("[data-act='clear']")) e.preventDefault();
+    });
+    document.getElementById("prevVar").addEventListener("click", () => cycle(-1));
+    document.getElementById("nextVar").addEventListener("click", () => cycle(1));
+    document.addEventListener("keydown", (e) => {
+      const t = e.target;
+      const typing = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+      if (e.key === "Escape" && typing && t.classList.contains("filter-input")) {
+        e.preventDefault();
+        onFilterInput("");
+        return;
+      }
+      if (typing) return;
+      if (e.key === "ArrowLeft") { e.preventDefault(); cycle(-1); }
+      if (e.key === "ArrowRight") { e.preventDefault(); cycle(1); }
+    });
+
+    render();
+  </script>
+</body>
+</html>

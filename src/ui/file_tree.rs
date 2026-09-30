@@ -82,6 +82,27 @@ pub fn flatten(paths: &[ChangedPath], collapsed: &HashSet<String>) -> Vec<TreeRo
     out
 }
 
+/// [`flatten`], after dropping files whose path does not contain `query`.
+/// Empty `query` is the full tree. Matching is Unicode case-insensitive.
+/// Directories remain only when a kept file sits under them. Collapse still applies.
+pub fn flatten_query(
+    paths: &[ChangedPath],
+    collapsed: &HashSet<String>,
+    query: &str,
+) -> Vec<TreeRow> {
+    let q = query.trim();
+    if q.is_empty() {
+        return flatten(paths, collapsed);
+    }
+    let q = q.to_lowercase();
+    let matched: Vec<ChangedPath> = paths
+        .iter()
+        .filter(|p| p.path.to_lowercase().contains(&q))
+        .cloned()
+        .collect();
+    flatten(&matched, collapsed)
+}
+
 /// File paths in the order the fully expanded tree lists them.
 pub fn file_order(paths: &[ChangedPath]) -> Vec<String> {
     flatten(paths, &HashSet::new())
@@ -136,6 +157,27 @@ mod tests {
             })
             .collect();
         assert_eq!(dirs, ["src", "src/ui"]);
+    }
+
+    #[test]
+    fn query_drops_non_matching_files_and_their_empty_dirs() {
+        let paths = vec![cp("src/a.rs"), cp("docs/b.md")];
+        let labels: Vec<_> = flatten_query(&paths, &HashSet::new(), "A.RS")
+            .into_iter()
+            .map(|row| match row {
+                TreeRow::Dir { path, .. } => path,
+                TreeRow::File { path, .. } => path.path,
+            })
+            .collect();
+        assert_eq!(labels, ["src", "src/a.rs"]);
+    }
+
+    #[test]
+    fn query_still_honors_collapsed_dirs() {
+        let paths = vec![cp("src/a.rs")];
+        let mut collapsed = HashSet::new();
+        collapsed.insert("src".into());
+        assert_eq!(flatten_query(&paths, &collapsed, "a.rs").len(), 1);
     }
 
     #[test]
