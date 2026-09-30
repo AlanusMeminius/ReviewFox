@@ -5,31 +5,31 @@ use std::sync::{LazyLock, Mutex};
 use gpui::{Rgba, rgb};
 
 const ONE_LIGHT_SYNTAX: &[(&str, u32)] = &[
-    ("attribute", 0x526bcb),
-    ("comment", 0x717274),
-    ("comment.documentation", 0x6f7178),
-    ("constant", 0x966600),
-    ("constant.builtin", 0x966600),
-    ("constructor", 0x526bcb),
+    ("attribute", 0x4b61b9),
+    ("comment", 0x666769),
+    ("comment.documentation", 0x65676d),
+    ("constant", 0x8b5e00),
+    ("constant.builtin", 0x8b5e00),
+    ("constructor", 0x4b61b9),
     ("delimiter", 0x4d4f52),
-    ("escape", 0x6f7178),
-    ("function", 0x516ccc),
-    ("function.macro", 0x516ccc),
-    ("function.method", 0x516ccc),
-    ("function.special", 0x516ccc),
-    ("keyword", 0xa449ab),
-    ("label", 0x526bcb),
-    ("number", 0x9f6522),
-    ("operator", 0x3377a8),
-    ("property", 0xb55243),
+    ("escape", 0x65676d),
+    ("function", 0x4961b8),
+    ("function.macro", 0x4961b8),
+    ("function.method", 0x4961b8),
+    ("function.special", 0x4961b8),
+    ("keyword", 0x9a44a0),
+    ("label", 0x4b61b9),
+    ("number", 0x905b1f),
+    ("operator", 0x2e6c98),
+    ("property", 0xa64b3e),
     ("punctuation.bracket", 0x4d4f52),
     ("punctuation.delimiter", 0x4d4f52),
-    ("string", 0x4d7c43),
-    ("type", 0x3377a8),
-    ("type.builtin", 0x3377a8),
+    ("string", 0x46713d),
+    ("type", 0x2e6c98),
+    ("type.builtin", 0x2e6c98),
     ("variable", 0x242529),
     ("variable.builtin", 0x242529),
-    ("variable.parameter", 0xb55243),
+    ("variable.parameter", 0xa64b3e),
 ];
 
 fn syntax_slots(rows: &[(&str, u32)]) -> Vec<(String, Rgba)> {
@@ -45,21 +45,35 @@ fn one_light() -> CodeTheme {
         slots: AuthoredSlots {
             paper: rgb(0xffffff),
             added_band: rgb(0xe8f7ee),
-            deleted_band: rgb(0xd8dce1),
+            deleted_band: rgb(0xe4e6e9),
             replaced_band: rgb(0xe8f0fe),
-            word_difference: rgb(0xb9ceee),
-            line_number: rgb(0x98a2b3),
+            word_difference: rgb(0xe9eefb),
+            word_ring: rgb(0x4963a8),
+            line_number: rgb(0x596579),
             default_foreground: rgb(0x172033),
             comment: rgb(0x2457d6),
             idle_comment: rgb(0x596579),
             selection: Rgba {
-                a: 0.18,
-                ..rgb(0x2457d6)
+                a: 0.12,
+                ..rgb(0xffffff)
             },
-            search_hit: rgb(0xffe08a),
-            search_current: rgb(0xffc53d),
-            search_ring: rgb(0xe6a800),
+            search_hit: rgb(0xfff4c7),
+            search_hit_ring: rgb(0x8d6500),
+            search_current: rgb(0xffedac),
+            search_ring: rgb(0x8d5900),
             syntax: syntax_slots(ONE_LIGHT_SYNTAX),
+        },
+        marks: DiffMarks {
+            added_edge: rgb(0x31804a),
+            deleted_edge: rgb(0x737b86),
+            replaced_edge: rgb(0x4273c2),
+            unchanged_edge: rgb(0x888f99),
+            omission_fill: rgb(0xe8eaef),
+            omission_wave: rgb(0x6b7482),
+            open_comment_pad: rgb(0xf1f5ff),
+            drafting_band: rgb(0xe8eefc),
+            drafting_edge: rgb(0x4963a8),
+            selection_edge: rgb(0x2457d6),
         },
     }
 }
@@ -73,22 +87,24 @@ fn one_dark() -> CodeTheme {
             added_band: rgb(0x263b32),
             deleted_band: rgb(0x3b3032),
             replaced_band: rgb(0x30384a),
-            word_difference: rgb(0x52658a),
-            line_number: rgb(0x636d83),
+            word_difference: rgb(0x293149),
+            word_ring: rgb(0xa6c5fa),
+            line_number: rgb(0xa3aebd),
             default_foreground: rgb(0xabb2bf),
-            comment: rgb(0x61afef),
-            idle_comment: rgb(0x636d83),
+            comment: rgb(0x82c4f5),
+            idle_comment: rgb(0xa3aebd),
             selection: Rgba {
-                a: 0.25,
-                ..rgb(0x61afef)
+                a: 0.12,
+                ..rgb(0x000000)
             },
-            search_hit: rgb(0x665c24),
-            search_current: rgb(0x9e791e),
-            search_ring: rgb(0xe5c07b),
+            search_hit: rgb(0x313020),
+            search_hit_ring: rgb(0xdcc26b),
+            search_current: rgb(0x392e20),
+            search_ring: rgb(0xeacb7e),
             syntax: syntax_slots(&[
-                ("attribute", 0xe06c75),
-                ("comment", 0x7f848e),
-                ("comment.documentation", 0x7f848e),
+                ("attribute", 0xe5868d),
+                ("comment", 0x9da1a8),
+                ("comment.documentation", 0x9da1a8),
                 ("constant", 0xd19a66),
                 ("constant.builtin", 0xd19a66),
                 ("constructor", 0xe5c07b),
@@ -98,20 +114,32 @@ fn one_dark() -> CodeTheme {
                 ("function.macro", 0x61afef),
                 ("function.method", 0x61afef),
                 ("function.special", 0x61afef),
-                ("keyword", 0xc678dd),
+                ("keyword", 0xcc87e1),
                 ("label", 0xe5c07b),
                 ("number", 0xd19a66),
                 ("operator", 0x56b6c2),
-                ("property", 0xe06c75),
+                ("property", 0xe5868d),
                 ("punctuation.bracket", 0xabb2bf),
                 ("punctuation.delimiter", 0xabb2bf),
                 ("string", 0x98c379),
                 ("type", 0xe5c07b),
                 ("type.builtin", 0xe5c07b),
                 ("variable", 0xabb2bf),
-                ("variable.builtin", 0xe06c75),
-                ("variable.parameter", 0xe06c75),
+                ("variable.builtin", 0xe5868d),
+                ("variable.parameter", 0xe5868d),
             ]),
+        },
+        marks: DiffMarks {
+            added_edge: rgb(0x7acb98),
+            deleted_edge: rgb(0xdb8e98),
+            replaced_edge: rgb(0x96b7ef),
+            unchanged_edge: rgb(0xa3acb9),
+            omission_fill: rgb(0x343b47),
+            omission_wave: rgb(0xaab6c8),
+            open_comment_pad: rgb(0x344459),
+            drafting_band: rgb(0x303748),
+            drafting_edge: rgb(0xa6c5fa),
+            selection_edge: rgb(0x82c4f5),
         },
     }
 }
@@ -125,24 +153,26 @@ fn atom_one_light() -> CodeTheme {
             added_band: rgb(0xe6f4ea),
             deleted_band: rgb(0xf0e1e1),
             replaced_band: rgb(0xe5eefb),
-            word_difference: rgb(0xb8d2f2),
-            line_number: rgb(0x7f8794),
+            word_difference: rgb(0xe9effb),
+            word_ring: rgb(0x4963a8),
+            line_number: rgb(0x59636e),
             default_foreground: rgb(0x242936),
             comment: rgb(0x4078c0),
-            idle_comment: rgb(0x8a93a2),
+            idle_comment: rgb(0x59636e),
             selection: Rgba {
-                a: 0.18,
-                ..rgb(0x4078c0)
+                a: 0.12,
+                ..rgb(0xffffff)
             },
-            search_hit: rgb(0xffe6a3),
-            search_current: rgb(0xffc857),
-            search_ring: rgb(0xc58900),
+            search_hit: rgb(0xfff4c7),
+            search_hit_ring: rgb(0x8d6500),
+            search_current: rgb(0xffedac),
+            search_ring: rgb(0x8d5900),
             syntax: syntax_slots(&[
                 ("attribute", 0xa626a4),
-                ("comment", 0x6a737d),
+                ("comment", 0x5f6770),
                 ("comment.documentation", 0x59636e),
-                ("constant", 0x986801),
-                ("constant.builtin", 0x986801),
+                ("constant", 0x895d01),
+                ("constant.builtin", 0x895d01),
                 ("constructor", 0x005cc5),
                 ("delimiter", 0x586069),
                 ("escape", 0x005cc5),
@@ -152,18 +182,30 @@ fn atom_one_light() -> CodeTheme {
                 ("function.special", 0x005cc5),
                 ("keyword", 0xa626a4),
                 ("label", 0x005cc5),
-                ("number", 0x986801),
-                ("operator", 0x0184bc),
-                ("property", 0xe45649),
+                ("number", 0x895d01),
+                ("operator", 0x016d9b),
+                ("property", 0xaf4238),
                 ("punctuation.bracket", 0x586069),
                 ("punctuation.delimiter", 0x586069),
-                ("string", 0x50a14f),
-                ("type", 0x0184bc),
-                ("type.builtin", 0x0184bc),
+                ("string", 0x397238),
+                ("type", 0x016d9b),
+                ("type.builtin", 0x016d9b),
                 ("variable", 0x242936),
                 ("variable.builtin", 0xa626a4),
-                ("variable.parameter", 0xe45649),
+                ("variable.parameter", 0xaf4238),
             ]),
+        },
+        marks: DiffMarks {
+            added_edge: rgb(0x31804a),
+            deleted_edge: rgb(0xa04c56),
+            replaced_edge: rgb(0x4273c2),
+            unchanged_edge: rgb(0x848b95),
+            omission_fill: rgb(0xe9ebef),
+            omission_wave: rgb(0x6b7482),
+            open_comment_pad: rgb(0xedf3fb),
+            drafting_band: rgb(0xe9effb),
+            drafting_edge: rgb(0x4963a8),
+            selection_edge: rgb(0x4078c0),
         },
     }
 }
@@ -182,15 +224,16 @@ pub struct CodeThemePairing {
     pub dark: Option<String>,
 }
 
-/// One built-in palette: id, label, and authored slots. Derived roles are not stored.
+/// One built-in palette: authored code colors and Diff decoration colors.
 #[derive(Clone, Debug)]
 pub struct CodeTheme {
     pub id: String,
     pub label: String,
     pub slots: AuthoredSlots,
+    pub marks: DiffMarks,
 }
 
-/// Colors a Code Theme authors. Derived edges and pads are not fields here.
+/// Code paper, foregrounds, and in-line mark colors authored by a Code Theme.
 #[derive(Clone, Debug)]
 pub struct AuthoredSlots {
     pub paper: Rgba,
@@ -198,18 +241,20 @@ pub struct AuthoredSlots {
     pub deleted_band: Rgba,
     pub replaced_band: Rgba,
     pub word_difference: Rgba,
+    pub word_ring: Rgba,
     pub line_number: Rgba,
     pub default_foreground: Rgba,
     pub comment: Rgba,
     pub idle_comment: Rgba,
     pub selection: Rgba,
     pub search_hit: Rgba,
+    pub search_hit_ring: Rgba,
     pub search_current: Rgba,
     pub search_ring: Rgba,
     pub syntax: Vec<(String, Rgba)>,
 }
 
-/// The palette Diff paints from: the chosen entry's authored slots, plus derived roles.
+/// The palette Diff paints from. It is independent of Software Theme colors.
 #[derive(Clone, Debug)]
 pub struct ResolvedCodeTheme {
     pub id: String,
@@ -217,7 +262,7 @@ pub struct ResolvedCodeTheme {
     #[allow(dead_code)]
     pub label: String,
     pub slots: AuthoredSlots,
-    pub derived: DerivedRoles,
+    pub marks: DiffMarks,
 }
 
 impl ResolvedCodeTheme {
@@ -237,17 +282,20 @@ impl ResolvedCodeTheme {
     }
 }
 
-/// Roles computed from authored slots. Not chosen in Settings.
+/// Diff decorations are authored per palette because shifting light RGB values
+/// does not preserve their contrast or status meaning on dark paper.
 #[derive(Clone, Debug)]
-pub struct DerivedRoles {
+pub struct DiffMarks {
     pub added_edge: Rgba,
     pub deleted_edge: Rgba,
     pub replaced_edge: Rgba,
     pub unchanged_edge: Rgba,
     pub omission_fill: Rgba,
     pub omission_wave: Rgba,
-    pub knockout: Rgba,
     pub open_comment_pad: Rgba,
+    pub drafting_band: Rgba,
+    pub drafting_edge: Rgba,
+    pub selection_edge: Rgba,
 }
 
 pub fn builtin_catalog() -> &'static [CodeTheme] {
@@ -260,50 +308,6 @@ pub fn default_id(mode: SoftwareThemeMode) -> &'static str {
     match mode {
         SoftwareThemeMode::Light => crate::theme_defaults::LIGHT_CODE_THEME_ID,
         SoftwareThemeMode::Dark => crate::theme_defaults::DARK_CODE_THEME_ID,
-    }
-}
-
-/// Derived roles of the authored slots. Does not branch on theme id.
-///
-/// Preserve the One Light pins while following changes to the source slot.
-/// ponytail: calibrated RGB offsets clamp at channel limits; validate these
-/// derived colors before shipping another palette.
-fn shifted(base: u32, reference: u32, source: Rgba) -> Rgba {
-    let channel = |base: u8, reference: u8, source: f32| {
-        (f32::from(base) + (source * 255. - f32::from(reference))).clamp(0., 255.) / 255.
-    };
-    Rgba {
-        r: channel((base >> 16) as u8, (reference >> 16) as u8, source.r),
-        g: channel((base >> 8) as u8, (reference >> 8) as u8, source.g),
-        b: channel(base as u8, reference as u8, source.b),
-        a: source.a,
-    }
-}
-
-/// Derive a pad toward paper, calibrated to One Light's comment and pad colors.
-fn comment_pad(comment: Rgba, paper: Rgba) -> Rgba {
-    let channel = |comment: f32, paper: f32, reference: u8, pad: u8| {
-        let amount = f32::from(pad - reference) / f32::from(255 - reference);
-        comment + (paper - comment) * amount
-    };
-    Rgba {
-        r: channel(comment.r, paper.r, 0x24, 0xf1),
-        g: channel(comment.g, paper.g, 0x57, 0xf5),
-        b: channel(comment.b, paper.b, 0xd6, 0xff),
-        a: paper.a,
-    }
-}
-
-fn derive(slots: &AuthoredSlots) -> DerivedRoles {
-    DerivedRoles {
-        added_edge: shifted(0x7ccf98, 0xe8f7ee, slots.added_band),
-        deleted_edge: shifted(0xa3aab3, 0xd8dce1, slots.deleted_band),
-        replaced_edge: shifted(0x7fa6ea, 0xe8f0fe, slots.replaced_band),
-        unchanged_edge: shifted(0xdfe3ea, 0xffffff, slots.paper),
-        omission_fill: shifted(0xe8eaef, 0xffffff, slots.paper),
-        omission_wave: shifted(0x98a2b3, 0xffffff, slots.paper),
-        knockout: slots.paper,
-        open_comment_pad: comment_pad(slots.comment, slots.paper),
     }
 }
 
@@ -324,7 +328,7 @@ pub fn resolve(
         id: entry.id.clone(),
         label: entry.label.clone(),
         slots: entry.slots.clone(),
-        derived: derive(&entry.slots),
+        marks: entry.marks.clone(),
     }
 }
 
@@ -402,48 +406,50 @@ mod tests {
         assert_eq!(palette.label, "One Light");
         assert_hex(palette.slots.paper, 0xffffff);
         assert_hex(palette.slots.added_band, 0xe8f7ee);
-        assert_hex(palette.slots.deleted_band, 0xd8dce1);
+        assert_hex(palette.slots.deleted_band, 0xe4e6e9);
         assert_hex(palette.slots.replaced_band, 0xe8f0fe);
-        assert_hex(palette.slots.word_difference, 0xb9ceee);
-        assert_hex(palette.slots.line_number, 0x98a2b3);
+        assert_hex(palette.slots.word_difference, 0xe9eefb);
+        assert_hex(palette.slots.word_ring, 0x4963a8);
+        assert_hex(palette.slots.line_number, 0x596579);
         assert_hex(palette.slots.default_foreground, 0x172033);
         assert_hex(palette.slots.comment, 0x2457d6);
         assert_hex(palette.slots.idle_comment, 0x596579);
-        assert_hex(palette.slots.selection, 0x2457d6);
+        assert_hex(palette.slots.selection, 0xffffff);
         assert!(
-            (palette.slots.selection.a - 0.18).abs() < 1e-5,
+            (palette.slots.selection.a - 0.12).abs() < 1e-5,
             "selection alpha {}",
             palette.slots.selection.a
         );
-        assert_hex(palette.slots.search_hit, 0xffe08a);
-        assert_hex(palette.slots.search_current, 0xffc53d);
-        assert_hex(palette.slots.search_ring, 0xe6a800);
+        assert_hex(palette.slots.search_hit, 0xfff4c7);
+        assert_hex(palette.slots.search_hit_ring, 0x8d6500);
+        assert_hex(palette.slots.search_current, 0xffedac);
+        assert_hex(palette.slots.search_ring, 0x8d5900);
         let syntax = [
-            ("attribute", 0x526bcb),
-            ("comment", 0x717274),
-            ("comment.documentation", 0x6f7178),
-            ("constant", 0x966600),
-            ("constant.builtin", 0x966600),
-            ("constructor", 0x526bcb),
+            ("attribute", 0x4b61b9),
+            ("comment", 0x666769),
+            ("comment.documentation", 0x65676d),
+            ("constant", 0x8b5e00),
+            ("constant.builtin", 0x8b5e00),
+            ("constructor", 0x4b61b9),
             ("delimiter", 0x4d4f52),
-            ("escape", 0x6f7178),
-            ("function", 0x516ccc),
-            ("function.macro", 0x516ccc),
-            ("function.method", 0x516ccc),
-            ("function.special", 0x516ccc),
-            ("keyword", 0xa449ab),
-            ("label", 0x526bcb),
-            ("number", 0x9f6522),
-            ("operator", 0x3377a8),
-            ("property", 0xb55243),
+            ("escape", 0x65676d),
+            ("function", 0x4961b8),
+            ("function.macro", 0x4961b8),
+            ("function.method", 0x4961b8),
+            ("function.special", 0x4961b8),
+            ("keyword", 0x9a44a0),
+            ("label", 0x4b61b9),
+            ("number", 0x905b1f),
+            ("operator", 0x2e6c98),
+            ("property", 0xa64b3e),
             ("punctuation.bracket", 0x4d4f52),
             ("punctuation.delimiter", 0x4d4f52),
-            ("string", 0x4d7c43),
-            ("type", 0x3377a8),
-            ("type.builtin", 0x3377a8),
+            ("string", 0x46713d),
+            ("type", 0x2e6c98),
+            ("type.builtin", 0x2e6c98),
             ("variable", 0x242529),
             ("variable.builtin", 0x242529),
-            ("variable.parameter", 0xb55243),
+            ("variable.parameter", 0xa64b3e),
         ];
         assert_eq!(palette.slots.syntax.len(), syntax.len());
         for (name, expected) in syntax {
@@ -490,26 +496,25 @@ mod tests {
     }
 
     #[test]
-    fn one_light_derived_roles_match_todays_diff_colors() {
+    fn one_light_diff_marks_are_authored() {
         let palette = one_light_palette();
-        assert_hex(palette.derived.added_edge, 0x7ccf98);
-        assert_hex(palette.derived.deleted_edge, 0xa3aab3);
-        assert_hex(palette.derived.replaced_edge, 0x7fa6ea);
-        assert_hex(palette.derived.unchanged_edge, 0xdfe3ea);
-        assert_hex(palette.derived.omission_fill, 0xe8eaef);
-        assert_hex(palette.derived.omission_wave, 0x98a2b3);
-        assert_hex(palette.derived.knockout, 0xffffff);
-        assert_hex(palette.derived.open_comment_pad, 0xf1f5ff);
+        assert_hex(palette.marks.added_edge, 0x31804a);
+        assert_hex(palette.marks.deleted_edge, 0x737b86);
+        assert_hex(palette.marks.replaced_edge, 0x4273c2);
+        assert_hex(palette.marks.unchanged_edge, 0x888f99);
+        assert_hex(palette.marks.omission_fill, 0xe8eaef);
+        assert_hex(palette.marks.omission_wave, 0x6b7482);
+        assert_hex(palette.marks.open_comment_pad, 0xf1f5ff);
     }
 
     #[test]
-    fn derived_roles_follow_the_chosen_palettes_slots() {
+    fn diff_marks_follow_the_chosen_palette() {
         let original = one_light_palette();
         let mut theme = fixture("changed-slots", 0x202020);
-        theme.slots.added_band = rgb(0x90a090);
-        theme.slots.deleted_band = rgb(0x909090);
-        theme.slots.replaced_band = rgb(0x9090a0);
-        theme.slots.comment = rgb(0x804020);
+        theme.marks.added_edge = rgb(0x90a090);
+        theme.marks.deleted_edge = rgb(0x909090);
+        theme.marks.replaced_edge = rgb(0x9090a0);
+        theme.marks.open_comment_pad = rgb(0x804020);
         let palette = resolve(
             SoftwareThemeMode::Light,
             &CodeThemePairing {
@@ -519,39 +524,52 @@ mod tests {
             &[theme, one_light()],
         );
         for (changed, previous) in [
-            (palette.derived.added_edge, original.derived.added_edge),
-            (palette.derived.deleted_edge, original.derived.deleted_edge),
+            (palette.marks.added_edge, original.marks.added_edge),
+            (palette.marks.deleted_edge, original.marks.deleted_edge),
+            (palette.marks.replaced_edge, original.marks.replaced_edge),
             (
-                palette.derived.replaced_edge,
-                original.derived.replaced_edge,
-            ),
-            (
-                palette.derived.unchanged_edge,
-                original.derived.unchanged_edge,
-            ),
-            (
-                palette.derived.omission_fill,
-                original.derived.omission_fill,
-            ),
-            (
-                palette.derived.omission_wave,
-                original.derived.omission_wave,
-            ),
-            (
-                palette.derived.open_comment_pad,
-                original.derived.open_comment_pad,
+                palette.marks.open_comment_pad,
+                original.marks.open_comment_pad,
             ),
         ] {
             assert_ne!(hex(changed), hex(previous));
         }
-        assert_eq!(hex(palette.derived.knockout), hex(palette.slots.paper));
+    }
+
+    #[test]
+    fn explicit_code_theme_has_same_diff_colors_in_either_software_mode() {
+        for theme in builtin_catalog() {
+            let pairing = CodeThemePairing {
+                light: Some(theme.id.clone()),
+                dark: Some(theme.id.clone()),
+            };
+            let light = resolve(SoftwareThemeMode::Light, &pairing, builtin_catalog());
+            let dark = resolve(SoftwareThemeMode::Dark, &pairing, builtin_catalog());
+            assert_eq!(hex(light.slots.paper), hex(dark.slots.paper));
+            assert_eq!(
+                hex(light.slots.word_difference),
+                hex(dark.slots.word_difference)
+            );
+            assert_eq!(
+                hex(light.marks.omission_wave),
+                hex(dark.marks.omission_wave)
+            );
+            assert_eq!(
+                hex(light.marks.drafting_band),
+                hex(dark.marks.drafting_band)
+            );
+            assert_eq!(
+                hex(light.capture_color("comment")),
+                hex(dark.capture_color("comment"))
+            );
+        }
     }
 
     #[test]
     fn capture_lookup_drops_dotted_segments_then_uses_default_foreground() {
         let palette = one_light_palette();
-        assert_hex(palette.capture_color("function"), 0x516ccc);
-        assert_hex(palette.capture_color("function.method.call"), 0x516ccc);
+        assert_hex(palette.capture_color("function"), 0x4961b8);
+        assert_hex(palette.capture_color("function.method.call"), 0x4961b8);
         assert_hex(palette.capture_color("no.such.capture"), 0x172033);
         assert_hex(palette.capture_color("unknown"), 0x172033);
     }
@@ -612,27 +630,124 @@ mod tests {
         (hi + 0.05) / (lo + 0.05)
     }
 
+    fn composite(fg: Rgba, bg: Rgba) -> Rgba {
+        Rgba {
+            r: fg.r * fg.a + bg.r * (1. - fg.a),
+            g: fg.g * fg.a + bg.g * (1. - fg.a),
+            b: fg.b * fg.a + bg.b * (1. - fg.a),
+            a: 1.,
+        }
+    }
+
     #[test]
-    fn one_light_syntax_foregrounds_meet_contrast_on_code_surfaces() {
-        let palette = one_light_palette();
-        let bgs = [
-            ("paper", palette.slots.paper),
-            ("added band", palette.slots.added_band),
-            ("deleted band", palette.slots.deleted_band),
-            ("replaced band", palette.slots.replaced_band),
-            ("word-difference mark", palette.slots.word_difference),
-            ("search hit", palette.slots.search_hit),
-            ("current search hit", palette.slots.search_current),
-        ];
-        for (name, fg) in &palette.slots.syntax {
-            for (bg_name, bg) in bgs {
-                let ratio = contrast_ratio(*fg, bg);
-                assert!(
-                    ratio >= 3.0,
-                    "{name} on {bg_name}: contrast {ratio:.2} < 3.0"
-                );
+    fn builtin_syntax_foregrounds_meet_text_contrast_on_actual_fills() {
+        let mut failures = Vec::new();
+        for theme in builtin_catalog() {
+            let slots = &theme.slots;
+            let bgs = [
+                ("paper", slots.paper),
+                ("added band", slots.added_band),
+                ("deleted band", slots.deleted_band),
+                ("replaced band", slots.replaced_band),
+                ("word-difference mark", slots.word_difference),
+                ("search hit", slots.search_hit),
+                ("current search hit", slots.search_current),
+                ("drafting band", theme.marks.drafting_band),
+            ];
+            for (name, fg) in std::iter::once((&"default".to_string(), &slots.default_foreground))
+                .chain(slots.syntax.iter().map(|(name, color)| (name, color)))
+            {
+                for (bg_name, bg) in bgs {
+                    let painted_surfaces = if matches!(
+                        bg_name,
+                        "paper" | "added band" | "deleted band" | "replaced band" | "drafting band"
+                    ) {
+                        vec![
+                            (bg_name.to_string(), bg),
+                            (
+                                format!("{bg_name} with selection"),
+                                composite(slots.selection, bg),
+                            ),
+                        ]
+                    } else {
+                        vec![(bg_name.to_string(), bg)]
+                    };
+                    for (surface, painted) in painted_surfaces {
+                        let ratio = contrast_ratio(*fg, painted);
+                        if ratio < 4.5 {
+                            failures.push(format!("{} {name} on {surface}: {ratio:.2}", theme.id));
+                        }
+                    }
+                }
             }
         }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn builtin_diff_decoration_marks_are_distinct_on_painted_surfaces() {
+        let mut failures = Vec::new();
+        for theme in builtin_catalog() {
+            let s = &theme.slots;
+            let m = &theme.marks;
+            let bands = [s.paper, s.added_band, s.deleted_band, s.replaced_band];
+            let checks = [
+                ("added edge", m.added_edge, s.added_band),
+                ("deleted edge", m.deleted_edge, s.deleted_band),
+                ("replaced edge", m.replaced_edge, s.replaced_band),
+                ("unchanged edge", m.unchanged_edge, s.paper),
+                ("omission wave", m.omission_wave, m.omission_fill),
+                ("omission wave on paper", m.omission_wave, s.paper),
+                ("drafting edge", m.drafting_edge, m.drafting_band),
+                ("word outline", s.word_ring, s.word_difference),
+                ("search hit outline", s.search_hit_ring, s.search_hit),
+                ("current search outline", s.search_ring, s.search_current),
+                ("comment icon on pad", s.comment, m.open_comment_pad),
+            ];
+            for (name, fg, bg) in checks {
+                let ratio = contrast_ratio(fg, bg);
+                if ratio < 3. {
+                    failures.push(format!("{} {name}: {ratio:.2}", theme.id));
+                }
+            }
+            for (name, fg) in [
+                ("line number", s.line_number),
+                ("comment marker", s.comment),
+                ("idle comment", s.idle_comment),
+                ("selection edge", m.selection_edge),
+            ] {
+                for (ix, bg) in bands.into_iter().enumerate() {
+                    let target = if name == "line number" { 4.5 } else { 3. };
+                    let ratio = contrast_ratio(fg, bg);
+                    if ratio < target {
+                        failures.push(format!("{} {name} on band {ix}: {ratio:.2}", theme.id));
+                    }
+                }
+            }
+            for (ix, bg) in bands.into_iter().enumerate() {
+                let selected_bg = composite(s.selection, bg);
+                let ratio = contrast_ratio(m.selection_edge, selected_bg);
+                if ratio < 3. {
+                    failures.push(format!(
+                        "{} selection edge on band {ix}: {ratio:.2}",
+                        theme.id
+                    ));
+                }
+            }
+            for (name, ring) in [
+                ("word outline", s.word_ring),
+                ("search hit outline", s.search_hit_ring),
+                ("current search outline", s.search_ring),
+            ] {
+                for (ix, bg) in bands.into_iter().enumerate() {
+                    let ratio = contrast_ratio(ring, bg);
+                    if ratio < 3. {
+                        failures.push(format!("{} {name} on band {ix}: {ratio:.2}", theme.id));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     fn fixture(id: &str, paper: u32) -> CodeTheme {

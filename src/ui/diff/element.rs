@@ -13,7 +13,7 @@ use gpui::{
     GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba,
     ScrollWheelEvent, ShapedLine, SharedString, Style, TextRun, Window, fill, font, point, px,
-    relative, rgb, size,
+    relative, size,
 };
 
 use super::layout::{Layout, LineKind, Row};
@@ -49,7 +49,6 @@ pub(super) const COMMENT_BAR: f32 = 2.;
 const EDGE_W: f32 = 1.;
 /// How far a culled bridge's tab reaches into the middle gutter; also its corner radius.
 const TAB_W: f32 = 3.;
-const DRAFTING_BG: u32 = 0xdbe4ff;
 
 /// Current Diff find occurrence for paint (side + line + byte range).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -308,6 +307,7 @@ struct RowPaint {
     kind_bg: Rgba,
     bg: Rgba,
     commented: bool,
+    drafting: bool,
     /// Inside the drag selection: the code column takes a translucent wash.
     selected: bool,
     text: Option<ShapedLine>,
@@ -601,11 +601,12 @@ pub(super) fn build_frame(
                 y1: y_of(i + 1),
                 kind_bg,
                 bg: if drafting_here {
-                    rgb(DRAFTING_BG)
+                    code_theme.marks.drafting_band
                 } else {
                     kind_bg
                 },
                 commented,
+                drafting: drafting_here,
                 selected: selected_here,
                 text: shape.text.clone(),
                 text_leading: leading,
@@ -990,18 +991,18 @@ fn kind_bg(kind: Option<LineKind>, theme: &ResolvedCodeTheme) -> Rgba {
 
 fn kind_edge(kind: LineKind, theme: &ResolvedCodeTheme) -> Rgba {
     match kind {
-        LineKind::Replace => theme.derived.replaced_edge,
-        LineKind::Insert => theme.derived.added_edge,
-        LineKind::Delete => theme.derived.deleted_edge,
-        LineKind::Equal => theme.derived.unchanged_edge,
+        LineKind::Replace => theme.marks.replaced_edge,
+        LineKind::Insert => theme.marks.added_edge,
+        LineKind::Delete => theme.marks.deleted_edge,
+        LineKind::Equal => theme.marks.unchanged_edge,
     }
 }
 
 /// A seam on the old side is an insertion point, on the new side a deletion point.
 fn seam_color(side: Side, theme: &ResolvedCodeTheme) -> Rgba {
     match side {
-        Side::Preimage => theme.derived.added_edge,
-        Side::Postimage => theme.derived.deleted_edge,
+        Side::Preimage => theme.marks.added_edge,
+        Side::Postimage => theme.marks.deleted_edge,
     }
 }
 
@@ -1073,7 +1074,7 @@ impl Frame {
                 self.paint_gutter(window, cx);
             },
         );
-        paint_omit_waves(window, geom, &self.waves);
+        paint_omit_waves(window, geom, &self.waves, &self.code_theme);
         let scrollbar_colors = theme::software_palette().scrollbar;
         for side in [Side::Preimage, Side::Postimage] {
             let frame = &self.sides[side_ix(side)];
@@ -1118,19 +1119,44 @@ impl Frame {
                         hline(x0, x1, row.y0, row.y1 - row.y0),
                         self.code_theme.slots.selection,
                     ));
+                    window.paint_quad(fill(
+                        hline(x0, x0 + 2., row.y0, row.y1 - row.y0),
+                        self.code_theme.marks.selection_edge,
+                    ));
+                }
+                if row.drafting {
+                    window.paint_quad(fill(
+                        hline(x0 + 2., x0 + 4., row.y0, row.y1 - row.y0),
+                        self.code_theme.marks.drafting_edge,
+                    ));
                 }
                 let (bar_x0, bar_x1, bar_text_inset) = comment_bar_layout(side, x0, x1);
                 let mut text_x = x0 + TEXT_PAD - frame.x_offset + row.text_leading;
                 if row.commented {
                     text_x += bar_text_inset;
                 }
+                for &(a, b) in &row.marks {
+                    let y = row.y0 + (self.row_h - mark_h) / 2.;
+                    let rect = hline(text_x + a, text_x + b, y, mark_h);
+                    window.paint_quad(
+                        fill(
+                            hline(text_x + a - 1., text_x + b + 1., y - 1., mark_h + 2.),
+                            self.code_theme.slots.word_ring,
+                        )
+                        .corner_radii(px(3.)),
+                    );
+                    window.paint_quad(
+                        fill(rect, self.code_theme.slots.word_difference).corner_radii(px(2.)),
+                    );
+                }
                 for &(a, b, is_cur) in &row.search {
                     let y = row.y0 + (self.row_h - mark_h) / 2.;
                     let rect = hline(text_x + a, text_x + b, y, mark_h);
                     if is_cur {
-                        // Pulse: briefly enlarge ring, then settle on hit-cur + 1px ring.
+                        // A persistent 2px ring distinguishes the current hit;
+                        // the pulse briefly enlarges it on navigation.
                         let pulse = self.search_pulse.unwrap_or(0.);
-                        let ring = 1. + pulse * 2.;
+                        let ring = 2. + pulse * 2.;
                         let ring_rect = hline(
                             text_x + a - ring,
                             text_x + b + ring,
@@ -1146,20 +1172,16 @@ impl Frame {
                         );
                     } else {
                         window.paint_quad(
+                            fill(
+                                hline(text_x + a - 1., text_x + b + 1., y - 1., mark_h + 2.),
+                                self.code_theme.slots.search_hit_ring,
+                            )
+                            .corner_radii(px(3.)),
+                        );
+                        window.paint_quad(
                             fill(rect, self.code_theme.slots.search_hit).corner_radii(px(2.)),
                         );
                     }
-                }
-                for &(a, b) in &row.marks {
-                    let rect = hline(
-                        text_x + a,
-                        text_x + b,
-                        row.y0 + (self.row_h - mark_h) / 2.,
-                        mark_h,
-                    );
-                    window.paint_quad(
-                        fill(rect, self.code_theme.slots.word_difference).corner_radii(px(2.)),
-                    );
                 }
                 if let Some(text) = &row.text {
                     text.paint(point(px(text_x), px(row.y0)), row_h, window, cx)
@@ -1275,7 +1297,12 @@ fn paint_comment_icon(window: &mut Window, icon: &IconSlot, theme: &ResolvedCode
         let wy = y0 - (wash - ICON_GLYPH) / 2.;
         let wash_bounds =
             Bounds::from_corners(point(px(wx), px(wy)), point(px(wx + wash), px(wy + wash)));
-        window.paint_quad(fill(wash_bounds, theme.derived.open_comment_pad).corner_radii(px(4.)));
+        window.paint_quad(fill(wash_bounds, theme.slots.comment).corner_radii(px(4.)));
+        let pad_bounds = Bounds::from_corners(
+            point(px(wx + 1.), px(wy + 1.)),
+            point(px(wx + wash - 1.), px(wy + wash - 1.)),
+        );
+        window.paint_quad(fill(pad_bounds, theme.marks.open_comment_pad).corner_radii(px(3.)));
     }
     match icon.mark {
         IconMark::Empty => {
@@ -1327,7 +1354,7 @@ fn paint_comment_icon(window: &mut Window, icon: &IconSlot, theme: &ResolvedCode
                 stroke.move_to(at(5.2, y));
                 stroke.line_to(at(x1, y));
                 if let Ok(path) = stroke.build() {
-                    window.paint_path(path, theme.derived.knockout);
+                    window.paint_path(path, theme.slots.paper);
                 }
             }
         }
@@ -1426,7 +1453,12 @@ fn tab(bridge: &WinBridge, side: Side, flat_w: f32) -> (PathBuilder, PathBuilder
     (fill, edges)
 }
 
-fn paint_omit_waves(window: &mut Window, geom: Geom, folds: &[(f32, f32)]) {
+fn paint_omit_waves(
+    window: &mut Window,
+    geom: Geom,
+    folds: &[(f32, f32)],
+    theme: &ResolvedCodeTheme,
+) {
     if folds.is_empty() {
         return;
     }
@@ -1442,8 +1474,7 @@ fn paint_omit_waves(window: &mut Window, geom: Geom, folds: &[(f32, f32)]) {
             let flat = geom.flat_w();
             let path = joined_wave(x0, x1, y_l, gutter_l + flat, gutter_r - flat, y_r);
             if let Ok(path) = path.build() {
-                // Center omission sine, pinned to today's paint.
-                window.paint_path(path, rgb(0xb5b5b5));
+                window.paint_path(path, theme.marks.omission_wave);
             }
         }
     });
@@ -1505,7 +1536,7 @@ fn paint_gaps(
             continue;
         }
         let rect = hline(f32::from(pane.left()), f32::from(pane.right()), y0, y1 - y0);
-        window.paint_quad(fill(rect, theme.derived.omission_fill));
+        window.paint_quad(fill(rect, theme.marks.omission_fill));
         window.with_content_mask(Some(ContentMask { bounds: rect }), |window| {
             let width = f32::from(rect.size.width);
             let left = f32::from(rect.left());
@@ -1517,7 +1548,7 @@ fn paint_gaps(
                 stroke.move_to(point(px(left), px(y)));
                 stroke.line_to(point(px(left + width), px(y + width)));
                 if let Ok(path) = stroke.build() {
-                    window.paint_path(path, theme.derived.omission_wave);
+                    window.paint_path(path, theme.marks.omission_wave);
                 }
                 y += 7.;
             }
@@ -1796,6 +1827,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::rgb;
 
     #[test]
     fn comment_bar_hugs_the_center_gutter() {
