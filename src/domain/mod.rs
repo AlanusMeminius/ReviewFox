@@ -82,21 +82,32 @@ impl Repository {
     }
 }
 
-/// Reviewable surface: `(repository, base_oid, head_oid)` — commit OIDs only.
+/// Reviewable surface: `(repository, base, head)`.
+/// Commit comparisons use two commit OIDs. A Worktree comparison sets
+/// `worktree` and stores the checkout's HEAD commit in both OID fields;
+/// head is the on-disk tree, not that commit (ADR-0014).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Comparison {
     pub repository: Repository,
     /// Base commit; `None` = the empty tree (base of a root commit).
+    /// For a Worktree comparison this is the checkout's HEAD commit.
     pub base_oid: Option<Oid>,
+    /// Head commit. For a Worktree comparison this is the same HEAD commit;
+    /// the postimage is the checkout, not this object.
     pub head_oid: Oid,
+    /// Postimage is the checkout's on-disk tree against `head_oid`.
+    pub worktree: bool,
 }
 
 impl Comparison {
     /// Label shown for an empty-tree base.
     pub const EMPTY_BASE_LABEL: &'static str = "root";
 
-    /// `e7a2ab7..287bfa5`, or `root..ae12de0` for an empty-tree base.
+    /// `e7a2ab7..287bfa5`, `root..ae12de0`, or `e7a2ab7..worktree`.
     pub fn label(&self) -> String {
+        if self.worktree {
+            return format!("{}..worktree", self.head_oid.short());
+        }
         let base = self
             .base_oid
             .map(|o| o.short())
@@ -889,6 +900,7 @@ mod tests {
             repository: Repository::new(PathBuf::from("/tmp/repo")),
             base_oid: Some(Oid::from_bytes([1; 20])),
             head_oid: Oid::from_bytes([2; 20]),
+            worktree: false,
         }
     }
 
@@ -898,6 +910,12 @@ mod tests {
         assert_eq!(c.label(), "0101010..0202020");
         c.base_oid = None;
         assert_eq!(c.label(), "root..0202020");
+        c.worktree = true;
+        c.head_oid = Oid::from_bytes([1; 20]);
+        assert_eq!(c.label(), "0101010..worktree");
+        let mut commit = c.clone();
+        commit.worktree = false;
+        assert_ne!(c, commit);
     }
 
     #[test]

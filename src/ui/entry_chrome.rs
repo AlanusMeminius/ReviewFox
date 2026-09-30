@@ -12,14 +12,13 @@ use crate::workspace_store::MrEntryLabel;
 pub enum EntryKind {
     Branch,
     Mr,
+    Worktree,
 }
 
 /// Titlebar Entry chrome layout when a Workspace is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryChromeMode {
-    /// No GitLab chrome — Branch Browser pill only.
-    BranchPillOnly,
-    /// GitLab chrome — capsule-track kind switch beside a separate value pill.
+    /// Kind track + value pill. Shown with or without GitLab (ADR-0013).
     KindTrackAndValuePill,
 }
 
@@ -30,6 +29,8 @@ pub enum KindSwitchAction {
     Stay,
     /// Select Branch Browser; clear selected MR Entry (keep last-MR memory).
     SelectBranch,
+    /// Read the checkout against HEAD. No picker, no last-Worktree memory.
+    SelectWorktree,
     /// Restore MR Entry from last-MR memory via the existing restore path.
     /// Does not auto-open the picker.
     RestoreMr(MrEntryLabel),
@@ -46,22 +47,20 @@ pub enum RestoreFailureAction {
     EnterEmptyMrOpenPicker,
 }
 
-/// Active kind: MR when an Entry is selected or empty-MR chrome is held.
-pub fn active_entry_kind(mr_selected: bool, empty_mr: bool) -> EntryKind {
-    if mr_selected || empty_mr {
+/// Active kind. Worktree wins; otherwise MR when an Entry is selected or empty-MR chrome is held.
+pub fn active_entry_kind(mr_selected: bool, empty_mr: bool, worktree: bool) -> EntryKind {
+    if worktree {
+        EntryKind::Worktree
+    } else if mr_selected || empty_mr {
         EntryKind::Mr
     } else {
         EntryKind::Branch
     }
 }
 
-/// Chrome layout from whether GitLab host matching applies.
-pub fn chrome_mode(gitlab_visible: bool) -> EntryChromeMode {
-    if gitlab_visible {
-        EntryChromeMode::KindTrackAndValuePill
-    } else {
-        EntryChromeMode::BranchPillOnly
-    }
+/// Chrome layout. The kind track is always on so Worktree is reachable without GitLab.
+pub fn chrome_mode(_gitlab_visible: bool) -> EntryChromeMode {
+    EntryChromeMode::KindTrackAndValuePill
 }
 
 /// While a picker is open, hide only the value pill (kind track stays usable).
@@ -80,6 +79,7 @@ pub fn kind_switch_action(
     }
     match target {
         EntryKind::Branch => KindSwitchAction::SelectBranch,
+        EntryKind::Worktree => KindSwitchAction::SelectWorktree,
         EntryKind::Mr => match last_mr {
             Some(label) => KindSwitchAction::RestoreMr(label.clone()),
             None => KindSwitchAction::EnterEmptyMr,
@@ -127,9 +127,15 @@ pub fn restore_failure_action(from_kind_switch: bool) -> RestoreFailureAction {
 }
 
 /// Value-hit label for the active kind.
-pub fn value_label(kind: EntryKind, branch: &str, mr_iid: Option<u64>) -> String {
+pub fn value_label(
+    kind: EntryKind,
+    branch: &str,
+    mr_iid: Option<u64>,
+    checkout: &str,
+) -> String {
     match kind {
         EntryKind::Branch => branch.to_string(),
+        EntryKind::Worktree => checkout.to_string(),
         EntryKind::Mr => match mr_iid {
             Some(iid) => format!("!{iid}"),
             None => "Select MR…".into(),
@@ -150,16 +156,17 @@ mod tests {
 
     #[test]
     fn active_kind_follows_mr_entry_or_empty_mr_hold() {
-        assert_eq!(active_entry_kind(false, false), EntryKind::Branch);
-        assert_eq!(active_entry_kind(true, false), EntryKind::Mr);
-        assert_eq!(active_entry_kind(false, true), EntryKind::Mr);
-        assert_eq!(active_entry_kind(true, true), EntryKind::Mr);
+        assert_eq!(active_entry_kind(false, false, false), EntryKind::Branch);
+        assert_eq!(active_entry_kind(true, false, false), EntryKind::Mr);
+        assert_eq!(active_entry_kind(false, true, false), EntryKind::Mr);
+        assert_eq!(active_entry_kind(true, true, false), EntryKind::Mr);
+        assert_eq!(active_entry_kind(true, true, true), EntryKind::Worktree);
     }
 
     #[test]
-    fn gitlab_visible_uses_kind_track_and_value_pill() {
+    fn kind_track_shows_with_or_without_gitlab() {
         assert_eq!(chrome_mode(true), EntryChromeMode::KindTrackAndValuePill);
-        assert_eq!(chrome_mode(false), EntryChromeMode::BranchPillOnly);
+        assert_eq!(chrome_mode(false), EntryChromeMode::KindTrackAndValuePill);
     }
 
     #[test]
@@ -210,6 +217,22 @@ mod tests {
     }
 
     #[test]
+    fn switching_to_worktree_does_not_restore_mr() {
+        assert_eq!(
+            kind_switch_action(
+                EntryKind::Branch,
+                EntryKind::Worktree,
+                Some(&label("acme/app", 42))
+            ),
+            KindSwitchAction::SelectWorktree
+        );
+        assert_eq!(
+            kind_switch_action(EntryKind::Worktree, EntryKind::Worktree, None),
+            KindSwitchAction::Stay
+        );
+    }
+
+    #[test]
     fn kind_switch_restore_failure_opens_empty_mr_picker() {
         assert_eq!(
             restore_failure_action(true),
@@ -256,10 +279,20 @@ mod tests {
     #[test]
     fn value_label_shows_branch_mr_iid_or_select_prompt() {
         assert_eq!(
-            value_label(EntryKind::Branch, "feature/mr", None),
+            value_label(EntryKind::Branch, "feature/mr", None, "main"),
             "feature/mr"
         );
-        assert_eq!(value_label(EntryKind::Mr, "feature/mr", Some(42)), "!42");
-        assert_eq!(value_label(EntryKind::Mr, "feature/mr", None), "Select MR…");
+        assert_eq!(
+            value_label(EntryKind::Mr, "feature/mr", Some(42), "main"),
+            "!42"
+        );
+        assert_eq!(
+            value_label(EntryKind::Mr, "feature/mr", None, "main"),
+            "Select MR…"
+        );
+        assert_eq!(
+            value_label(EntryKind::Worktree, "feature/mr", None, "main"),
+            "main"
+        );
     }
 }

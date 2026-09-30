@@ -3,7 +3,8 @@ use gpui::{
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, ParentElement, Pixels, Point, Render, Size, StatefulInteractiveElement, Styled,
     TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowDecorations, WindowHandle,
-    WindowOptions, anchored, canvas, deferred, div, ease_out_quint, prelude::*, px, rgb, svg,
+    WindowOptions, Transformation, anchored, canvas, deferred, div, ease_out_quint, percentage,
+    prelude::*, px, rgb, svg,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -15,7 +16,7 @@ use super::OpenSettings;
 use super::appearance::{self, UiTextSize};
 use super::diff_window::{DiffSnapshot, DiffView};
 use super::entry_chrome::{
-    self, EntryChromeMode, EntryKind, KindSwitchAction, OpenEntry, RestoreFailureAction,
+    self, EntryKind, KindSwitchAction, OpenEntry, RestoreFailureAction,
 };
 use super::file_tree::{self, TreeRow};
 use super::file_tree_rows::{self, RowSurface};
@@ -31,7 +32,7 @@ use super::splitter::{self, Axis, ResizeState};
 use super::theme;
 use super::window_controls::window_controls;
 use super::window_geometry;
-use crate::domain::{Comparison, Oid, PathStatus, Repository};
+use crate::domain::{ChangedPath, Comparison, Oid, PathStatus, Repository};
 use crate::git::{self, BranchBrowser, BranchInfo, CommitInfo};
 use crate::gitlab::{
     self, FetchMergeRequestResult, ListMergeRequestCommitsResult, ListMergeRequestsResult,
@@ -55,6 +56,14 @@ pub struct AppView {
     mr_toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// In-memory MR Entry (list = GitLab commits; Comparison = diff_refs).
     mr_entry: Option<MrEntry>,
+    /// Checkout vs HEAD while the Worktree kind is selected. Branch Browser stays put.
+    worktree: Option<git::WorktreeEntry>,
+    /// Bumped on every scan start and every leave, so a late scan cannot repaint.
+    worktree_generation: u64,
+    /// Path scan is in flight. An empty list is not yet "clean checkout".
+    worktree_paths_pending: bool,
+    /// Refresh scan failed. The previous path list stays on the island.
+    worktree_scan_error: Option<String>,
     /// MR kind held with no selected Entry (`Select MR…`); Comparison stays on Branch Browser.
     empty_mr: bool,
     /// Kind-switch restore in flight — failure clears to empty MR + picker.
@@ -131,6 +140,10 @@ impl AppView {
             branch_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_entry: None,
+            worktree: None,
+            worktree_generation: 0,
+            worktree_paths_pending: false,
+            worktree_scan_error: None,
             empty_mr: false,
             pending_kind_restore: false,
             repo_menu: None,
@@ -198,11 +211,8 @@ impl AppView {
                     this.sidebar_width
                 };
                 // HorizontalTrailing reports distance to viewport right; float is inset.
-                let width = splitter::clamp_files_width(
-                    requested - theme::CHANGES_INSET,
-                    available,
-                    sidebar,
-                );
+                let width =
+                    splitter::clamp_files_width(requested - theme::CHANGES_INSET, available, sidebar);
                 if this.files_width != width {
                     this.files_width = width;
                     cx.notify();
@@ -267,13 +277,17 @@ impl AppView {
     }
 
     fn sync_collapsed_dirs(&mut self) {
-        let next = match &self.state {
-            MainState::Ready(loaded) => loaded
-                .changed_paths
-                .iter()
-                .map(|p| p.path.clone())
-                .collect(),
-            MainState::Empty | MainState::Error(_) => Vec::new(),
+        let next = if let Some(wt) = &self.worktree {
+            wt.changed_paths.iter().map(|p| p.path.clone()).collect()
+        } else {
+            match &self.state {
+                MainState::Ready(loaded) => loaded
+                    .changed_paths
+                    .iter()
+                    .map(|p| p.path.clone())
+                    .collect(),
+                MainState::Empty | MainState::Error(_) => Vec::new(),
+            }
         };
         if next != self.tree_path_fingerprint {
             self.tree_path_fingerprint = next;
@@ -384,8 +398,56 @@ impl AppView {
         }
     }
 
+    fn clear_worktree(&mut self) {
+        self.worktree = None;
+        self.worktree_paths_pending = false;
+        self.worktree_scan_error = None;
+        self.worktree_generation = self.worktree_generation.wrapping_add(1);
+    }
+
+    /// HEAD is read here so the kind switches immediately. The workdir scan runs
+    /// off the UI thread; a large checkout otherwise freezes the window.
+    fn spawn_worktree_paths(
+        &mut self,
+        repository: Repository,
+        refresh: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.worktree_generation = self.worktree_generation.wrapping_add(1);
+        let generation = self.worktree_generation;
+        self.worktree_paths_pending = true;
+        self.worktree_scan_error = None;
+        cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_executor()
+                .spawn(async move { git::load_worktree(&repository) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.worktree_generation != generation {
+                    return;
+                }
+                this.worktree_paths_pending = false;
+                match loaded {
+                    Ok(entry) => this.worktree = Some(entry),
+                    Err(e) => {
+                        if refresh {
+                            this.worktree_scan_error = Some(e.0);
+                        } else {
+                            this.clear_worktree();
+                            this.state = MainState::Error(e.0);
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Hold empty MR kind (`Select MR…`) and open the picker.
     fn enter_empty_mr(&mut self, cx: &mut Context<Self>) {
+        self.clear_worktree();
         self.branch_picker = None;
         self.mr_entry = None;
         self.empty_mr = true;
@@ -395,21 +457,28 @@ impl AppView {
 
     /// Hard-exclusive Entry kind switch (kind-track hits).
     fn select_entry_kind(&mut self, target: EntryKind, cx: &mut Context<Self>) {
-        if !gitlab_chrome_visible(self) {
+        if target == EntryKind::Mr && !gitlab_chrome_visible(self) {
             return;
         }
-        let current = entry_chrome::active_entry_kind(self.mr_entry.is_some(), self.empty_mr);
+        let current = entry_chrome::active_entry_kind(
+            self.mr_entry.is_some(),
+            self.empty_mr,
+            self.worktree.is_some(),
+        );
         let last_mr = self.current_last_mr();
         match entry_chrome::kind_switch_action(current, target, last_mr.as_ref()) {
             KindSwitchAction::Stay => {}
             KindSwitchAction::SelectBranch => {
+                self.clear_worktree();
                 self.branch_picker = None;
                 self.mr_picker = None;
                 self.empty_mr = false;
                 self.pending_kind_restore = false;
                 self.clear_mr_entry(cx);
             }
+            KindSwitchAction::SelectWorktree => self.enter_worktree(cx),
             KindSwitchAction::RestoreMr(label) => {
+                self.clear_worktree();
                 self.branch_picker = None;
                 self.mr_picker = None;
                 self.begin_restore_mr(label, true, cx);
@@ -418,6 +487,39 @@ impl AppView {
                 self.enter_empty_mr(cx);
             }
         }
+        cx.notify();
+    }
+
+    fn enter_worktree(&mut self, cx: &mut Context<Self>) {
+        let MainState::Ready(bb) = &self.state else {
+            return;
+        };
+        let repository = bb.comparison.repository.clone();
+        let shell = match git::worktree_head(&repository) {
+            Ok(entry) => entry,
+            Err(e) => {
+                self.state = MainState::Error(e.0);
+                return;
+            }
+        };
+        self.branch_picker = None;
+        self.mr_picker = None;
+        self.worktree = Some(shell);
+        self.spawn_worktree_paths(repository, false, cx);
+        if self.mr_entry.is_some() {
+            self.clear_mr_entry(cx);
+        } else {
+            self.empty_mr = false;
+            self.pending_kind_restore = false;
+        }
+    }
+
+    fn refresh_worktree(&mut self, cx: &mut Context<Self>) {
+        let Some(current) = &self.worktree else {
+            return;
+        };
+        let repository = current.comparison.repository.clone();
+        self.spawn_worktree_paths(repository, true, cx);
         cx.notify();
     }
 
@@ -446,6 +548,7 @@ impl AppView {
                 self.branch_picker = None;
                 self.mr_picker = None;
                 self.mr_entry = None;
+                self.clear_worktree();
                 self.empty_mr = false;
                 self.pending_kind_restore = false;
                 self.restore_selected_entry(cx);
@@ -775,6 +878,7 @@ impl AppView {
     }
 
     fn open_branch(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.clear_worktree();
         self.mr_entry = None;
         self.empty_mr = false;
         self.pending_kind_restore = false;
@@ -843,6 +947,7 @@ impl AppView {
         self.repo_menu = None;
         if removing_current {
             self.state = MainState::Empty;
+            self.clear_worktree();
             self.branch_picker = None;
             self.mr_picker = None;
             self.mr_entry = None;
@@ -903,6 +1008,9 @@ impl AppView {
             cx.notify();
             return;
         }
+        if self.worktree.is_some() {
+            return;
+        }
         let mods = &event.keystroke.modifiers;
         if event.keystroke.key.as_str() == "a" && mods.secondary() && !mods.alt && !mods.shift {
             self.handle_commits_select_all(cx);
@@ -941,14 +1049,34 @@ impl AppView {
 
     /// Same gate as the Changes capsule Open Diff button / commit menu item.
     fn can_open_diff(&self) -> bool {
-        matches!(&self.state, MainState::Ready(bb) if !bb.changed_paths.is_empty())
+        self.active_paths().is_some_and(|paths| !paths.is_empty())
+    }
+
+    fn active_paths(&self) -> Option<&[ChangedPath]> {
+        if let Some(wt) = &self.worktree {
+            return Some(&wt.changed_paths);
+        }
+        match &self.state {
+            MainState::Ready(bb) => Some(&bb.changed_paths),
+            MainState::Empty | MainState::Error(_) => None,
+        }
+    }
+
+    fn active_comparison(&self) -> Option<&Comparison> {
+        if let Some(wt) = &self.worktree {
+            return Some(&wt.comparison);
+        }
+        match &self.state {
+            MainState::Ready(bb) => Some(&bb.comparison),
+            MainState::Empty | MainState::Error(_) => None,
+        }
     }
 
     fn open_diff(&mut self, cx: &mut Context<Self>) {
         if !self.can_open_diff() {
             return;
         }
-        let MainState::Ready(loaded) = &self.state else {
+        let Some(paths) = self.active_paths() else {
             return;
         };
         let preferred = self.diff_window.and_then(|h| {
@@ -959,25 +1087,25 @@ impl AppView {
             .flatten()
         });
         let path = preferred
-            .filter(|p| loaded.changed_paths.iter().any(|c| &c.path == p))
-            .unwrap_or_else(|| loaded.changed_paths[0].path.clone());
+            .filter(|p| paths.iter().any(|c| &c.path == p))
+            .unwrap_or_else(|| paths[0].path.clone());
         self.push_diff(path, cx);
     }
 
     fn push_diff(&mut self, path: String, cx: &mut Context<Self>) {
-        let MainState::Ready(loaded) = &self.state else {
+        let Some(comparison) = self.active_comparison().cloned() else {
             return;
         };
-        let status = loaded
-            .changed_paths
+        let paths = self.active_paths().unwrap_or(&[]).to_vec();
+        let status = paths
             .iter()
             .find(|p| p.path == path)
             .map(|p| p.status)
             .unwrap_or(PathStatus::Modify);
-        let file = git::file_diff(&loaded.comparison, &path, status, &Default::default());
+        let file = git::file_diff(&comparison, &path, status, &Default::default());
         let snapshot = DiffSnapshot {
-            comparison: loaded.comparison.clone(),
-            changed_paths: loaded.changed_paths.clone(),
+            comparison,
+            changed_paths: paths,
             selected_path: path,
             file,
         };
@@ -1034,6 +1162,7 @@ impl AppView {
                     Ok(bb) => {
                         this.state = MainState::Ready(bb);
                         this.mr_entry = None;
+                        this.clear_worktree();
                         this.empty_mr = false;
                         this.pending_kind_restore = false;
                         this.mr_picker = None;
@@ -1112,6 +1241,7 @@ fn remember_diff_reopen_from_snapshot(snapshot: &DiffSnapshot) {
         base_oid: snapshot.comparison.base_oid.map(|o| o.to_string()),
         head_oid: snapshot.comparison.head_oid.to_string(),
         selected_path: snapshot.selected_path.clone(),
+        worktree: snapshot.comparison.worktree,
     });
 }
 
@@ -1125,6 +1255,7 @@ fn rebuild_diff_snapshot(reopen: &DiffReopen) -> Option<DiffSnapshot> {
         repository: Repository::new(reopen.repository.clone()),
         base_oid,
         head_oid,
+        worktree: reopen.worktree,
     };
     let changed_paths = git::list_changed_paths_for(&comparison).ok()?;
     if changed_paths.is_empty() {
@@ -1262,7 +1393,7 @@ impl Render for AppView {
                             .min_w(px(splitter::MIN_COMMITS_WIDTH))
                             .overflow_hidden()
                             .bg(theme::sidebar())
-                            .child(render_commits(self, cx))
+                            .when(self.worktree.is_none(), |d| d.child(render_commits(self, cx)))
                             .child(render_files(self, cx)),
                     ),
             )
@@ -1620,17 +1751,20 @@ fn render_commit_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEle
 /// buttons close it out flush against the right edge — no floating overlay, no dead strip.
 fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -> impl IntoElement {
     let mono = appearance::code_font(cx);
-    let (branch, label) = match &view.state {
+    let (branch, mut label) = match &view.state {
         MainState::Ready(loaded) => (loaded.branch.clone(), loaded.comparison.label()),
         MainState::Empty | MainState::Error(_) => ("—".into(), "—".into()),
     };
+    let checkout = view
+        .worktree
+        .as_ref()
+        .map(|wt| {
+            label = wt.comparison.label();
+            wt.checkout_label.clone()
+        })
+        .unwrap_or_else(|| branch.clone());
     let show_gitlab = gitlab_chrome_visible(view);
-    let entry_chrome = match entry_chrome::chrome_mode(show_gitlab) {
-        EntryChromeMode::BranchPillOnly => render_branch_pill(view, &branch, cx).into_any_element(),
-        EntryChromeMode::KindTrackAndValuePill => {
-            render_gitlab_entry_chrome(view, &branch, cx).into_any_element()
-        }
-    };
+    let entry_chrome = render_entry_chrome(view, &branch, &checkout, show_gitlab, cx).into_any_element();
 
     // Leading zone spans exactly what sits left of the stage, so the pills after it start on
     // the stage's left edge and share a left edge with the islands below.
@@ -1726,59 +1860,21 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
         .children(window_controls(window))
 }
 
-/// Branch-only titlebar pill when GitLab chrome does not apply.
-fn render_branch_pill(view: &AppView, branch: &str, cx: &mut Context<AppView>) -> impl IntoElement {
-    let track = view.branch_toggle_bounds.clone();
-    let open = view.branch_picker.is_some();
-    div()
-        .id("branch-picker-toggle")
-        .relative()
-        .px_2()
-        .py_1()
-        .rounded_full()
-        .bg(theme::capsule())
-        .flex()
-        .items_center()
-        .gap_1()
-        .min_w(px(0.))
-        .overflow_hidden()
-        .cursor_pointer()
-        .when(open, |d| d.opacity(0.))
-        .when(!open, |d| d.hover(|d| d.bg(theme::hover())))
-        .on_click(cx.listener(|this, _, _, cx| this.toggle_branch_picker(cx)))
-        .child(
-            canvas(move |bounds, _, _| track.set(bounds), |_, _, _, _| {})
-                .absolute()
-                .size_full(),
-        )
-        .child(
-            svg()
-                .size(theme::ICON_SIZE)
-                .flex_none()
-                .path("branch.svg")
-                .text_color(theme::muted()),
-        )
-        .child(
-            div()
-                .min_w(px(0.))
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .ui_label_size(12., cx)
-                .text_color(theme::text())
-                .child(branch.to_string()),
-        )
-}
-
-/// Two-piece GitLab Entry chrome: peer kind capsules + value pill (ADR-0011).
-fn render_gitlab_entry_chrome(
+/// Kind track + value pill (ADR-0011, ADR-0013). MR is omitted when GitLab chrome is off.
+fn render_entry_chrome(
     view: &AppView,
     branch: &str,
+    checkout: &str,
+    show_gitlab: bool,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    let kind = entry_chrome::active_entry_kind(view.mr_entry.is_some(), view.empty_mr);
+    let kind = entry_chrome::active_entry_kind(
+        view.mr_entry.is_some(),
+        view.empty_mr,
+        view.worktree.is_some(),
+    );
     let mr_iid = view.mr_entry.as_ref().map(|e| e.summary.iid);
-    let value = entry_chrome::value_label(kind, branch, mr_iid);
+    let value = entry_chrome::value_label(kind, branch, mr_iid, checkout);
     let picker_open = view.branch_picker.is_some() || view.mr_picker.is_some();
     let hide_value = entry_chrome::value_pill_hidden(picker_open);
     let branch_track = view.branch_toggle_bounds.clone();
@@ -1786,6 +1882,7 @@ fn render_gitlab_entry_chrome(
     let value_icon = match kind {
         EntryKind::Branch => "branch.svg",
         EntryKind::Mr => "gitlab.svg",
+        EntryKind::Worktree => "folder.svg",
     };
 
     div()
@@ -1812,12 +1909,22 @@ fn render_gitlab_entry_chrome(
                     EntryKind::Branch,
                     cx,
                 ))
+                .when(show_gitlab, |d| {
+                    d.child(entry_kind_hit(
+                        "entry-kind-mr",
+                        "MR",
+                        "gitlab.svg",
+                        kind == EntryKind::Mr,
+                        EntryKind::Mr,
+                        cx,
+                    ))
+                })
                 .child(entry_kind_hit(
-                    "entry-kind-mr",
-                    "MR",
-                    "gitlab.svg",
-                    kind == EntryKind::Mr,
-                    EntryKind::Mr,
+                    "entry-kind-worktree",
+                    "Worktree",
+                    "folder.svg",
+                    kind == EntryKind::Worktree,
+                    EntryKind::Worktree,
                     cx,
                 )),
         )
@@ -1836,13 +1943,11 @@ fn render_gitlab_entry_chrome(
                 .items_center()
                 .gap_1()
                 .overflow_hidden()
-                .cursor_pointer()
                 .when(hide_value, |d| d.opacity(0.))
-                .when(!hide_value, |d| {
+                .when(!hide_value && kind != EntryKind::Worktree, |d| {
                     d.hover(|d| d.bg(theme::capsule_track_hover()))
                 })
                 .child(
-                    // Pickers anchor to the value pill (kind track stays visible).
                     canvas(
                         move |bounds, _, _| {
                             branch_track.set(bounds);
@@ -1853,14 +1958,25 @@ fn render_gitlab_entry_chrome(
                     .absolute()
                     .size_full(),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| match kind {
-                    EntryKind::Branch => this.toggle_branch_picker(cx),
-                    EntryKind::Mr => this.toggle_mr_picker(cx),
-                }))
+                .when(kind != EntryKind::Worktree, |d| {
+                    d.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| match kind {
+                        EntryKind::Branch => this.toggle_branch_picker(cx),
+                        EntryKind::Mr => this.toggle_mr_picker(cx),
+                        EntryKind::Worktree => {}
+                    }))
+                })
                 .when(kind == EntryKind::Mr && view.mr_entry.is_some(), |el| {
                     el.on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|this, _, _, cx| this.clear_mr_entry(cx)),
+                    )
+                })
+                .when(kind == EntryKind::Worktree, |el| {
+                    el.on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, _, _, cx| {
+                            this.select_entry_kind(EntryKind::Branch, cx);
+                        }),
                     )
                 })
                 .child(
@@ -1880,13 +1996,15 @@ fn render_gitlab_entry_chrome(
                         .text_color(theme::text())
                         .child(value),
                 )
-                .child(
-                    svg()
-                        .size(theme::ICON_SIZE_SM)
-                        .flex_none()
-                        .path("chevron_down.svg")
-                        .text_color(theme::faint()),
-                ),
+                .when(kind != EntryKind::Worktree, |d| {
+                    d.child(
+                        svg()
+                            .size(theme::ICON_SIZE_SM)
+                            .flex_none()
+                            .path("chevron_down.svg")
+                            .text_color(theme::faint()),
+                    )
+                }),
         )
 }
 
@@ -2678,28 +2796,50 @@ fn picker_line(
 
 fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let mono = appearance::code_font(cx);
-    let paths = match &view.state {
-        MainState::Ready(loaded) => loaded.changed_paths.clone(),
-        MainState::Empty | MainState::Error(_) => Vec::new(),
+    let worktree = view.worktree.is_some();
+    let paths = if let Some(wt) = &view.worktree {
+        wt.changed_paths.clone()
+    } else {
+        match &view.state {
+            MainState::Ready(loaded) => loaded.changed_paths.clone(),
+            MainState::Empty | MainState::Error(_) => Vec::new(),
+        }
     };
     let can_open = view.can_open_diff();
+    let awaiting_paths = worktree && view.worktree_paths_pending && paths.is_empty();
+    let refresh_pending = worktree && view.worktree_paths_pending && !paths.is_empty();
+    let scan_error = if worktree {
+        view.worktree_scan_error.clone()
+    } else {
+        None
+    };
     let rows = file_tree::flatten(&paths, &view.collapsed_dirs);
-    let head_meta = match &view.state {
-        MainState::Ready(loaded) => {
-            let mr_diff = view.mr_entry.as_ref().and_then(|e| match &e.detail {
-                MrDetailState::Ready(d) => {
-                    let base = d.diff_refs.base_sha.parse::<Oid>().ok()?;
-                    let head = d.diff_refs.head_sha.parse::<Oid>().ok()?;
-                    Some((base, head))
-                }
-                MrDetailState::Loading | MrDetailState::Failed(_) => None,
-            });
-            head_commit_meta(loaded, mr_diff)
+    let head_meta = if worktree {
+        None
+    } else {
+        match &view.state {
+            MainState::Ready(loaded) => {
+                let mr_diff = view.mr_entry.as_ref().and_then(|e| match &e.detail {
+                    MrDetailState::Ready(d) => {
+                        let base = d.diff_refs.base_sha.parse::<Oid>().ok()?;
+                        let head = d.diff_refs.head_sha.parse::<Oid>().ok()?;
+                        Some((base, head))
+                    }
+                    MrDetailState::Loading | MrDetailState::Failed(_) => None,
+                });
+                head_commit_meta(loaded, mr_diff)
+            }
+            MainState::Empty | MainState::Error(_) => None,
         }
-        MainState::Empty | MainState::Error(_) => None,
     };
     let inset = px(theme::CHANGES_INSET);
-    let gap = theme::CHANGES_SHADOW_GAP;
+    // Commit island is gone, so there is no gap and no splitter. Dock left at the
+    // same inset the Commit island used.
+    let slot_w = if worktree {
+        view.files_width
+    } else {
+        view.files_width + theme::CHANGES_SHADOW_GAP
+    };
 
     // Slot spans the frost gap + Changes island so the trailing handle can sit
     // between the two floats (outside `#files` overflow_hidden).
@@ -2707,18 +2847,21 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .id("files-slot")
         .absolute()
         .top(px(theme::CHANGES_TOP_INSET))
-        .right(inset)
         .bottom(inset)
-        .w(px(view.files_width + gap))
+        .w(px(slot_w))
+        .when(worktree, |d| d.left(inset))
+        .when(!worktree, |d| d.right(inset))
         .flex()
         .flex_row()
-        .child(splitter::handle(
-            "files-resize-handle",
-            Axis::HorizontalTrailing,
-            view.files_resize_handler(cx),
-            view.files_resize_state.clone(),
-            true,
-        ))
+        .when(!worktree, |d| {
+            d.child(splitter::handle(
+                "files-resize-handle",
+                Axis::HorizontalTrailing,
+                view.files_resize_handler(cx),
+                view.files_resize_state.clone(),
+                true,
+            ))
+        })
         .child(
             div()
                 .id("files")
@@ -2736,68 +2879,62 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                         .flex_none()
                         .pt_2()
                         .pl_3()
-                        .pr(px(36.))
+                        .pr(px(if worktree { 64. } else { 36. }))
                         .pb_1()
                         .child(
                             div()
-                                .ui_text_size(12., cx)
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme::faint())
-                                .child(format!("Changes ({})", paths.len())),
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .min_w(px(0.))
+                                .child(
+                                    div()
+                                        .ui_text_size(12., cx)
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(theme::faint())
+                                        .child(if awaiting_paths {
+                                            "Changes".to_string()
+                                        } else {
+                                            format!("Changes ({})", paths.len())
+                                        }),
+                                )
+                                .when(refresh_pending, |d| d.child(worktree_loading_row(cx))),
                         )
                         .child(
                             div()
                                 .absolute()
                                 .top(px(6.))
                                 .right(px(8.))
+                                .flex()
+                                .gap_1()
+                                .when(worktree, |d| d.child(refresh_worktree_button(cx)))
                                 .child(open_diff_button(can_open, cx)),
                         ),
                 )
-                .child({
-                    let (scroll, sb) = scrollbar::vertical("file-tree-sb", cx);
-                    let pane_width = view.files_width;
-                    scrollbar::overlay_flex(
+                .when_some(scan_error, |d, message| {
+                    d.child(
                         div()
-                            .id("file-tree")
-                            .size_full()
-                            .px_1()
-                            .track_scroll(&scroll)
-                            .overflow_y_scroll()
-                            .children(rows.into_iter().enumerate().map(|(i, row)| match row {
-                                TreeRow::Dir { depth, name, path } => {
-                                    let collapsed = view.collapsed_dirs.contains(&path);
-                                    let toggle_path = path.clone();
-                                    file_tree_rows::dir_row(
-                                        ("dir", i),
-                                        depth,
-                                        name,
-                                        collapsed,
-                                        RowSurface::Island,
-                                        pane_width,
-                                        cx,
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            if !this.collapsed_dirs.remove(&toggle_path) {
-                                                this.collapsed_dirs.insert(toggle_path.clone());
-                                            }
-                                            cx.notify();
-                                        },
-                                    ))
-                                }
-                                TreeRow::File { depth, path } => file_tree_rows::file_row(
-                                    ("file", i),
-                                    depth,
-                                    &path,
-                                    false,
-                                    RowSurface::Island,
-                                    mono.clone(),
-                                    pane_width,
-                                    cx,
-                                ),
-                            })),
-                        sb,
+                            .px_3()
+                            .py_1()
+                            .ui_text_size(12., cx)
+                            .text_color(theme::error())
+                            .child(message),
                     )
+                })
+                .when(awaiting_paths, |d| {
+                    d.child(
+                        div()
+                            .id("worktree-loading")
+                            .flex_1()
+                            .min_h(px(0.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(worktree_loading_row(cx)),
+                    )
+                })
+                .when(!awaiting_paths, |d| {
+                    d.child(render_file_tree(view, &mono, &rows, cx))
                 })
                 .when_some(head_meta, |d, meta| {
                     d.child(splitter::handle(
@@ -3110,6 +3247,88 @@ impl BranchPicker {
             .cloned()
             .collect();
     }
+}
+
+/// One revolution per 2s, matching Zed's activity-indicator spinner.
+fn worktree_loading_row(cx: &App) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .flex_none()
+        .child(
+            svg()
+                .path("refresh.svg")
+                .size(theme::ICON_SIZE_SM)
+                .flex_none()
+                .text_color(theme::muted())
+                .with_animation(
+                    "worktree-loading-spin",
+                    Animation::new(Duration::from_secs(2)).repeat(),
+                    |icon, delta| icon.with_transformation(Transformation::rotate(percentage(delta))),
+                ),
+        )
+        .child(
+            div()
+                .ui_text_size(12., cx)
+                .text_color(theme::muted())
+                .child("Loading"),
+        )
+}
+
+fn render_file_tree(
+    view: &AppView,
+    mono: &gpui::SharedString,
+    rows: &[TreeRow],
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let (scroll, sb) = scrollbar::vertical("file-tree-sb", cx);
+    let pane_width = view.files_width;
+    scrollbar::overlay_flex(
+        div()
+            .id("file-tree")
+            .size_full()
+            .px_1()
+            .track_scroll(&scroll)
+            .overflow_y_scroll()
+            .children(rows.iter().enumerate().map(|(i, row)| match row {
+                TreeRow::Dir { depth, name, path } => {
+                    let collapsed = view.collapsed_dirs.contains(path);
+                    let toggle_path = path.clone();
+                    file_tree_rows::dir_row(
+                        ("dir", i),
+                        *depth,
+                        name.clone(),
+                        collapsed,
+                        RowSurface::Island,
+                        pane_width,
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.collapsed_dirs.remove(&toggle_path) {
+                            this.collapsed_dirs.insert(toggle_path.clone());
+                        }
+                        cx.notify();
+                    }))
+                }
+                TreeRow::File { depth, path } => file_tree_rows::file_row(
+                    ("file", i),
+                    *depth,
+                    path,
+                    false,
+                    RowSurface::Island,
+                    mono.clone(),
+                    pane_width,
+                    cx,
+                ),
+            })),
+        sb,
+    )
+}
+
+fn refresh_worktree_button(cx: &mut Context<AppView>) -> impl IntoElement {
+    IconButton::new("refresh-worktree", "refresh.svg", "Refresh")
+        .on_click(cx.listener(|this, _, _, cx| this.refresh_worktree(cx)))
 }
 
 fn open_diff_button(enabled: bool, cx: &mut Context<AppView>) -> impl IntoElement {
