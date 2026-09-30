@@ -2489,7 +2489,18 @@ fn render_mr_entry_detail(
                 .gap_1p5()
                 .children(match &entry.detail {
                     MrDetailState::Loading => {
-                        vec![div().child("Loading MR detail…").into_any_element()]
+                        vec![div()
+                            .flex_1()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(loading_row(
+                                "mr-detail-loading-spin",
+                                "Loading MR detail…",
+                                cx,
+                            ))
+                            .into_any_element()]
                     }
                     MrDetailState::Failed(note) => {
                         vec![render_error_note(
@@ -2584,11 +2595,14 @@ fn render_mr_picker(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEleme
     let body = match &picker.body {
         MrPickerBody::Loading => div()
             .size_full()
-            .px_2()
-            .py_3()
-            .ui_text_size(14., cx)
-            .text_color(theme::muted())
-            .child("Loading open merge requests…")
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(loading_row(
+                "mr-picker-loading-spin",
+                "Loading open merge requests…",
+                cx,
+            ))
             .into_any_element(),
         MrPickerBody::Failed(note) => div()
             .size_full()
@@ -2951,7 +2965,9 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                                             format!("Changes ({})", paths.len())
                                         }),
                                 )
-                                .when(refresh_pending, |d| d.child(worktree_loading_row(cx))),
+                                .when(refresh_pending, |d| {
+                                    d.child(loading_row("worktree-loading-spin", "Loading", cx))
+                                }),
                         )
                         .child(
                             div()
@@ -2983,7 +2999,7 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(worktree_loading_row(cx)),
+                            .child(loading_row("worktree-loading-spin", "Loading", cx)),
                     )
                 })
                 .when(!awaiting_paths, |d| {
@@ -3304,7 +3320,8 @@ impl BranchPicker {
 }
 
 /// One revolution per 2s, matching Zed's activity-indicator spinner.
-fn worktree_loading_row(cx: &App) -> impl IntoElement {
+/// `animation_id` must be unique per visible instance; GPUI keys animation state by it.
+fn loading_row(animation_id: &'static str, label: &'static str, cx: &App) -> impl IntoElement {
     div()
         .flex()
         .items_center()
@@ -3317,7 +3334,7 @@ fn worktree_loading_row(cx: &App) -> impl IntoElement {
                 .flex_none()
                 .text_color(theme::muted())
                 .with_animation(
-                    "worktree-loading-spin",
+                    animation_id,
                     Animation::new(Duration::from_secs(2)).repeat(),
                     |icon, delta| {
                         icon.with_transformation(Transformation::rotate(percentage(delta)))
@@ -3328,7 +3345,7 @@ fn worktree_loading_row(cx: &App) -> impl IntoElement {
             div()
                 .ui_text_size(12., cx)
                 .text_color(theme::muted())
-                .child("Loading"),
+                .child(label),
         )
 }
 
