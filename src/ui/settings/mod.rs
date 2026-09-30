@@ -3,6 +3,7 @@
 //! uses these; the rest of the app keeps its hand-written controls.
 
 mod button;
+mod code_theme_picker;
 mod configured_card;
 mod font_list;
 mod font_picker;

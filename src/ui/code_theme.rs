@@ -1,6 +1,6 @@
 //! Code Theme resolution. [`resolve`] is the seam Diff paints from.
 
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use gpui::{Rgba, rgb};
 
@@ -190,13 +190,25 @@ pub fn resolve(
     }
 }
 
-/// v1 callers pass Software Theme mode light. Ticket 02 feeds the stored pairing.
+/// Pairing [`active`] resolves. Absent until [`remember_pairing`].
+static REMEMBERED: Mutex<CodeThemePairing> = Mutex::new(CodeThemePairing {
+    light: None,
+    dark: None,
+});
+
+/// Remember the Code Theme Pairing. The dark choice stays here while production
+/// still resolves in Software Theme mode light.
+pub fn remember_pairing(pairing: CodeThemePairing) {
+    *REMEMBERED.lock().unwrap_or_else(|err| err.into_inner()) = pairing;
+}
+
+/// Palette Diff paints from: Software Theme mode light, and the remembered pairing.
 pub fn active() -> ResolvedCodeTheme {
-    resolve(
-        SoftwareThemeMode::Light,
-        &CodeThemePairing::default(),
-        builtin_catalog(),
-    )
+    let pairing = REMEMBERED
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    resolve(SoftwareThemeMode::Light, &pairing, builtin_catalog())
 }
 
 /// Capture id → color for `theme`.

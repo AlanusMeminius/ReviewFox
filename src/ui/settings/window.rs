@@ -10,6 +10,7 @@ use std::rc::Rc;
 use crate::gitlab::SettingsTarget;
 use crate::settings_store::{self, DEFAULT_BASE_URL};
 
+use super::code_theme_picker;
 use super::font_picker;
 use super::nav::{NavItem, SettingsNav};
 use super::nav_tree::{NavEntry, NavPage, NavState};
@@ -53,8 +54,9 @@ const CLOSE_KEY: &str = "cmd-w";
 const CLOSE_KEY: &str = "ctrl-w";
 
 /// Tab order: nav, GitLab URL, then the token input or the token card's buttons
-/// (up to two), then each font group's family and size. Only the selected
-/// page's controls render, so each page tabs through its own.
+/// (up to two), then each font group's family and size, then the Code Theme
+/// light choice. Only the selected page's controls render, so each page tabs
+/// through its own.
 const TAB_NAV: isize = 0;
 const TAB_URL: isize = 1;
 const TAB_TOKEN: isize = 2;
@@ -63,6 +65,7 @@ const TAB_UI_FONT_FAMILY: isize = TAB_TOKEN + 2;
 const TAB_UI_FONT_SIZE: isize = TAB_UI_FONT_FAMILY + 1;
 const TAB_CODE_FONT_FAMILY: isize = TAB_UI_FONT_SIZE + 1;
 const TAB_CODE_FONT_SIZE: isize = TAB_CODE_FONT_FAMILY + 1;
+const TAB_CODE_THEME: isize = TAB_CODE_FONT_SIZE + 1;
 
 const URL_TITLE: &str = "GitLab URL";
 const URL_DESCRIPTION: &str = "Your self-hosted GitLab address. Leave empty for gitlab.com.";
@@ -125,6 +128,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
     .into_iter()
     .chain(number_field::key_bindings())
     .chain(font_picker::key_bindings())
+    .chain(code_theme_picker::key_bindings())
     .collect()
 }
 
@@ -133,6 +137,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 enum Section {
     GitLab,
     Fonts,
+    CodeTheme,
 }
 
 impl Section {
@@ -140,6 +145,7 @@ impl Section {
         match self {
             Section::GitLab => "GitLab",
             Section::Fonts => "Fonts",
+            Section::CodeTheme => "Code Theme",
         }
     }
 }
@@ -153,7 +159,7 @@ const PAGES: &[NavPage<Section>] = &[
     },
     NavPage {
         title: "Appearance",
-        sections: &[Section::Fonts],
+        sections: &[Section::Fonts, Section::CodeTheme],
         expanded: true,
     },
 ];
@@ -185,6 +191,7 @@ pub struct SettingsView {
     gitlab_connection: Rc<RefCell<GitLabConnection>>,
     /// One per [`FONT_GROUPS`] entry, same order.
     font_controls: [FontControls; 2],
+    code_theme: Entity<code_theme_picker::CodeThemePicker>,
     nav_focus: FocusHandle,
     nav: NavState,
     /// Last nav interaction came from the keyboard: show the focus border.
@@ -273,6 +280,15 @@ impl SettingsView {
                 ));
                 FontControls { family, size }
             });
+        let code_theme =
+            cx.new(|cx| code_theme_picker::CodeThemePicker::new(TAB_CODE_THEME, window, cx));
+        subscriptions.push(cx.subscribe(
+            &code_theme,
+            |_, _, event: &code_theme_picker::CodeThemePickerEvent, cx| {
+                let code_theme_picker::CodeThemePickerEvent::Confirm(id) = event;
+                appearance::set_code_theme_light(cx, id);
+            },
+        ));
 
         // The scroll handle lives in a global registry and outlives the window.
         let (content_scroll, _) = scrollbar::vertical(CONTENT_SCROLL_ID, cx);
@@ -287,6 +303,7 @@ impl SettingsView {
             keychain_error: None,
             gitlab_connection,
             font_controls,
+            code_theme,
             nav_focus: cx.focus_handle().tab_index(TAB_NAV).tab_stop(true),
             nav: NavState::new(PAGES),
             nav_keyboard: false,
@@ -546,6 +563,7 @@ impl SettingsView {
                     .child(match section {
                         Section::GitLab => self.render_gitlab_section(cx),
                         Section::Fonts => self.render_fonts_section(cx),
+                        Section::CodeTheme => self.render_code_theme_section(),
                     })
             })
             .collect();
@@ -693,6 +711,17 @@ impl SettingsView {
                     .on_click(move |_, _, cx| cx.open_url(&url)),
             )
             .child(token_row::DESCRIPTION_AFTER_LINK)
+    }
+}
+
+impl SettingsView {
+    /// Appearance › Code Theme: the light choice only. No dark row, no Software
+    /// Theme switch. Choosing One Light clears the stored field.
+    fn render_code_theme_section(&self) -> AnyElement {
+        SettingRow::new("settings-code-theme-light", "Light")
+            .last(true)
+            .control(self.code_theme.clone())
+            .into_any_element()
     }
 }
 
