@@ -33,10 +33,11 @@ use super::window_geometry;
 use crate::domain::{ChangedPath, Comparison, Oid, PathStatus, Repository};
 use crate::git::{self, BranchBrowser, BranchInfo, CommitInfo};
 use crate::gitlab::{
-    self, FetchMergeRequestResult, ListMergeRequestCommitsResult, ListMergeRequestsResult,
-    MergeRequestDetail, MergeRequestSummary, ResolveProjectResult, SettingsTarget,
+    self, ListMergeRequestsResult, MergeRequestDetail, MergeRequestSummary, ResolveProjectResult,
+    SettingsTarget,
 };
 use crate::loaded_browser::LoadedBrowser;
+use crate::mr_entry::{self, GitLabForge, SystemGitObjects};
 use crate::settings_store;
 use crate::window_geometry_store::{self, DiffReopen};
 use crate::workspace_store::{self, MrEntryLabel, WorkspaceEntry, WorkspaceStore};
@@ -712,153 +713,19 @@ impl AppView {
                 Err(_) => return,
             };
 
-            let project = cx
+            let outcome = cx
                 .background_executor()
-                .spawn({
-                    let http = http.clone();
-                    let base = base.clone();
-                    let pat = pat.clone();
-                    let repo_path = repo_path.clone();
-                    async move { gitlab::resolve_project(http, &base, &pat, &repo_path).await }
+                .spawn(async move {
+                    let forge = GitLabForge { http };
+                    let objects = SystemGitObjects;
+                    mr_entry::resolve_mr_entry(&repo_path, iid, &base, &pat, &forge, &objects).await
                 })
                 .await;
 
-            let identity = match project {
-                ResolveProjectResult::Ok(id) => id,
-                ResolveProjectResult::Err(e) => {
-                    let msg = ErrorNote::resolve_project(&e);
-                    let _ = this.update(cx, |view, cx| {
-                        apply_mr_activate_finish(view, iid, Err(msg), cx);
-                    });
-                    return;
-                }
-            };
-
-            let remote_url = match gitlab::matching_remote_for_settings(&repo_path, &base) {
-                Ok((_, url)) => url,
-                Err(e) => {
-                    let msg = ErrorNote::resolve_project(&e);
-                    let _ = this.update(cx, |view, cx| {
-                        apply_mr_activate_finish(view, iid, Err(msg), cx);
-                    });
-                    return;
-                }
-            };
-
-            let path = identity.path_with_namespace.clone();
-            let detail = match cx
-                .background_executor()
-                .spawn({
-                    let http = http.clone();
-                    let base = base.clone();
-                    let pat = pat.clone();
-                    let path = path.clone();
-                    async move { gitlab::fetch_merge_request(http, &base, &pat, &path, iid).await }
-                })
-                .await
-            {
-                FetchMergeRequestResult::Ok(d) => d,
-                FetchMergeRequestResult::Err(e) => {
-                    let msg = ErrorNote::new(
-                        gitlab::format_fetch_merge_request_error(&e),
-                        e.settings_fix(),
-                    );
-                    let _ = this.update(cx, |view, cx| {
-                        apply_mr_activate_finish(view, iid, Err(msg), cx);
-                    });
-                    return;
-                }
-            };
-
-            let commits = match cx
-                .background_executor()
-                .spawn({
-                    let http = http.clone();
-                    let base = base.clone();
-                    let pat = pat.clone();
-                    let path = path.clone();
-                    async move {
-                        gitlab::list_merge_request_commits(http, &base, &pat, &path, iid).await
-                    }
-                })
-                .await
-            {
-                ListMergeRequestCommitsResult::Ok(c) => c,
-                ListMergeRequestCommitsResult::Err(e) => {
-                    let msg = ErrorNote::new(
-                        gitlab::format_list_merge_request_commits_error(&e),
-                        e.settings_fix(),
-                    );
-                    let _ = this.update(cx, |view, cx| {
-                        apply_mr_activate_finish(view, iid, Err(msg), cx);
-                    });
-                    return;
-                }
-            };
-
-            let mut shas: Vec<String> = commits.iter().map(|c| c.id.clone()).collect();
-            shas.push(detail.diff_refs.base_sha.clone());
-            shas.push(detail.diff_refs.head_sha.clone());
-            if let Some(start) = &detail.diff_refs.start_sha {
-                shas.push(start.clone());
-            }
-            shas.sort();
-            shas.dedup();
-
-            if let Err(e) = cx
-                .background_executor()
-                .spawn({
-                    let repo_path = repo_path.clone();
-                    async move { git::fetch_oids(&repo_path, &remote_url, iid, &shas) }
-                })
-                .await
-            {
-                let _ = this.update(cx, |view, cx| {
-                    apply_mr_activate_finish(view, iid, Err(ErrorNote::plain(e.0)), cx);
-                });
-                return;
-            }
-
-            let specs: Vec<(String, String, String, String)> = commits
-                .iter()
-                .map(|c| {
-                    (
-                        c.id.clone(),
-                        c.title.clone(),
-                        c.author_name.clone(),
-                        c.authored_date.clone(),
-                    )
-                })
-                .collect();
-
-            let commit_infos = match cx
-                .background_executor()
-                .spawn({
-                    let repo_path = repo_path.clone();
-                    async move { git::commit_infos_from_mr_specs(&repo_path, &specs) }
-                })
-                .await
-            {
-                Ok(infos) => infos,
-                Err(e) => {
-                    let _ = this.update(cx, |view, cx| {
-                        apply_mr_activate_finish(view, iid, Err(ErrorNote::plain(e.0)), cx);
-                    });
-                    return;
-                }
-            };
-
+            let result =
+                outcome.map_err(|failure| ErrorNote::new(failure.message, failure.settings_target));
             let _ = this.update(cx, |view, cx| {
-                apply_mr_activate_finish(
-                    view,
-                    iid,
-                    Ok(MrActivateReady {
-                        detail,
-                        project: path,
-                        commit_infos,
-                    }),
-                    cx,
-                );
+                apply_mr_activate_finish(view, iid, result, cx);
             });
         })
         .detach();
@@ -2249,11 +2116,7 @@ struct MrEntry {
     project: Option<String>,
 }
 
-struct MrActivateReady {
-    detail: MergeRequestDetail,
-    project: String,
-    commit_infos: Vec<CommitInfo>,
-}
+type MrActivateReady = mr_entry::Ready;
 
 fn finish_mr_activate(
     view: &mut AppView,

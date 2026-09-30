@@ -84,6 +84,7 @@ pub async fn verify_pat(http: Arc<dyn HttpClient>, base_url: &str, pat: &str) ->
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitLabProjectIdentity {
     pub path_with_namespace: String,
+    pub remote_url: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -268,7 +269,7 @@ pub async fn resolve_project(
         Err(e) => return ResolveProjectResult::Err(ResolveProjectError::Remote(e)),
     };
 
-    let (_name, _url, parsed) = match pick_remote_for_settings(&remotes, base_url) {
+    let (_name, url, parsed) = match pick_remote_for_settings(&remotes, base_url) {
         Ok(v) => v,
         Err(e) => return ResolveProjectResult::Err(e),
     };
@@ -276,10 +277,11 @@ pub async fn resolve_project(
     if pat.trim().is_empty() {
         return ResolveProjectResult::Ok(GitLabProjectIdentity {
             path_with_namespace: parsed.path_with_namespace,
+            remote_url: url,
         });
     }
 
-    match fetch_project(http, base_url, pat, &parsed.path_with_namespace).await {
+    match fetch_project(http, base_url, pat, &parsed.path_with_namespace, &url).await {
         Ok(identity) => ResolveProjectResult::Ok(identity),
         Err(e) => ResolveProjectResult::Err(e),
     }
@@ -732,16 +734,6 @@ pub fn repo_matches_settings_host(repo_path: &Path, settings_base_url: &str) -> 
     pick_remote_for_settings(&remotes, settings_base_url).is_ok()
 }
 
-/// Matching remote `(name, url)` for fetch, if any.
-pub fn matching_remote_for_settings(
-    repo_path: &Path,
-    settings_base_url: &str,
-) -> Result<(String, String), ResolveProjectError> {
-    let remotes = crate::git::list_remote_urls(repo_path).map_err(ResolveProjectError::Remote)?;
-    let (name, url, _) = pick_remote_for_settings(&remotes, settings_base_url)?;
-    Ok((name, url))
-}
-
 /// Max commits fetched for an MR (first page; matches GitLab web for typical MRs).
 pub const MR_COMMITS_PER_PAGE: u32 = 100;
 
@@ -897,6 +889,7 @@ async fn fetch_project(
     base_url: &str,
     pat: &str,
     path_with_namespace: &str,
+    remote_url: &str,
 ) -> Result<GitLabProjectIdentity, ResolveProjectError> {
     let url = project_api_url(base_url, path_with_namespace);
     let request = http::Request::builder()
@@ -931,6 +924,7 @@ async fn fetch_project(
     match serde_json::from_slice::<GitLabProject>(&body) {
         Ok(project) => Ok(GitLabProjectIdentity {
             path_with_namespace: project.path_with_namespace,
+            remote_url: remote_url.to_string(),
         }),
         Err(e) => Err(ResolveProjectError::Other {
             status,
@@ -1104,6 +1098,7 @@ mod tests {
             result,
             ResolveProjectResult::Ok(GitLabProjectIdentity {
                 path_with_namespace: "acme/widget".into(),
+                remote_url: "https://gitlab.lan.example.com/acme/widget.git".into(),
             })
         );
     }
@@ -1144,6 +1139,7 @@ mod tests {
             result,
             ResolveProjectResult::Ok(GitLabProjectIdentity {
                 path_with_namespace: "my/group".into(),
+                remote_url: "https://gitlab.com/my/group.git".into(),
             })
         );
     }
@@ -1183,6 +1179,7 @@ mod tests {
             result,
             ResolveProjectResult::Ok(GitLabProjectIdentity {
                 path_with_namespace: "acme/widget".into(),
+                remote_url: "git@gitlab.com:acme/widget.git".into(),
             })
         );
     }
