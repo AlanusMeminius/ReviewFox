@@ -1,9 +1,9 @@
 use gpui::{
-    Animation, AnimationExt, AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity,
-    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
-    Subscription, Task, Timer, WeakEntity, Window, WindowControlArea, actions, canvas, div,
-    ease_out_quint, prelude::*, px,
+    actions, canvas, div, ease_out_quint, prelude::*, px, Animation, AnimationExt, AnyElement,
+    AnyView, App, ClipboardItem, Context, Div, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyBinding, KeyDownEvent, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Task, Timer, WeakEntity,
+    Window, WindowControlArea,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -11,13 +11,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::domain::{
-    Anchor, ChangedPath, Comparison, DiffFontSize, LineSpan, PathStatus, Review, SearchFileText,
-    SearchFiles, SearchMatch, SearchSide, Side, ViewOptions, next_match_index, next_search_side,
-    prev_match_index, search_file, search_files, toggle_search_files,
+    next_match_index, next_search_side, prev_match_index, search_file, search_files,
+    toggle_search_files, Anchor, ChangedPath, Comparison, DiffFontSize, LineSpan, PathStatus,
+    SearchFileText, SearchFiles, SearchMatch, SearchSide, Side, ViewOptions,
 };
 
 use super::appearance::{self, UiTextSize};
-use super::diff::pane::{self, DualPane, FontOp, PaneComment, PaneEvent, SlotBounds, placeholder};
+use super::diff::pane::{self, placeholder, DualPane, FontOp, PaneComment, PaneEvent, SlotBounds};
+use super::diff::review::{OpenReview, PathView};
 use super::file_tree::{self, TreeRow};
 use super::file_tree_rows::{self, RowSurface};
 use super::icon_button::IconButton;
@@ -58,24 +59,6 @@ pub struct DiffSnapshot {
     pub changed_paths: Vec<ChangedPath>,
     pub selected_path: String,
     pub file: FileDiff,
-}
-
-/// An open DraftComment: which LineSpan the bottom dock is writing to, and
-/// whether it is a postimage one or an existing body being edited.
-struct Drafting {
-    side: Side,
-    start: u32,
-    count: u32,
-    /// Id of the comment being reopened; `None` while creating one. Editing
-    /// only ever rewrites the body, so the Anchor is not carried here.
-    editing: Option<u64>,
-}
-
-impl Drafting {
-    /// Inclusive last line of the span.
-    fn end(&self) -> u32 {
-        self.start + self.count.saturating_sub(1)
-    }
 }
 
 /// A LineSpan as the dock and the comments list name it: `postimage L3` for one
@@ -119,8 +102,8 @@ pub struct DiffView {
     comment_pane_freeze: Option<f32>,
     comment_resize_state: Rc<ResizeState>,
     pub snapshot: Option<DiffSnapshot>,
-    review: Option<Review>,
-    drafting: Option<Drafting>,
+    /// Review for the Comparison on screen, and the unsaved line dock.
+    open_review: OpenReview,
     export_status: Option<String>,
     /// Ephemeral; paths in set are collapsed. Default empty = all expanded.
     collapsed_dirs: HashSet<String>,
@@ -195,7 +178,8 @@ impl DiffView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let review = Review::new(snapshot.comparison.clone());
+        let open_review =
+            OpenReview::new(snapshot.comparison.clone(), snapshot.selected_path.clone());
         let pane = cx.new(DualPane::new);
         let pane_events =
             cx.subscribe_in(&pane, window, |this, _, event, window, cx| match event {
@@ -205,7 +189,7 @@ impl DiffView {
                 PaneEvent::OpenEdit { id } => this.begin_edit(*id, window, cx),
                 PaneEvent::SelectionStarted => {
                     // New gutter drag already owns the wash — only close the dock.
-                    if this.drafting.is_some() {
+                    if this.open_review.dock().is_some() {
                         this.close_dock(window, cx);
                     }
                 }
@@ -263,8 +247,7 @@ impl DiffView {
             comment_pane_freeze: None,
             comment_resize_state: Rc::new(ResizeState::with_drag_latch()),
             snapshot: Some(snapshot),
-            review: Some(review),
-            drafting: None,
+            open_review,
             export_status: None,
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
@@ -313,19 +296,36 @@ impl DiffView {
         self.pane.update(cx, f)
     }
 
-    /// The selected path's DraftComments, for the pane's comment index and its
-    /// start-line icons.
-    fn path_comments(&self) -> Vec<PaneComment> {
-        match (&self.review, &self.snapshot) {
-            (Some(review), Some(snap)) => review
-                .comments_for_path(&snap.selected_path)
-                .map(|c| PaneComment {
-                    id: c.id,
-                    anchor: c.anchor.clone(),
-                })
-                .collect(),
-            _ => Vec::new(),
-        }
+    fn pane_comments(view: &PathView) -> Vec<PaneComment> {
+        view.comments
+            .iter()
+            .map(|c| PaneComment {
+                id: c.id,
+                anchor: c.anchor.clone(),
+            })
+            .collect()
+    }
+
+    /// Map one module result onto the pane: this path's marks and, if the dock
+    /// is open, its line span. Selection and the text field stay here.
+    fn apply_review(&mut self, view: &PathView, cx: &mut Context<Self>) {
+        let drafting = view.dock.map(|d| {
+            (
+                d.side,
+                d.span.start,
+                d.span.start + d.span.count.saturating_sub(1),
+            )
+        });
+        let comments = Self::pane_comments(view);
+        self.with_pane(cx, |pane, cx| {
+            pane.set_comments(comments, cx);
+            pane.set_drafting(drafting, cx);
+        });
+    }
+
+    fn clear_draft_field(&mut self, cx: &mut Context<Self>) {
+        self.draft_field
+            .update(cx, |field, cx| field.set_content("", cx));
     }
 
     /// Hand the selected file to the pane: file start, everything folded.
@@ -335,19 +335,10 @@ impl DiffView {
         };
         let file = snap.file.clone();
         let path = snap.selected_path.clone();
-        let comments = self.path_comments();
+        let view = self.open_review.current();
+        let comments = Self::pane_comments(&view);
         self.with_pane(cx, |pane, cx| pane.open(&path, &file, comments, cx));
-    }
-
-    fn refresh_comments(&mut self, cx: &mut Context<Self>) {
-        let comments = self.path_comments();
-        self.with_pane(cx, |pane, cx| pane.set_comments(comments, cx));
-    }
-
-    fn set_drafting(&mut self, drafting: Option<Drafting>, cx: &mut Context<Self>) {
-        let span = drafting.as_ref().map(|d| (d.side, d.start, d.end()));
-        self.drafting = drafting;
-        self.with_pane(cx, |pane, cx| pane.set_drafting(span, cx));
+        self.apply_review(&view, cx);
     }
 
     /// Recompute Alignment under the current ViewOptions.
@@ -593,7 +584,10 @@ impl DiffView {
         self.searching = true;
         self.search_side = SearchSide::Postimage;
         self.search_files = SearchFiles::File;
-        self.set_drafting(None, cx);
+        if self.open_review.dock().is_some() {
+            let view = self.open_review.cancel();
+            self.apply_review(&view, cx);
+        }
         let handle = self.search_field.read(cx).focus_handle(cx);
         window.focus(&handle);
         self.sync_search_to_pane(cx);
@@ -883,6 +877,10 @@ impl DiffView {
 
     /// If Comparison matches, retarget path (+ file content); else replace snapshot.
     pub fn apply_snapshot(&mut self, incoming: DiffSnapshot, cx: &mut Context<Self>) {
+        let had_dock = self.open_review.dock().is_some();
+        let shown = self
+            .open_review
+            .show(incoming.comparison.clone(), incoming.selected_path.clone());
         match &mut self.snapshot {
             Some(current) if current.comparison == incoming.comparison => {
                 current.selected_path = incoming.selected_path;
@@ -890,11 +888,12 @@ impl DiffView {
                 current.file = incoming.file;
             }
             _ => {
-                self.review = Some(Review::new(incoming.comparison.clone()));
-                self.set_drafting(None, cx);
                 self.export_status = None;
                 self.snapshot = Some(incoming);
             }
+        }
+        if had_dock && shown.dock.is_none() {
+            self.clear_draft_field(cx);
         }
         self.invalidate_all_search_texts();
         self.recompute_alignment();
@@ -918,19 +917,23 @@ impl DiffView {
         let file = git::file_diff(&snap.comparison, &path, status, &opts);
         snap.selected_path = path.clone();
         snap.file = file;
-        self.set_drafting(None, cx);
+        let had_dock = self.open_review.dock().is_some();
+        self.open_review.select_path(path.clone());
+        if had_dock {
+            self.clear_draft_field(cx);
+        }
         self.open_in_pane(cx);
         window_geometry_store::note_diff_selected_path(path);
         window_geometry_store::flush();
     }
 
-    /// Open the bottom dock on a LineSpan with `body` loaded. Find and draft are
-    /// mutually exclusive, so an open find bar is dismissed first. The dock's
-    /// span becomes the selection, so the icon that reopens it stays under the
-    /// pointer after a save. Reveals the span start (expand fold / scroll).
+    /// Open the bottom dock on the span the module already recorded, with `body`
+    /// loaded. Find and draft are mutually exclusive, so an open find bar is
+    /// dismissed first. The dock's span becomes the selection, so the icon that
+    /// reopens it stays under the pointer after a save. Reveals the span start.
     fn open_dock(
         &mut self,
-        drafting: Drafting,
+        view: PathView,
         body: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -938,11 +941,14 @@ impl DiffView {
         if has_search(self) {
             self.close_search(window, cx);
         }
-        let (side, start, end) = (drafting.side, drafting.start, drafting.end());
-        self.set_drafting(Some(drafting), cx);
+        self.apply_review(&view, cx);
+        let Some(dock) = view.dock else {
+            return;
+        };
+        let end = dock.span.start + dock.span.count.saturating_sub(1);
         self.with_pane(cx, |pane, cx| {
-            pane.select_span(side, start, end, cx);
-            pane.reveal_line(side, start, cx);
+            pane.select_span(dock.side, dock.span.start, end, cx);
+            pane.reveal_line(dock.side, dock.span.start, cx);
         });
         self.draft_field
             .update(cx, |field, cx| field.set_content(body, cx));
@@ -951,7 +957,7 @@ impl DiffView {
         cx.notify();
     }
 
-    /// Empty gutter icon: write a postimage DraftComment on the selected LineSpan.
+    /// Empty gutter icon: write a line DraftComment on the selected LineSpan.
     fn begin_draft(
         &mut self,
         side: Side,
@@ -960,54 +966,39 @@ impl DiffView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_dock(
-            Drafting {
-                side,
-                start,
-                count,
-                editing: None,
-            },
-            String::new(),
-            window,
-            cx,
-        );
+        let view = self.open_review.begin_draft(side, start, count);
+        self.open_dock(view, String::new(), window, cx);
     }
 
-    /// Filled gutter icon or island Edit: reopen an existing DraftComment
-    /// with its body loaded. Its Anchor is what the dock names, so the span is
-    /// the comment's own rather than whatever was selected.
+    /// Filled gutter icon or island Edit: reopen a line DraftComment with its
+    /// body loaded. Unknown id or a file Anchor leaves the dock alone.
     fn begin_edit(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((side, span, body)) = self.comment_target(id) else {
+        let view = self.open_review.begin_edit(id);
+        let Some(body) = view.body.clone() else {
             return;
         };
-        self.open_dock(
-            Drafting {
-                side,
-                start: span.start,
-                count: span.count,
-                editing: Some(id),
-            },
-            body,
-            window,
-            cx,
-        );
+        self.open_dock(view, body, window, cx);
     }
 
-    /// Where a DraftComment is anchored and what it says. `None` for an unknown
-    /// id or a File anchor, neither of which the line dock can write to.
-    fn comment_target(&self, id: u64) -> Option<(Side, LineSpan, String)> {
-        let c = self.review.as_ref()?.comments.iter().find(|c| c.id == id)?;
+    /// Line span of a DraftComment. `None` for an unknown id or a file Anchor.
+    fn comment_target(&self, id: u64) -> Option<(Side, LineSpan)> {
+        let c = self
+            .open_review
+            .review()
+            .comments
+            .iter()
+            .find(|c| c.id == id)?;
         match &c.anchor {
-            Anchor::Line { side, span, .. } => Some((*side, *span, c.body.clone())),
+            Anchor::Line { side, span, .. } => Some((*side, *span)),
             Anchor::File { .. } => None,
         }
     }
 
     /// Close the draft dock without touching the pane selection wash.
     fn close_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_drafting(None, cx);
-        self.draft_field
-            .update(cx, |field, cx| field.set_content("", cx));
+        let view = self.open_review.cancel();
+        self.apply_review(&view, cx);
+        self.clear_draft_field(cx);
         window.focus(&self.focus);
         cx.notify();
     }
@@ -1021,11 +1012,12 @@ impl DiffView {
     /// Island row body: selection wash on that comment's span, dock stays closed.
     /// If a draft is open, cancel it first (clears wash), then select this row.
     /// Reveals the span start when off-screen or inside a collapsed Equal.
+    /// File anchors stay a no-op.
     fn select_comment(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if self.drafting.is_some() {
+        if self.open_review.dock().is_some() {
             self.cancel_draft(window, cx);
         }
-        let Some((side, span, _)) = self.comment_target(id) else {
+        let Some((side, span)) = self.comment_target(id) else {
             return;
         };
         let end = span.start + span.count.saturating_sub(1);
@@ -1039,52 +1031,40 @@ impl DiffView {
     /// Immediate delete. Closes the dock if it was editing this id; clears the
     /// wash if it pointed at this comment's span.
     fn delete_comment(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if self.drafting.as_ref().and_then(|d| d.editing) == Some(id) {
-            self.close_dock(window, cx);
-        }
-        let clear_wash = self.comment_target(id).is_some_and(|(side, span, _)| {
+        let clear_wash = self.comment_target(id).is_some_and(|(side, span)| {
             selection_matches_span(self.pane.read(cx).selection(), side, span)
         });
+        let editing_this = self
+            .open_review
+            .dock()
+            .is_some_and(|d| d.editing == Some(id));
+        let view = self.open_review.delete(id);
         if clear_wash {
             self.with_pane(cx, |pane, cx| pane.clear_selection(cx));
         }
-        if let Some(review) = &mut self.review {
-            review.delete_comment(id);
+        self.apply_review(&view, cx);
+        if editing_this {
+            self.clear_draft_field(cx);
+            window.focus(&self.focus);
         }
-        self.refresh_comments(cx);
         cx.notify();
     }
 
-    /// Enter in the dock: add the span as a DraftComment, or rewrite the body of
-    /// the one being edited. An empty body closes without writing and clears the
-    /// wash (same as cancel) so Enter is never a way to make a comment blank.
-    /// A real save keeps the selection wash so the island row stays selected.
+    /// Enter in the dock. The module trims; an empty body cancels and this also
+    /// clears the wash. A real save keeps the wash so the island row stays selected.
     fn commit_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(draft) = self.drafting.take() else {
-            return;
-        };
-        let body = self.draft_field.read(cx).content().trim().to_string();
-        if body.is_empty() {
-            self.cancel_draft(window, cx);
+        if self.open_review.dock().is_none() {
             return;
         }
-        self.close_dock(window, cx);
-        let path = self
-            .snapshot
-            .as_ref()
-            .map(|s| s.selected_path.clone())
-            .unwrap_or_default();
-        if let Some(review) = &mut self.review {
-            match draft.editing {
-                Some(id) => {
-                    review.update_comment_body(id, body);
-                }
-                None => {
-                    review.add_line_span_comment(path, draft.side, draft.start, draft.count, body);
-                }
-            }
+        let body = self.draft_field.read(cx).content().to_string();
+        let blank = body.trim().is_empty();
+        let view = self.open_review.commit(&body);
+        self.apply_review(&view, cx);
+        self.clear_draft_field(cx);
+        window.focus(&self.focus);
+        if blank {
+            self.with_pane(cx, |pane, cx| pane.clear_selection(cx));
         }
-        self.refresh_comments(cx);
         cx.notify();
     }
 
@@ -1099,7 +1079,7 @@ impl DiffView {
             self.close_search(window, cx);
             return;
         }
-        if self.drafting.is_some() {
+        if self.open_review.dock().is_some() {
             self.cancel_draft(window, cx);
             return;
         }
@@ -1135,7 +1115,7 @@ impl DiffView {
             }
             return;
         }
-        if self.drafting.is_some() {
+        if self.open_review.dock().is_some() {
             // The dock's TextField owns typing (IME included). Enter reaches it
             // as `Confirm`; Shift+Enter has no binding there, so it lands here.
             if event.keystroke.key == "enter" && mods.shift {
@@ -1164,14 +1144,11 @@ impl DiffView {
     }
 
     fn export_to_clipboard(&mut self, cx: &mut Context<Self>) {
-        let Some(review) = &self.review else {
-            return;
-        };
-        let text = export::export_review(review);
+        let text = export::export_review(self.open_review.review());
         if text.is_empty() {
             self.export_status = Some("No DraftComments to export".into());
         } else {
-            let n = review.comments.len();
+            let n = self.open_review.review().comments.len();
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             self.export_status = Some(format!(
                 "Copied {n} comment{}",
@@ -1311,7 +1288,7 @@ impl Render for DiffView {
         if find_overlay.is_none() {
             self.find_bar_bounds.set(None);
         }
-        let draft_overlay = self.drafting.is_some().then(|| {
+        let draft_overlay = self.open_review.dock().is_some().then(|| {
             pane::overlay_slot(
                 self.draft_dock_bounds.clone(),
                 render_draft_dock(self, window, cx),
@@ -1369,10 +1346,10 @@ fn file_status(view: &DiffView, cx: &mut Context<DiffView>) -> (String, String) 
     match &view.snapshot {
         Some(s) => {
             let n = view
-                .review
-                .as_ref()
-                .map(|r| r.comments_for_path(&s.selected_path).count())
-                .unwrap_or(0);
+                .open_review
+                .review()
+                .comments_for_path(&s.selected_path)
+                .count();
             let mut sub = match &s.file {
                 FileDiff::Text { .. } => {
                     let hunk_count = view.pane.read(cx).hunk_count().unwrap_or(0);
@@ -2048,10 +2025,11 @@ fn render_comment_island(
         .map(|s| s.selected_path.clone())
         .unwrap_or_default();
     let comments: Vec<_> = view
-        .review
-        .as_ref()
-        .map(|r| r.comments_for_path(&path).cloned().collect())
-        .unwrap_or_default();
+        .open_review
+        .review()
+        .comments_for_path(&path)
+        .cloned()
+        .collect();
 
     let n = comments.len();
     let selection = view.pane.read(cx).selection();
@@ -2217,7 +2195,7 @@ fn render_no_comments(cx: &App) -> impl IntoElement {
 /// Invisible slot where the bottom draft dock will be painted above DualPane.
 /// Bottom-anchored mirror of [`render_find_measure`].
 fn render_draft_measure(view: &DiffView, cx: &App) -> impl IntoElement {
-    if view.drafting.is_none() {
+    if view.open_review.dock().is_none() {
         return div().into_any_element();
     }
     let slot = view.draft_dock_bounds.clone();
@@ -2239,10 +2217,10 @@ fn render_draft_dock(
     window: &Window,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
-    let Some(draft) = &view.drafting else {
+    let Some(draft) = view.open_review.dock() else {
         return div().into_any_element();
     };
-    let label = span_label(draft.side, draft.start, draft.count);
+    let label = span_label(draft.side, draft.span.start, draft.span.count);
     let focused = view
         .draft_field
         .read(cx)
@@ -2551,7 +2529,7 @@ fn traffic_lights_space() -> Option<Div> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LineSpan, Side, selection_matches_span, span_label};
+    use super::{selection_matches_span, span_label, LineSpan, Side};
 
     #[test]
     fn span_label_names_one_line_and_a_range() {
