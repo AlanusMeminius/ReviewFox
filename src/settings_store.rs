@@ -62,6 +62,13 @@ pub struct SettingsFile {
         skip_serializing_if = "Option::is_none"
     )]
     pub soft_wrap: Option<bool>,
+    /// Software Theme: `dark` selects the dark chrome; missing means light.
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub software_theme: Option<String>,
     /// Code Theme while the Software Theme is light. Missing means One Light.
     /// `one-light` is omitted on save; any other id, including an unknown one,
     /// is kept.
@@ -373,6 +380,22 @@ mod tests {
                 ..Default::default()
             }
         );
+        fs::remove_dir_all(dir.path()).ok();
+    }
+
+    #[test]
+    fn software_theme_roundtrips_and_bad_types_load_as_light() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path_for_tests(dir.path());
+        let file = SettingsFile {
+            software_theme: Some("dark".into()),
+            ..Default::default()
+        };
+        save_file_at(&path, &file).unwrap();
+        assert_eq!(load_file_at(&path).software_theme, Some("dark".into()));
+
+        fs::write(&path, r#"{ "software_theme": 7 }"#).unwrap();
+        assert_eq!(load_file_at(&path).software_theme, None);
         fs::remove_dir_all(dir.path()).ok();
     }
 

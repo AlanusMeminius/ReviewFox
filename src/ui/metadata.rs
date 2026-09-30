@@ -52,7 +52,7 @@ fn copyable_capsule(value: impl Into<String>, cx: &App) -> Stateful<Div> {
         .debug_selector(move || format!("metadata-copy-{value}"))
         .cursor_pointer()
         .hover(|capsule| capsule.bg(theme::line()))
-        .active(|capsule| capsule.bg(rgb(0xd0d6e0)))
+        .active(|capsule| capsule.bg(theme::element_active()))
         .tooltip(Tooltip::text("Click to copy", None))
         .on_click(move |_, _, cx: &mut App| {
             cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));

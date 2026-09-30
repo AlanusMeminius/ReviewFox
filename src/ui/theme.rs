@@ -108,13 +108,17 @@ pub fn find_bar_shadow() -> Vec<BoxShadow> {
     ]
 }
 
-/// Translucent white fill for the floating find bar.
+/// Translucent fill for the floating find bar / draft dock.
 pub fn find_bar_bg() -> Rgba {
-    Rgba {
-        r: 1.,
-        g: 1.,
-        b: 1.,
-        a: 0.96,
+    if crate::ui::code_theme::is_dark() {
+        gpui::rgba(0x272b33f5)
+    } else {
+        Rgba {
+            r: 1.,
+            g: 1.,
+            b: 1.,
+            a: 0.96,
+        }
     }
 }
 
@@ -171,10 +175,18 @@ pub const TRAFFIC_LIGHT_LEFT_INSET: f32 = 12.;
 pub const TRAFFIC_LIGHTS_WIDTH: f32 = 76.;
 
 pub fn text() -> Rgba {
-    rgb(0x172033)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0xabb2bf)
+    } else {
+        rgb(0x172033)
+    }
 }
 pub fn muted() -> Rgba {
-    rgb(0x596579)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x8f96a3)
+    } else {
+        rgb(0x596579)
+    }
 }
 /// Splitter stadium chrome: [`muted`] at the given alpha (idle / hover / drag).
 pub fn splitter_capsule(alpha: f32) -> Rgba {
@@ -184,13 +196,25 @@ pub fn splitter_capsule(alpha: f32) -> Rgba {
     }
 }
 pub fn faint() -> Rgba {
-    rgb(0x98a2b3)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x636d83)
+    } else {
+        rgb(0x98a2b3)
+    }
 }
 pub fn line() -> Rgba {
-    rgb(0xdfe3ea)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x3b4048)
+    } else {
+        rgb(0xdfe3ea)
+    }
 }
 pub fn white() -> Rgba {
-    rgb(0xffffff)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x30343d)
+    } else {
+        rgb(0xffffff)
+    }
 }
 /// Paints nothing; lets whatever is behind the element show through.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -209,9 +233,15 @@ const CLEAR: Rgba = Rgba {
 /// would drift lighter than the stage.
 #[cfg(target_os = "macos")]
 pub fn frost() -> Rgba {
-    // The DIY NSVisualEffectView sits *under* the Metal view, so the material is
-    // already behind us; painting here would only sit on top of it.
-    CLEAR
+    // Light: the DIY NSVisualEffectView sits *under* the Metal view, so the
+    // material is already behind us; painting here would only sit on top of it.
+    // Dark: that material follows the system (light) appearance, so tint it
+    // with a translucent ink fill — the vibrancy still shows through.
+    if crate::ui::code_theme::is_dark() {
+        gpui::rgba(0x14161db3)
+    } else {
+        CLEAR
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -220,13 +250,21 @@ pub fn frost() -> Rgba {
     // gradient 0x00000000), so the entire window tone comes from this fill.
     // 0.9 keeps `muted()` legible over a dark wallpaper; below ~0.8 it stops
     // being.
-    rgba(0xf4f5f7e6)
+    if crate::ui::code_theme::is_dark() {
+        gpui::rgba(0x1d2027e0)
+    } else {
+        rgba(0xf4f5f7e6)
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn frost() -> Rgba {
     // No compositor backdrop requested (`WindowBackgroundAppearance::Opaque`).
-    rgb(0xf4f5f7)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x1d2027)
+    } else {
+        rgb(0xf4f5f7)
+    }
 }
 
 /// Columns that sit directly on the frosted desk: the workspace sidebar, the
@@ -234,6 +272,8 @@ pub fn frost() -> Rgba {
 /// translucent — see its note on compounding.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn sidebar() -> Rgba {
+    // Columns on the frosted desk stay clear; in dark the desk is already
+    // tinted by [`frost`].
     CLEAR
 }
 
@@ -242,7 +282,11 @@ pub fn sidebar() -> Rgba {
     rgb(0xf4f5f7)
 }
 pub fn hover() -> Rgba {
-    rgb(0xe9ebef)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x3b4048)
+    } else {
+        rgb(0xe9ebef)
+    }
 }
 /// Chrome pill fill (branch / value / unselected kind toggles) — white on the frosted desk.
 pub fn capsule() -> Rgba {
@@ -250,7 +294,11 @@ pub fn capsule() -> Rgba {
 }
 /// Hover fill on capsule chrome (prototype `--capsule-bg-hover`).
 pub fn capsule_track_hover() -> Rgba {
-    rgb(0xe4e7ed)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x454b55)
+    } else {
+        rgb(0xe4e7ed)
+    }
 }
 /// Sidebar active row — same blue as the app icon; chroma survives vibrancy.
 pub fn sidebar_selected() -> Rgba {
@@ -258,7 +306,8 @@ pub fn sidebar_selected() -> Rgba {
 }
 /// Primary label on [`sidebar_selected`].
 pub fn on_sidebar_selected() -> Rgba {
-    white()
+    // Primary label on the accent fill: true white in both themes.
+    rgb(0xffffff)
 }
 /// Workspace sidebar selected / pressed row fill. Translucent so macOS vibrancy
 /// (and Windows acrylic) shows through.
@@ -280,10 +329,18 @@ pub fn sidebar_row_hover() -> Rgba {
     }
 }
 pub fn range() -> Rgba {
-    rgb(0xf1f5ff)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x30384a)
+    } else {
+        rgb(0xf1f5ff)
+    }
 }
 pub fn accent() -> Rgba {
-    rgb(0x2457d6)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x61afef)
+    } else {
+        rgb(0x2457d6)
+    }
 }
 
 // Settings tokens: Zed One Light roles, tuned to the palette above. [`line`]
@@ -291,38 +348,73 @@ pub fn accent() -> Rgba {
 
 /// Row dividers and card outlines — a step lighter than [`line`].
 pub fn border_variant() -> Rgba {
-    rgb(0xe8ebf0)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x333842)
+    } else {
+        rgb(0xe8ebf0)
+    }
 }
 /// Focused input / keyboard-focused control border; a softened [`accent`].
 pub fn border_focused() -> Rgba {
-    rgb(0x7c9be6)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x4c739e)
+    } else {
+        rgb(0x7c9be6)
+    }
 }
 /// Pressed controls and selected rows; one step past [`hover`].
 pub fn element_active() -> Rgba {
-    rgb(0xdfe3e9)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x454b55)
+    } else {
+        rgb(0xdfe3e9)
+    }
 }
 pub fn success() -> Rgba {
     rgb(0x2f8f55)
 }
 pub fn success_background() -> Rgba {
-    rgb(0xe8f7ee)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x1e3a2a)
+    } else {
+        rgb(0xe8f7ee)
+    }
 }
 pub fn success_border() -> Rgba {
-    rgb(0xc3e5cf)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x2f5c40)
+    } else {
+        rgb(0xc3e5cf)
+    }
 }
 pub fn error() -> Rgba {
     rgb(0xcf4a3c)
 }
 pub fn error_background() -> Rgba {
-    rgb(0xfdeceb)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x3d2422)
+    } else {
+        rgb(0xfdeceb)
+    }
 }
 pub fn error_border() -> Rgba {
-    rgb(0xf5c8c2)
+    if crate::ui::code_theme::is_dark() {
+        rgb(0x5c3532)
+    } else {
+        rgb(0xf5c8c2)
+    }
 }
 /// Settings nav row under the pointer: a half-step toward the white
 /// [`capsule`] that marks the selected row, so hover never reads as selection.
 pub fn settings_nav_hover() -> Rgba {
-    Rgba { a: 0.55, ..white() }
+    if crate::ui::code_theme::is_dark() {
+        Rgba {
+            a: 0.12,
+            ..rgb(0xffffff)
+        }
+    } else {
+        Rgba { a: 0.55, ..white() }
+    }
 }
 
 #[cfg(test)]

@@ -2090,7 +2090,7 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
                                 if in_range {
                                     d.bg(theme::range())
                                 } else {
-                                    d.bg(rgb(0xf6f8fb))
+                                    d.bg(theme::hover())
                                 }
                             })
                             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {

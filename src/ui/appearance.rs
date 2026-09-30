@@ -27,6 +27,7 @@ pub struct Family {
 /// Each Code Theme id is `None` when unset (One Light). An unknown id is kept.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Appearance {
+    pub software_theme: code_theme::SoftwareThemeMode,
     pub ui_font: Family,
     pub ui_font_size: u32,
     pub code_font: Family,
@@ -176,6 +177,19 @@ pub fn update(cx: &mut App, edit: impl FnOnce(&mut SettingsFile)) {
     }
 }
 
+/// Set the Software Theme and persist it for the whole application.
+pub fn set_software_theme(cx: &mut App, mode: code_theme::SoftwareThemeMode) {
+    update(cx, |file| {
+        file.software_theme = Some(
+            match mode {
+                code_theme::SoftwareThemeMode::Light => "light",
+                code_theme::SoftwareThemeMode::Dark => "dark",
+            }
+            .to_string(),
+        );
+    });
+}
+
 /// Code Theme for the light Software Theme. The id `one-light` clears the field.
 pub fn set_code_theme_light(cx: &mut App, id: &str) {
     update(cx, |file| {
@@ -188,6 +202,7 @@ fn remember(appearance: &Appearance) {
         light: appearance.code_theme_light.clone(),
         dark: appearance.code_theme_dark.clone(),
     });
+    code_theme::remember_mode(appearance.software_theme);
 }
 
 /// The installed font names, cached since startup.
@@ -287,6 +302,10 @@ impl<E: Styled> UiTextSize for E {}
 
 pub fn resolve(file: &SettingsFile, installed: &[SharedString]) -> Appearance {
     Appearance {
+        software_theme: match file.software_theme.as_deref() {
+            Some("dark") => code_theme::SoftwareThemeMode::Dark,
+            _ => code_theme::SoftwareThemeMode::Light,
+        },
         ui_font: resolve_family(
             file.ui_font_family.as_deref(),
             FontRole::Ui.default_family(installed),

@@ -64,6 +64,58 @@ fn one_light() -> CodeTheme {
     }
 }
 
+fn one_dark() -> CodeTheme {
+    CodeTheme {
+        id: "one-dark".into(),
+        label: "One Dark".into(),
+        slots: AuthoredSlots {
+            paper: rgb(0x282c34),
+            added_band: rgb(0x263b32),
+            deleted_band: rgb(0x3b3032),
+            replaced_band: rgb(0x30384a),
+            word_difference: rgb(0x52658a),
+            line_number: rgb(0x636d83),
+            default_foreground: rgb(0xabb2bf),
+            comment: rgb(0x61afef),
+            idle_comment: rgb(0x636d83),
+            selection: Rgba {
+                a: 0.25,
+                ..rgb(0x61afef)
+            },
+            search_hit: rgb(0x665c24),
+            search_current: rgb(0x9e791e),
+            search_ring: rgb(0xe5c07b),
+            syntax: syntax_slots(&[
+                ("attribute", 0xe06c75),
+                ("comment", 0x7f848e),
+                ("comment.documentation", 0x7f848e),
+                ("constant", 0xd19a66),
+                ("constant.builtin", 0xd19a66),
+                ("constructor", 0xe5c07b),
+                ("delimiter", 0xabb2bf),
+                ("escape", 0x56b6c2),
+                ("function", 0x61afef),
+                ("function.macro", 0x61afef),
+                ("function.method", 0x61afef),
+                ("function.special", 0x61afef),
+                ("keyword", 0xc678dd),
+                ("label", 0xe5c07b),
+                ("number", 0xd19a66),
+                ("operator", 0x56b6c2),
+                ("property", 0xe06c75),
+                ("punctuation.bracket", 0xabb2bf),
+                ("punctuation.delimiter", 0xabb2bf),
+                ("string", 0x98c379),
+                ("type", 0xe5c07b),
+                ("type.builtin", 0xe5c07b),
+                ("variable", 0xabb2bf),
+                ("variable.builtin", 0xe06c75),
+                ("variable.parameter", 0xe06c75),
+            ]),
+        },
+    }
+}
+
 fn atom_one_light() -> CodeTheme {
     CodeTheme {
         id: "atom-one-light".into(),
@@ -161,6 +213,8 @@ pub struct AuthoredSlots {
 #[derive(Clone, Debug)]
 pub struct ResolvedCodeTheme {
     pub id: String,
+    /// Display label; asserted in tests, read by pickers through the catalog.
+    #[allow(dead_code)]
     pub label: String,
     pub slots: AuthoredSlots,
     pub derived: DerivedRoles,
@@ -198,7 +252,7 @@ pub struct DerivedRoles {
 
 pub fn builtin_catalog() -> &'static [CodeTheme] {
     static CATALOG: LazyLock<Vec<CodeTheme>> =
-        LazyLock::new(|| vec![one_light(), atom_one_light()]);
+        LazyLock::new(|| vec![one_light(), atom_one_light(), one_dark()]);
     CATALOG.as_slice()
 }
 
@@ -274,6 +328,7 @@ static REMEMBERED: Mutex<CodeThemePairing> = Mutex::new(CodeThemePairing {
     light: None,
     dark: None,
 });
+static ACTIVE_MODE: Mutex<SoftwareThemeMode> = Mutex::new(SoftwareThemeMode::Light);
 
 /// Remember the Code Theme Pairing. The dark choice stays here while production
 /// still resolves in Software Theme mode light.
@@ -281,13 +336,22 @@ pub fn remember_pairing(pairing: CodeThemePairing) {
     *REMEMBERED.lock().unwrap_or_else(|err| err.into_inner()) = pairing;
 }
 
-/// Palette Diff paints from: Software Theme mode light, and the remembered pairing.
+pub fn remember_mode(mode: SoftwareThemeMode) {
+    *ACTIVE_MODE.lock().unwrap_or_else(|err| err.into_inner()) = mode;
+}
+
+pub fn is_dark() -> bool {
+    *ACTIVE_MODE.lock().unwrap_or_else(|err| err.into_inner()) == SoftwareThemeMode::Dark
+}
+
+/// Palette Diff paints from the active Software Theme mode and pairing.
 pub fn active() -> ResolvedCodeTheme {
     let pairing = REMEMBERED
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .clone();
-    resolve(SoftwareThemeMode::Light, &pairing, builtin_catalog())
+    let mode = *ACTIVE_MODE.lock().unwrap_or_else(|err| err.into_inner());
+    resolve(mode, &pairing, builtin_catalog())
 }
 
 /// Capture id → color for `theme`.
@@ -403,9 +467,10 @@ mod tests {
     #[test]
     fn builtin_catalog_exposes_atom_one_light_for_picker_switching() {
         let catalog = builtin_catalog();
-        assert_eq!(catalog.len(), 2);
+        assert_eq!(catalog.len(), 3);
         assert_eq!(catalog[1].id, "atom-one-light");
         assert_eq!(catalog[1].label, "Atom One Light");
+        assert_eq!(catalog[2].id, "one-dark");
 
         let palette = resolve(
             SoftwareThemeMode::Light,

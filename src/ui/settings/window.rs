@@ -54,9 +54,8 @@ const CLOSE_KEY: &str = "cmd-w";
 const CLOSE_KEY: &str = "ctrl-w";
 
 /// Tab order: nav, GitLab URL, then the token input or the token card's buttons
-/// (up to two), then each font group's family and size, then the Code Theme
-/// light choice. Only the selected page's controls render, so each page tabs
-/// through its own.
+/// (up to two), then each font group's family and size, then theme controls.
+/// Only the selected page's controls render, so each page tabs through its own.
 const TAB_NAV: isize = 0;
 const TAB_URL: isize = 1;
 const TAB_TOKEN: isize = 2;
@@ -65,7 +64,8 @@ const TAB_UI_FONT_FAMILY: isize = TAB_TOKEN + 2;
 const TAB_UI_FONT_SIZE: isize = TAB_UI_FONT_FAMILY + 1;
 const TAB_CODE_FONT_FAMILY: isize = TAB_UI_FONT_SIZE + 1;
 const TAB_CODE_FONT_SIZE: isize = TAB_CODE_FONT_FAMILY + 1;
-const TAB_CODE_THEME: isize = TAB_CODE_FONT_SIZE + 1;
+const TAB_THEME: isize = TAB_CODE_FONT_SIZE + 1;
+const TAB_CODE_THEME: isize = TAB_THEME + 1;
 
 const URL_TITLE: &str = "GitLab URL";
 const URL_DESCRIPTION: &str = "Your self-hosted GitLab address. Leave empty for gitlab.com.";
@@ -128,7 +128,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
     .into_iter()
     .chain(number_field::key_bindings())
     .chain(font_picker::key_bindings())
-    .chain(code_theme_picker::key_bindings())
+    .chain(code_theme_picker::key_bindings("settings-code-theme"))
+    .chain(code_theme_picker::key_bindings("settings-software-theme"))
     .collect()
 }
 
@@ -137,6 +138,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 enum Section {
     GitLab,
     Fonts,
+    Theme,
     CodeTheme,
 }
 
@@ -145,6 +147,7 @@ impl Section {
         match self {
             Section::GitLab => "GitLab",
             Section::Fonts => "Fonts",
+            Section::Theme => "Theme",
             Section::CodeTheme => "Code Theme",
         }
     }
@@ -159,7 +162,7 @@ const PAGES: &[NavPage<Section>] = &[
     },
     NavPage {
         title: "Appearance",
-        sections: &[Section::Fonts, Section::CodeTheme],
+        sections: &[Section::Fonts, Section::Theme, Section::CodeTheme],
         expanded: true,
     },
 ];
@@ -191,7 +194,8 @@ pub struct SettingsView {
     gitlab_connection: Rc<RefCell<GitLabConnection>>,
     /// One per [`FONT_GROUPS`] entry, same order.
     font_controls: [FontControls; 2],
-    code_theme: Entity<code_theme_picker::CodeThemePicker>,
+    code_theme: Entity<code_theme_picker::OptionsPicker>,
+    theme: Entity<code_theme_picker::OptionsPicker>,
     nav_focus: FocusHandle,
     nav: NavState,
     /// Last nav interaction came from the keyboard: show the focus border.
@@ -280,13 +284,43 @@ impl SettingsView {
                 ));
                 FontControls { family, size }
             });
-        let code_theme =
-            cx.new(|cx| code_theme_picker::CodeThemePicker::new(TAB_CODE_THEME, window, cx));
+        let code_theme = cx.new(|cx| {
+            code_theme_picker::OptionsPicker::new(
+                "settings-code-theme",
+                code_theme_picker::code_theme_options(),
+                code_theme_picker::resolved_code_theme_id(cx),
+                TAB_CODE_THEME,
+                window,
+                cx,
+            )
+        });
         subscriptions.push(cx.subscribe(
             &code_theme,
-            |_, _, event: &code_theme_picker::CodeThemePickerEvent, cx| {
-                let code_theme_picker::CodeThemePickerEvent::Confirm(id) = event;
+            |_, _, event: &code_theme_picker::OptionsPickerEvent, cx| {
+                let code_theme_picker::OptionsPickerEvent::Confirm(id) = event;
                 appearance::set_code_theme_light(cx, id);
+            },
+        ));
+        let theme = cx.new(|cx| {
+            code_theme_picker::OptionsPicker::new(
+                "settings-software-theme",
+                code_theme_picker::software_theme_options(),
+                code_theme_picker::current_software_theme_id(cx),
+                TAB_THEME,
+                window,
+                cx,
+            )
+        });
+        subscriptions.push(cx.subscribe(
+            &theme,
+            |_, _, event: &code_theme_picker::OptionsPickerEvent, cx| {
+                let code_theme_picker::OptionsPickerEvent::Confirm(id) = event;
+                let mode = if id == "dark" {
+                    crate::ui::code_theme::SoftwareThemeMode::Dark
+                } else {
+                    crate::ui::code_theme::SoftwareThemeMode::Light
+                };
+                appearance::set_software_theme(cx, mode);
             },
         ));
 
@@ -304,6 +338,7 @@ impl SettingsView {
             gitlab_connection,
             font_controls,
             code_theme,
+            theme,
             nav_focus: cx.focus_handle().tab_index(TAB_NAV).tab_stop(true),
             nav: NavState::new(PAGES),
             nav_keyboard: false,
@@ -563,6 +598,7 @@ impl SettingsView {
                     .child(match section {
                         Section::GitLab => self.render_gitlab_section(cx),
                         Section::Fonts => self.render_fonts_section(cx),
+                        Section::Theme => self.render_theme_section(cx),
                         Section::CodeTheme => self.render_code_theme_section(),
                     })
             })
@@ -715,6 +751,14 @@ impl SettingsView {
 }
 
 impl SettingsView {
+    /// Appearance › Theme: the Software Theme choice, Light or Dark.
+    fn render_theme_section(&self, _cx: &mut Context<Self>) -> AnyElement {
+        SettingRow::new("settings-software-theme", "Software Theme")
+            .last(true)
+            .control(self.theme.clone())
+            .into_any_element()
+    }
+
     /// Appearance › Code Theme: the light choice only. No dark row, no Software
     /// Theme switch. Choosing One Light clears the stored field.
     fn render_code_theme_section(&self) -> AnyElement {
