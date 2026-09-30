@@ -1975,6 +1975,14 @@ fn render_entry_chrome(
         )
         .child(
             div()
+                .id("entry-kind-divider")
+                .w(px(1.))
+                .h(px(14.))
+                .flex_none()
+                .bg(theme::faint()),
+        )
+        .child(
+            div()
                 .id("entry-value-pill")
                 .relative()
                 .h(theme::TOGGLE_SIZE)
