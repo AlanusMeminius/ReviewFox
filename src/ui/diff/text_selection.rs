@@ -62,12 +62,14 @@ pub enum Phase {
 
 /// One sample. `side` is where the pointer is; the span stays on the press.
 /// `column` is a display column into the logical line (tabs already expanded).
+/// `clicks` is the platform click count. The platform owns the double-click interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sample {
     pub phase: Phase,
     pub side: Side,
     pub class: RowClass,
     pub column: usize,
+    pub clicks: usize,
 }
 
 /// Text gesture plus the gutter line span it must not write.
@@ -85,6 +87,7 @@ struct Press {
     head: Option<Anchor>,
     prior: Option<TextSelection>,
     text_row: bool,
+    clicks: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,6 +143,7 @@ impl Model {
                     head: None,
                     prior: self.selection,
                     text_row: matches!(cell, Cell::At { .. } | Cell::After { .. }),
+                    clicks: sample.clicks,
                 });
             }
             Phase::Move | Phase::Release => {
@@ -194,7 +198,13 @@ impl Model {
         if release {
             let press = self.press.take().expect("press");
             if press.head.is_none() {
-                self.selection = click_result(press.side, press.origin, press.prior, line);
+                self.selection = if press.clicks >= 3 {
+                    triple_click(press.side, press.origin, press.prior, line)
+                } else if press.clicks == 2 {
+                    double_click(press.side, press.origin, press.prior, line)
+                } else {
+                    click_result(press.side, press.origin, press.prior, line)
+                };
             }
         }
     }
@@ -292,6 +302,112 @@ fn span_between<'a>(
     )
 }
 
+fn triple_click<'a>(
+    side: Side,
+    origin: Cell,
+    prior: Option<TextSelection>,
+    line: &impl Fn(Side, u32) -> &'a str,
+) -> Option<TextSelection> {
+    let ln = match origin {
+        Cell::At { ln, .. } | Cell::After { ln } => ln,
+        _ => return click_result(side, origin, prior, line),
+    };
+    let text = line(side, ln);
+    Some(TextSelection {
+        side,
+        start_line: ln,
+        start_byte: 0,
+        end_line: ln,
+        end_byte: text.len(),
+    })
+}
+
+fn double_click<'a>(
+    side: Side,
+    origin: Cell,
+    prior: Option<TextSelection>,
+    line: &impl Fn(Side, u32) -> &'a str,
+) -> Option<TextSelection> {
+    let Cell::At { ln, byte } = origin else {
+        return click_result(side, origin, prior, line);
+    };
+    let text = line(side, ln);
+    let ch = text.get(byte..).and_then(|rest| rest.chars().next())?;
+    if ch.is_whitespace() {
+        return None;
+    }
+    let (start, end) = if is_ident_char(ch) {
+        ident_run(text, byte)
+    } else {
+        (byte, byte + ch.len_utf8())
+    };
+    Some(TextSelection {
+        side,
+        start_line: ln,
+        start_byte: start,
+        end_line: ln,
+        end_byte: end,
+    })
+}
+
+fn is_ident_char(c: char) -> bool {
+    (c == '_' || c.is_alphanumeric()) && !excluded_script(c)
+}
+
+/// Han, Hiragana, Katakana, Hangul.
+/// ponytail: Unicode blocks, not Script. Enclosed CJK numbers outside these
+/// blocks stay letters until a script table is needed.
+fn excluded_script(c: char) -> bool {
+    matches!(
+        c,
+        '\u{1100}'..='\u{11FF}'
+            | '\u{3005}'..='\u{3007}'
+            | '\u{3040}'..='\u{30FF}'
+            | '\u{3130}'..='\u{318F}'
+            | '\u{31F0}'..='\u{31FF}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{A960}'..='\u{A97F}'
+            | '\u{AC00}'..='\u{D7AF}'
+            | '\u{D7B0}'..='\u{D7FF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{FF66}'..='\u{FF9D}'
+            | '\u{FFA0}'..='\u{FFDC}'
+    ) || matches!(
+        c as u32,
+        0x1AFF0..=0x1B16F
+            | 0x20000..=0x2A6DF
+            | 0x2A700..=0x2B73F
+            | 0x2B740..=0x2B81F
+            | 0x2B820..=0x2CEAF
+            | 0x2CEB0..=0x2EBEF
+            | 0x2EBF0..=0x2EE5F
+            | 0x2F800..=0x2FA1F
+            | 0x30000..=0x323AF
+    )
+}
+
+fn ident_run(text: &str, at: usize) -> (usize, usize) {
+    let mut start = at;
+    while start > 0 {
+        let Some(c) = text[..start].chars().next_back() else {
+            break;
+        };
+        if !is_ident_char(c) {
+            break;
+        }
+        start -= c.len_utf8();
+    }
+    let mut end = at;
+    while let Some(c) = text[end..].chars().next() {
+        if !is_ident_char(c) {
+            break;
+        }
+        end += c.len_utf8();
+    }
+    (start, end)
+}
+
 fn click_result<'a>(
     side: Side,
     origin: Cell,
@@ -340,6 +456,14 @@ mod tests {
             side,
             class,
             column,
+            clicks: 1,
+        }
+    }
+
+    fn multi(phase: Phase, side: Side, class: RowClass, column: usize, clicks: usize) -> Sample {
+        Sample {
+            clicks,
+            ..sample(phase, side, class, column)
         }
     }
 
@@ -665,5 +789,455 @@ mod tests {
             })
         );
         assert_eq!(model.clipboard(line(&pre, &[])).as_deref(), Some("éx"));
+    }
+
+    #[test]
+    fn double_click_selects_the_whole_identifier() {
+        let pre = ["foo_bar"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 4, 2),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 4),
+            ],
+        );
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 0,
+                end_line: 1,
+                end_byte: 7,
+            })
+        );
+        assert_eq!(model.clipboard(line(&pre, &[])).as_deref(), Some("foo_bar"));
+    }
+
+    #[test]
+    fn double_click_on_foo_dot_bar_selects_only_one_side() {
+        let pre = ["foo.bar"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 1, 2),
+                multi(
+                    Phase::Release,
+                    Side::Preimage,
+                    RowClass::Text { ln: 1 },
+                    1,
+                    2,
+                ),
+            ],
+        );
+        assert_eq!(model.clipboard(line(&pre, &[])).as_deref(), Some("foo"));
+
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 5, 2),
+                multi(
+                    Phase::Release,
+                    Side::Preimage,
+                    RowClass::Text { ln: 1 },
+                    5,
+                    2,
+                ),
+            ],
+        );
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 4,
+                end_line: 1,
+                end_byte: 7,
+            })
+        );
+        assert_eq!(model.clipboard(line(&pre, &[])).as_deref(), Some("bar"));
+    }
+
+    #[test]
+    fn double_click_on_i_a_or_underscore_selects_that_identifier() {
+        for text in ["i", "a", "_"] {
+            let pre = [text];
+            let mut model = Model::default();
+            feed(
+                &mut model,
+                &pre,
+                &[],
+                &[
+                    multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0, 2),
+                    multi(
+                        Phase::Release,
+                        Side::Preimage,
+                        RowClass::Text { ln: 1 },
+                        0,
+                        2,
+                    ),
+                ],
+            );
+            assert_eq!(
+                model.selection(),
+                Some(TextSelection {
+                    side: Side::Preimage,
+                    start_line: 1,
+                    start_byte: 0,
+                    end_line: 1,
+                    end_byte: 1,
+                }),
+                "{text}"
+            );
+            assert_eq!(
+                model.clipboard(line(&pre, &[])).as_deref(),
+                Some(text),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn double_click_selects_a_unicode_letter_run() {
+        let pre = ["café2"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 3, 2),
+                multi(
+                    Phase::Release,
+                    Side::Preimage,
+                    RowClass::Text { ln: 1 },
+                    3,
+                    2,
+                ),
+            ],
+        );
+        assert_eq!(model.clipboard(line(&pre, &[])).as_deref(), Some("café2"));
+        assert_eq!(
+            model.selection().map(|s| (s.start_byte, s.end_byte)),
+            Some((0, "café2".len()))
+        );
+    }
+
+    #[test]
+    fn double_click_on_han_kana_or_hangul_selects_that_one_character() {
+        // Unspaced runs are not one Identifier.
+        for text in ["中文", "あい", "アイ", "한글"] {
+            let pre = [text];
+            let mut model = Model::default();
+            feed(
+                &mut model,
+                &pre,
+                &[],
+                &[
+                    multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0, 2),
+                    multi(
+                        Phase::Release,
+                        Side::Preimage,
+                        RowClass::Text { ln: 1 },
+                        0,
+                        2,
+                    ),
+                ],
+            );
+            let one = text.chars().next().unwrap();
+            assert_eq!(
+                model.selection(),
+                Some(TextSelection {
+                    side: Side::Preimage,
+                    start_line: 1,
+                    start_byte: 0,
+                    end_line: 1,
+                    end_byte: one.len_utf8(),
+                }),
+                "{text}"
+            );
+            assert_eq!(
+                model.clipboard(line(&pre, &[])).as_deref(),
+                Some(text.get(..one.len_utf8()).unwrap()),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn double_click_on_whitespace_clears_and_punctuation_selects_one_character() {
+        let pre = ["a b"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                sample(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 2),
+            ],
+        );
+        assert!(model.selection().is_some());
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 1, 2),
+                multi(
+                    Phase::Release,
+                    Side::Preimage,
+                    RowClass::Text { ln: 1 },
+                    1,
+                    2,
+                ),
+            ],
+        );
+        assert_eq!(model.selection(), None);
+
+        let eq = ["=="];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &eq,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0, 2),
+                multi(
+                    Phase::Release,
+                    Side::Preimage,
+                    RowClass::Text { ln: 1 },
+                    0,
+                    2,
+                ),
+            ],
+        );
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 0,
+                end_line: 1,
+                end_byte: 1,
+            })
+        );
+        assert_eq!(model.clipboard(line(&eq, &[])).as_deref(), Some("="));
+
+        feed(
+            &mut model,
+            &eq,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 1, 2),
+                multi(
+                    Phase::Release,
+                    Side::Preimage,
+                    RowClass::Text { ln: 1 },
+                    1,
+                    2,
+                ),
+            ],
+        );
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 1,
+                end_line: 1,
+                end_byte: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn double_click_selects_an_identifier_split_across_soft_wrap_rows() {
+        // Column is into the original line. A continuation row is the same line.
+        let pre = ["café_bar"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 5, 2),
+                multi(
+                    Phase::Release,
+                    Side::Preimage,
+                    RowClass::Text { ln: 1 },
+                    5,
+                    2,
+                ),
+            ],
+        );
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 0,
+                end_line: 1,
+                end_byte: "café_bar".len(),
+            })
+        );
+        assert_eq!(
+            model.clipboard(line(&pre, &[])).as_deref(),
+            Some("café_bar")
+        );
+    }
+
+    #[test]
+    fn triple_click_selects_the_logical_line_without_a_trailing_newline() {
+        let pre = ["let foo = 1", "bar baz"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 8, 3),
+                multi(
+                    Phase::Release,
+                    Side::Preimage,
+                    RowClass::Text { ln: 1 },
+                    8,
+                    3,
+                ),
+            ],
+        );
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 0,
+                end_line: 1,
+                end_byte: 11,
+            })
+        );
+        let copied = model.clipboard(line(&pre, &[])).unwrap();
+        assert_eq!(copied, "let foo = 1");
+        assert!(!copied.ends_with('\n'));
+
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 2 }, 4, 3),
+                multi(
+                    Phase::Release,
+                    Side::Preimage,
+                    RowClass::Text { ln: 2 },
+                    4,
+                    3,
+                ),
+            ],
+        );
+        assert_eq!(model.clipboard(line(&pre, &[])).as_deref(), Some("bar baz"));
+    }
+
+    #[test]
+    fn triple_click_on_an_empty_line_selects_that_line() {
+        let pre = ["abc", ""];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 2 }, 0, 3),
+                multi(
+                    Phase::Release,
+                    Side::Preimage,
+                    RowClass::Text { ln: 2 },
+                    0,
+                    3,
+                ),
+            ],
+        );
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 2,
+                start_byte: 0,
+                end_line: 2,
+                end_byte: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn triple_click_on_a_line_that_is_one_identifier_selects_that_identifier() {
+        let pre = ["foo_bar"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 2, 3),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 2),
+            ],
+        );
+        assert_eq!(
+            model.selection(),
+            Some(TextSelection {
+                side: Side::Preimage,
+                start_line: 1,
+                start_byte: 0,
+                end_line: 1,
+                end_byte: 7,
+            })
+        );
+        assert_eq!(model.clipboard(line(&pre, &[])).as_deref(), Some("foo_bar"));
+    }
+
+    #[test]
+    fn triple_click_on_whitespace_selects_the_whole_line() {
+        let pre = ["a b"];
+        let mut model = Model::default();
+        feed(
+            &mut model,
+            &pre,
+            &[],
+            &[
+                multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 1, 3),
+                sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 1),
+            ],
+        );
+        assert_eq!(model.clipboard(line(&pre, &[])).as_deref(), Some("a b"));
+    }
+
+    #[test]
+    fn double_click_keeps_thai_and_arabic_as_identifiers() {
+        for text in ["คำไทย", "مرحبا"] {
+            let pre = [text];
+            let mut model = Model::default();
+            feed(
+                &mut model,
+                &pre,
+                &[],
+                &[
+                    multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 0, 2),
+                    sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 0),
+                ],
+            );
+            assert_eq!(
+                model.clipboard(line(&pre, &[])).as_deref(),
+                Some(text),
+                "{text}"
+            );
+        }
     }
 }

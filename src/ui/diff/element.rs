@@ -1728,7 +1728,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                     } else {
                         // Bar hidden: still allow omit-expand under the track strip.
                         let x = f32::from(event.position.x);
-                        pane.press_code(side, x, y, cx);
+                        pane.press_code(side, x, y, event.click_count, cx);
                     }
                 });
                 return;
@@ -1751,7 +1751,9 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
         for side in [Side::Preimage, Side::Postimage] {
             if down_code[side_ix(side)].is_hovered(window) {
                 let x = f32::from(event.position.x);
-                entity.update(cx, |pane, cx| pane.press_code(side, x, y, cx));
+                entity.update(cx, |pane, cx| {
+                    pane.press_code(side, x, y, event.click_count, cx)
+                });
                 return;
             }
         }

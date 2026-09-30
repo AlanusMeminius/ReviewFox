@@ -1163,13 +1163,14 @@ impl DualPane {
         }
     }
 
-    fn text_sample(&self, side: Side, x: f32, y: f32, phase: Phase) -> Sample {
+    fn text_sample(&self, side: Side, x: f32, y: f32, phase: Phase, clicks: usize) -> Sample {
         let (class, column) = self.classify_text(side, x, y);
         Sample {
             phase,
             side,
             class,
             column,
+            clicks,
         }
     }
 
@@ -1213,13 +1214,20 @@ impl DualPane {
 
     /// Left press in `side`'s code column. Arms an omission-separator click and
     /// a text gesture. Does not write the gutter line span.
-    pub(super) fn press_code(&mut self, side: Side, x: f32, y: f32, cx: &mut Context<Self>) {
+    pub(super) fn press_code(
+        &mut self,
+        side: Side,
+        x: f32,
+        y: f32,
+        clicks: usize,
+        cx: &mut Context<Self>,
+    ) {
         self.press = self.row_index_at(side, y).map(|row| (side, row));
         cx.emit(PaneEvent::FocusDiff);
         if self.layout.is_none() {
             return;
         }
-        let sample = self.text_sample(side, x, y, Phase::Press);
+        let sample = self.text_sample(side, x, y, Phase::Press, clicks);
         note_text(&mut self.text, self.layout.as_ref(), sample);
     }
 
@@ -1251,7 +1259,7 @@ impl DualPane {
         }
         let mut dirty = false;
         if let Some(pressed) = self.text.press_side() {
-            let sample = self.text_sample(pressed, x, y, Phase::Release);
+            let sample = self.text_sample(pressed, x, y, Phase::Release, 1);
             dirty = note_text(&mut self.text, self.layout.as_ref(), sample);
         }
         let (Some(pressed), Some(side)) = (self.press.take(), side) else {
@@ -1302,7 +1310,7 @@ impl DualPane {
                 dirty = true;
             }
         } else if let Some(side) = self.text.press_side() {
-            let sample = self.text_sample(side, pane_x, pane_y, Phase::Move);
+            let sample = self.text_sample(side, pane_x, pane_y, Phase::Move, 1);
             if note_text(&mut self.text, self.layout.as_ref(), sample) {
                 dirty = true;
             }
