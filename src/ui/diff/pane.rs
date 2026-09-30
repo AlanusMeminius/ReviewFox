@@ -192,6 +192,20 @@ pub struct DualPane {
 impl EventEmitter<PaneEvent> for DualPane {}
 
 impl DualPane {
+    #[cfg(test)]
+    pub(in crate::ui) fn test_viewport_tops(
+        &mut self,
+        height: f32,
+        scroll: Option<f32>,
+    ) -> [f32; 2] {
+        self.view_h = height;
+        if let Some(scroll) = scroll {
+            self.scroll_s = scroll;
+        }
+        let vp = self.viewport().unwrap();
+        [vp.top(Side::Preimage), vp.top(Side::Postimage)]
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         let appearance = cx.global::<Appearance>();
         let font_size = DiffFontSize::new(appearance.code_font_size);

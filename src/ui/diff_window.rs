@@ -227,9 +227,8 @@ impl DiffView {
                 },
             ),
         ];
-        let tree_filter = cx.new(|cx| {
-            TextField::new("search", false, cx).with_style(TextFieldStyle::Search)
-        });
+        let tree_filter =
+            cx.new(|cx| TextField::new("search", false, cx).with_style(TextFieldStyle::Search));
         let tree_filter_sub = cx.observe(&tree_filter, |this, field, cx| {
             let q = field.read(cx).content().to_string();
             if q == this.tree_query {
@@ -1010,7 +1009,8 @@ impl DiffView {
     /// Open the bottom dock on the span the module already recorded, with `body`
     /// loaded. Find and draft are mutually exclusive, so an open find bar is
     /// dismissed first. The dock's span becomes the selection, so the icon that
-    /// reopens it stays under the pointer after a save. Reveals the span start.
+    /// reopens it stays under the pointer after a save. Opening the dock does
+    /// not navigate: a newly dragged span must stay where the user selected it.
     fn open_dock(
         &mut self,
         view: PathView,
@@ -1028,7 +1028,6 @@ impl DiffView {
         let end = dock.span.start + dock.span.count.saturating_sub(1);
         self.with_pane(cx, |pane, cx| {
             pane.select_span(dock.side, dock.span.start, end, cx);
-            pane.reveal_line(dock.side, dock.span.start, cx);
         });
         self.draft_field
             .update(cx, |field, cx| field.set_content(body, cx));
@@ -1057,7 +1056,15 @@ impl DiffView {
         let Some(body) = view.body.clone() else {
             return;
         };
+        let dock = view.dock;
         self.open_dock(view, body, window, cx);
+        // Editing from the comment island can target a folded/offscreen line.
+        // Keep that navigation separate from opening a new draft in the gutter.
+        if let Some(dock) = dock {
+            self.with_pane(cx, |pane, cx| {
+                pane.reveal_line(dock.side, dock.span.start, cx);
+            });
+        }
     }
 
     /// Line span of a DraftComment. `None` for an unknown id or a file Anchor.
@@ -2753,6 +2760,82 @@ fn traffic_lights_space() -> Option<Div> {
 #[cfg(test)]
 mod tests {
     use super::{LineSpan, Side, selection_matches_span, span_label};
+
+    #[gpui::test]
+    fn opening_a_draft_on_visible_selected_lines_keeps_code_in_place(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::domain::{Alignment, AlignmentOp, Comparison, Oid, Repository};
+        use crate::ui::appearance;
+        use gpui::AppContext;
+
+        cx.update(|cx| cx.set_global(appearance::resolve(&Default::default(), &[])));
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            let text: std::sync::Arc<str> = (1..=100)
+                .map(|i| format!("line {i}\n"))
+                .collect::<String>()
+                .into();
+            let span = LineSpan {
+                start: 1,
+                count: 100,
+            };
+            let view = cx.new(|cx| {
+                super::DiffView::with_snapshot(
+                    super::DiffSnapshot {
+                        comparison: Comparison {
+                            repository: Repository::new("/tmp/diff-draft-test".into()),
+                            base_oid: None,
+                            head_oid: Oid::from_bytes([1; 20]),
+                            worktree: false,
+                        },
+                        changed_paths: Vec::new(),
+                        selected_path: "sample.txt".into(),
+                        file: crate::git::FileDiff::Text {
+                            alignment: Alignment {
+                                ops: vec![AlignmentOp::Equal {
+                                    preimage: span,
+                                    postimage: span,
+                                }],
+                            },
+                            preimage_text: text.clone(),
+                            postimage_text: text,
+                        },
+                    },
+                    window,
+                    cx,
+                )
+            });
+            view.update(cx, |view, cx| {
+                view.with_pane(cx, |pane, cx| {
+                    pane.set_soft_wrap(false, cx);
+                    pane.expand_all(cx);
+                });
+                // At several viewport positions, select visible lines away from
+                // the one-third navigation anchor, just as a gutter drag does.
+                for (side, scroll, start) in [
+                    (Side::Preimage, 200., 4),
+                    (Side::Postimage, 600., 28),
+                    (Side::Preimage, 600., 30),
+                    (Side::Postimage, 1000., 48),
+                ] {
+                    let before = view.with_pane(cx, |pane, cx| {
+                        pane.select_span(side, start, start + 2, cx);
+                        pane.test_viewport_tops(600., Some(scroll))
+                    });
+                    view.begin_draft(side, start, 3, window, cx);
+                    let dock = view.open_review.dock().expect("draft dock is open");
+                    assert_eq!(dock.side, side);
+                    assert_eq!(dock.span, LineSpan { start, count: 3 });
+                    let after = view.with_pane(cx, |pane, _| pane.test_viewport_tops(600., None));
+                    assert_eq!(
+                        after, before,
+                        "clicking comment on L{start} must keep both code panes still"
+                    );
+                }
+            });
+        });
+    }
 
     #[test]
     fn span_label_names_one_line_and_a_range() {
