@@ -15,11 +15,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use super::element::{
-    self, BarState, Decorations, FrameInput, Geom, ShapeCache, build_frame, code_wrap_width_px,
+    self, BarState, Decorations, FrameInput, Geom, ShapeCache, build_frame,
     insert_scrollbar_hitboxes, line_number_digits, ln_col_width, text_extent, thumb_for, top_at,
     wrap_plan_for_panes,
 };
 use super::layout::{HunkLand, Layout, Row, WrapPlan};
+use super::rewrap;
 use super::trace;
 use super::viewport::{self, Viewport};
 use crate::domain::{
@@ -143,12 +144,8 @@ pub struct DualPane {
     search_pulse_at: Option<std::time::Instant>,
     /// Shaped non-ASCII advances per `(char, font px, family hash)`.
     char_widths: HashMap<(char, u32, u64), f32>,
-    /// Last prepaint pane widths; stable width triggers rewrap (§6 deferral).
-    prev_frame_pane_w: [f32; 2],
-    /// Wrap must rebuild in prepaint with a Window (glyph widths + plan).
-    wrap_layout_dirty: bool,
-    /// Scroll landing deferred until the next wrapped layout rebuild.
-    pending_land: Option<PendingLand>,
+    rewrap: rewrap::State,
+
     /// Which side last received horizontal input; used when sync is turned on.
     last_x_side: Option<Side>,
     /// Horizontal travel per side from the last prepaint (`0..=max_x`).
@@ -214,9 +211,8 @@ impl DualPane {
             active_search: None,
             search_pulse_at: None,
             char_widths: HashMap::new(),
-            prev_frame_pane_w: [0.; 2],
-            wrap_layout_dirty: false,
-            pending_land: None,
+            rewrap: rewrap::State::new(false),
+
             last_x_side: None,
             max_x: [0.; 2],
             widest_seen: [0.; 2],
@@ -252,21 +248,12 @@ impl DualPane {
             self.mono_advance = None;
             self.ln_advance = None;
             self.char_widths.clear();
-            if self.soft_wrap {
-                self.wrap_layout_dirty = true;
-                let cap = self.capture_anchor();
-                self.rebuild_layout(None);
-                self.restore_after_rewrap(cap);
-            } else {
+            let cap = self.capture_anchor();
+            self.apply_rewrap_event(rewrap::Event::FontFamily, cap);
+            if !self.soft_wrap {
                 self.invalidate_shapes();
             }
             cx.notify();
-        }
-    }
-
-    fn mark_wrap_dirty(&mut self) {
-        if self.soft_wrap {
-            self.wrap_layout_dirty = true;
         }
     }
 
@@ -287,7 +274,6 @@ impl DualPane {
     ) {
         self.open_generation = self.open_generation.wrapping_add(1);
         let generation = self.open_generation;
-        self.pending_land = None;
         self.file = match file {
             FileDiff::Text {
                 alignment,
@@ -357,8 +343,7 @@ impl DualPane {
         self.reset_scroll(cx);
         self.x_offsets = [0.; 2];
         self.last_x_side = None;
-        self.wrap_layout_dirty = self.soft_wrap;
-        self.rebuild_layout(None);
+        self.apply_rewrap_event(rewrap::Event::FileOpen, None);
         self.reveal_bars(cx);
         cx.notify();
     }
@@ -510,9 +495,6 @@ impl DualPane {
                 &mut char_width as &mut dyn FnMut(char) -> f32,
             ))
         } else {
-            if soft {
-                self.wrap_layout_dirty = true;
-            }
             None
         };
         let mut layout = Layout::build(
@@ -533,99 +515,80 @@ impl DualPane {
             );
         }
         self.layout = Some(layout);
-        if can_wrap {
-            self.wrap_layout_dirty = false;
-        }
     }
 
-    fn restore_after_rewrap(&mut self, cap: Option<viewport::AnchorCap>) {
-        let (Some(cap), Some(layout)) = (cap, self.layout.as_ref()) else {
-            return;
+    fn apply_rewrap_event(&mut self, event: rewrap::Event, anchor: Option<viewport::AnchorCap>) {
+        let input = rewrap::Input {
+            layout: self.layout.as_ref(),
+            can_measure: false,
+            anchor,
+            view_h: self.view_h,
+            row_h: self.row_h(),
+            scroll_s: self.scroll_s,
         };
-        if let Some(s) =
-            viewport::s_for_rewrap(layout, cap, self.view_h, self.row_h(), self.scroll_s)
-        {
-            self.scroll_s = s;
-        }
-    }
-
-    fn finish_wrap_rebuild(&mut self, cap: Option<viewport::AnchorCap>) {
-        let Some(layout) = self.layout.as_ref() else {
-            return;
-        };
-        let row_h = self.row_h();
-        match self.pending_land.take() {
-            Some(PendingLand::Match { side, ln, byte }) => {
-                if let Some(s) = viewport::s_for_match_byte(
-                    layout,
-                    side,
-                    ln,
-                    byte,
-                    self.view_h,
-                    row_h,
-                    self.scroll_s,
-                ) {
-                    self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
-                    self.hunk_s = Some(self.scroll_s / row_h);
-                }
+        let (state, effect) = self.rewrap.event(event, input);
+        self.rewrap = state;
+        if effect.rebuild == Some(false) {
+            self.rebuild_layout(None);
+            let input = rewrap::Input {
+                layout: self.layout.as_ref(),
+                can_measure: false,
+                anchor: None,
+                view_h: self.view_h,
+                row_h: self.row_h(),
+                scroll_s: self.scroll_s,
+            };
+            let (state, effect) = self.rewrap.event(rewrap::Event::Rebuilt, input);
+            self.rewrap = state;
+            if let Some(s) = effect.scroll_s {
+                self.scroll_s = s;
             }
-            Some(PendingLand::Line(target)) => {
-                if let Some(s) = viewport::s_for_target(layout, target, row_h, self.scroll_s) {
-                    self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
-                    self.hunk_s = Some(self.scroll_s / row_h);
-                }
-            }
-            Some(PendingLand::Anchor(cap)) => {
-                if let Some(s) =
-                    viewport::s_for_rewrap(layout, cap, self.view_h, row_h, self.scroll_s)
-                {
-                    self.scroll_s = s;
-                }
-            }
-            None => self.restore_after_rewrap(cap),
         }
     }
 
     fn sync_wrap_layout(&mut self, pane_w: [f32; 2], window: &mut Window, cx: &mut Context<Self>) {
         if !self.soft_wrap {
-            self.wrap_layout_dirty = false;
             return;
         }
-        let has_width = pane_w[0] > 0. || pane_w[1] > 0.;
-        if !has_width {
+        if pane_w[0] <= 0. && pane_w[1] <= 0. {
             return;
         }
         self.pane_w = pane_w;
-
-        let width_mismatch = |layout: &Layout| {
-            layout.wrap.as_ref().is_none_or(|applied| {
-                applied.plan.preimage.width_px != code_wrap_width_px(pane_w[0])
-                    || applied.plan.postimage.width_px != code_wrap_width_px(pane_w[1])
-            })
+        let plan = wrap_plan_for_panes(pane_w[0], pane_w[1]);
+        let input = rewrap::Input {
+            layout: self.layout.as_ref(),
+            can_measure: true,
+            anchor: self.capture_anchor(),
+            view_h: self.view_h,
+            row_h: self.row_h(),
+            scroll_s: self.scroll_s,
         };
-
-        if self.wrap_layout_dirty || self.layout.as_ref().is_none_or(|l| l.wrap.is_none()) {
-            self.prev_frame_pane_w = pane_w;
-            let cap = self.pending_land.is_none().then(|| self.capture_anchor());
-            self.rebuild_layout(Some(window));
-            self.finish_wrap_rebuild(cap.flatten());
+        let (state, effect) = self
+            .rewrap
+            .event(rewrap::Event::Widths(pane_w, plan), input);
+        self.rewrap = state;
+        if !effect.rebuild.unwrap_or(false) {
+            if effect.observe_again {
+                cx.notify();
+            }
             return;
         }
-
-        let stable =
-            pane_w[0] == self.prev_frame_pane_w[0] && pane_w[1] == self.prev_frame_pane_w[1];
-        if !stable {
-            self.prev_frame_pane_w = pane_w;
-            cx.notify();
-            return;
+        self.rebuild_layout(Some(window));
+        let input = rewrap::Input {
+            layout: self.layout.as_ref(),
+            can_measure: true,
+            anchor: None,
+            view_h: self.view_h,
+            row_h: self.row_h(),
+            scroll_s: self.scroll_s,
+        };
+        let (state, effect) = self.rewrap.event(rewrap::Event::Rebuilt, input);
+        self.rewrap = state;
+        if let Some(s) = effect.scroll_s {
+            self.scroll_s = s;
+            self.hunk_s = Some(s / self.row_h());
         }
-        self.prev_frame_pane_w = pane_w;
-
-        if self.layout.as_ref().is_some_and(width_mismatch) {
-            let cap = self.pending_land.is_none().then(|| self.capture_anchor());
-            self.rebuild_layout(Some(window));
-            self.finish_wrap_rebuild(cap.flatten());
-        }
+        cx.notify();
     }
 
     pub fn set_soft_wrap(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -636,13 +599,16 @@ impl DualPane {
         self.soft_wrap = on;
         if on {
             self.x_offsets = [0.; 2];
-            self.wrap_layout_dirty = true;
-        } else {
-            self.wrap_layout_dirty = false;
-            self.pending_land = None;
         }
-        self.rebuild_layout(None);
-        self.restore_after_rewrap(cap);
+        self.rewrap = rewrap::State::new(on);
+        self.apply_rewrap_event(
+            if on {
+                rewrap::Event::SoftWrapOn
+            } else {
+                rewrap::Event::SoftWrapOff
+            },
+            cap,
+        );
         cx.notify();
     }
 
@@ -705,14 +671,12 @@ impl DualPane {
     fn with_anchor(&mut self, mutate: impl FnOnce(&mut Self)) {
         let cap = self.capture_anchor();
         mutate(self);
-        self.mark_wrap_dirty();
-        self.rebuild_layout(None);
-        if self.soft_wrap {
-            if let Some(cap) = cap {
-                self.pending_land = Some(PendingLand::Anchor(cap));
-            }
-        } else if let Some(cap) = cap {
-            self.restore_anchor(Some(cap));
+        self.apply_rewrap_event(rewrap::Event::Fold, cap);
+        if !self.soft_wrap {
+            self.rebuild_layout(None);
+        }
+        if !self.soft_wrap {
+            self.restore_anchor(cap);
         }
         self.hunk_s = None;
     }
@@ -817,18 +781,32 @@ impl DualPane {
     /// Expand a collapsed Equal that hides `ln` (if any) and scroll so the line
     /// lands on the §3.1 anchor. Used by island select / edit reopen.
     pub fn reveal_line(&mut self, side: Side, ln: u32, cx: &mut Context<Self>) {
-        let Some(target) = self.expand_for_line_jump(side, ln) else {
+        let Some((target, expanded)) = self.expand_for_line_jump(side, ln) else {
             return;
         };
+        if self.soft_wrap {
+            let input = rewrap::Input {
+                layout: self.layout.as_ref(),
+                can_measure: false,
+                anchor: self.capture_anchor(),
+                view_h: self.view_h,
+                row_h: self.row_h(),
+                scroll_s: self.scroll_s,
+            };
+            let (state, effect) = self
+                .rewrap
+                .event(rewrap::Event::Reveal { target, expanded }, input);
+            self.rewrap = state;
+            if let Some(s) = effect.scroll_s {
+                self.scroll_s = s;
+            }
+            cx.notify();
+            return;
+        }
         let Some(layout) = self.layout.as_ref() else {
             return;
         };
         let row_h = self.row_h();
-        if self.soft_wrap && (self.wrap_layout_dirty || layout.wrap.is_none()) {
-            self.pending_land = Some(PendingLand::Line(target));
-            cx.notify();
-            return;
-        }
         let s =
             viewport::s_for_target(layout, target, row_h, self.scroll_s).unwrap_or(self.scroll_s);
         self.scroll_s = viewport::clamp_s(layout, s, self.view_h, row_h);
@@ -839,29 +817,43 @@ impl DualPane {
     }
 
     pub fn jump_match(&mut self, side: Side, ln: u32, byte: Option<usize>, cx: &mut Context<Self>) {
-        let Some(target) = self.expand_for_line_jump(side, ln) else {
+        let Some((target, expanded)) = self.expand_for_line_jump(side, ln) else {
             return;
         };
+        let byte = byte.or_else(|| {
+            self.layout
+                .as_ref()
+                .and_then(|l| l.side(target.side).line_text(target.ln))
+                .and_then(|text| first_match_byte(text, &self.search_query))
+        });
+        if self.soft_wrap {
+            let input = rewrap::Input {
+                layout: self.layout.as_ref(),
+                can_measure: false,
+                anchor: self.capture_anchor(),
+                view_h: self.view_h,
+                row_h: self.row_h(),
+                scroll_s: self.scroll_s,
+            };
+            let (state, effect) = self.rewrap.event(
+                rewrap::Event::Search {
+                    target,
+                    byte,
+                    expanded,
+                },
+                input,
+            );
+            self.rewrap = state;
+            if let Some(s) = effect.scroll_s {
+                self.scroll_s = s;
+            }
+            cx.notify();
+            return;
+        }
         let Some(layout) = self.layout.as_ref() else {
             return;
         };
         let row_h = self.row_h();
-        let line_text = layout.side(target.side).line_text(target.ln);
-        let byte =
-            byte.or_else(|| line_text.and_then(|text| first_match_byte(text, &self.search_query)));
-        let defer = self.soft_wrap && (self.wrap_layout_dirty || layout.wrap.is_none());
-        if defer {
-            self.pending_land = Some(match byte {
-                Some(b) => PendingLand::Match {
-                    side: target.side,
-                    ln: target.ln,
-                    byte: b,
-                },
-                None => PendingLand::Line(target),
-            });
-            cx.notify();
-            return;
-        }
         let s = byte
             .and_then(|b| {
                 viewport::s_for_match_byte(
@@ -884,15 +876,15 @@ impl DualPane {
     }
 
     /// Apply [`match_jump_plan`]: expand a collapsed Equal hiding `ln`, return the land target.
-    fn expand_for_line_jump(&mut self, side: Side, ln: u32) -> Option<HunkJumpTarget> {
+    fn expand_for_line_jump(&mut self, side: Side, ln: u32) -> Option<(HunkJumpTarget, bool)> {
         let file = self.file.as_ref()?;
         let plan = match_jump_plan(&file.alignment, &self.fold, side, ln);
+        let expanded = plan.expand.is_some();
         if let Some(id) = plan.expand {
             self.fold.expand(id);
-            self.mark_wrap_dirty();
-            self.rebuild_layout(None);
+            self.apply_rewrap_event(rewrap::Event::Fold, self.capture_anchor());
         }
-        Some(plan.target)
+        Some((plan.target, expanded))
     }
 
     pub fn set_font_size(&mut self, op: FontOp, cx: &mut Context<Self>) {
@@ -923,10 +915,8 @@ impl DualPane {
         }
         if self.soft_wrap {
             self.char_widths.clear();
-            self.wrap_layout_dirty = true;
             let cap = self.capture_anchor();
-            self.rebuild_layout(None);
-            self.restore_after_rewrap(cap);
+            self.apply_rewrap_event(rewrap::Event::FontSize, cap);
         } else {
             self.invalidate_shapes();
         }
@@ -1404,12 +1394,6 @@ impl DualPane {
         frame.stats.prepaint = trace::since(t_prepaint);
         Some(frame)
     }
-}
-
-enum PendingLand {
-    Match { side: Side, ln: u32, byte: usize },
-    Line(crate::domain::HunkJumpTarget),
-    Anchor(viewport::AnchorCap),
 }
 
 pub use super::element::ActiveSearchMatch;
