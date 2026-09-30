@@ -14,6 +14,8 @@ mod gitlab_connection;
 mod icon_button;
 #[cfg(target_os = "macos")]
 mod mac_column_vibrancy;
+#[cfg(target_os = "macos")]
+mod mac_titlebar;
 mod markdown;
 mod metadata;
 mod scrollbar;
@@ -22,6 +24,7 @@ mod settings;
 mod splitter;
 mod text_field;
 mod theme;
+mod titlebar;
 mod tooltip;
 mod window_controls;
 mod window_geometry;

@@ -78,6 +78,7 @@ impl RenderOnce for IconButton {
         let enabled = !self.disabled;
         div()
             .id(self.id)
+            .map(super::titlebar::consume_control_mouse_events)
             .w(theme::TOGGLE_SIZE)
             .h(theme::TOGGLE_SIZE)
             .flex_none()
@@ -104,5 +105,29 @@ impl RenderOnce for IconButton {
                     .path(self.icon)
                     .text_color(color),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn titlebar_icon_consumes_repeated_presses_without_losing_clicks(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for disabled in [false, true] {
+            super::super::titlebar::tests::assert_consumes_clicks(
+                cx,
+                move |clicks| {
+                    IconButton::new("test-icon", "folder.svg", "Open Repo")
+                        .disabled(disabled)
+                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1))
+                        .into_any_element()
+                },
+                gpui::point(gpui::px(10.), gpui::px(10.)),
+                !disabled,
+            );
+        }
     }
 }

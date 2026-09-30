@@ -1668,7 +1668,11 @@ fn render_commit_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEle
 
 /// The window's one full-width band. Every gap in it drags, and on Windows the caption
 /// buttons close it out flush against the right edge — no floating overlay, no dead strip.
-fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -> impl IntoElement {
+fn render_titlebar(
+    view: &AppView,
+    window: &mut Window,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     let mono = appearance::code_font(cx);
     let (branch, label, checkout) = match &view.state {
         MainState::Ready(loaded) => {
@@ -1693,6 +1697,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
 
     div()
         .id("titlebar")
+        .map(|bar| super::titlebar::app_owned(bar, window))
         .h(theme::TITLEBAR_HEIGHT)
         .flex_none()
         .flex()
@@ -1729,7 +1734,14 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                         .flex_1()
                         .min_w(px(0.))
                         .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
+                        .map(|region| {
+                            super::titlebar::drag_region(
+                                region,
+                                window,
+                                cx,
+                                "titlebar-drag-leading",
+                            )
+                        }),
                 ),
         )
         .child(
@@ -1753,7 +1765,9 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                         .flex_1()
                         .min_w(px(0.))
                         .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
+                        .map(|region| {
+                            super::titlebar::drag_region(region, window, cx, "titlebar-drag")
+                        }),
                 )
                 .child(
                     div()
@@ -1771,7 +1785,14 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                         .w(px(theme::CHANGES_INSET))
                         .flex_none()
                         .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
+                        .map(|region| {
+                            super::titlebar::drag_region(
+                                region,
+                                window,
+                                cx,
+                                "titlebar-drag-trailing",
+                            )
+                        }),
                 ),
         )
         .children(window_controls(window))
@@ -1801,6 +1822,7 @@ fn render_entry_chrome(
 
     div()
         .id("entry-chrome")
+        .map(super::titlebar::consume_control_mouse_events)
         .flex()
         .items_center()
         .gap(px(theme::CHROME_GAP))

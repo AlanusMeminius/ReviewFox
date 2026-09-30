@@ -1519,7 +1519,7 @@ const STATUS_BAR_HEIGHT: f32 = 28.;
 
 fn render_titlebar(
     view: &DiffView,
-    window: &Window,
+    window: &mut Window,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
     // Leading zone spans exactly what sits left of the stage, so what follows starts
@@ -1531,6 +1531,7 @@ fn render_titlebar(
     };
     div()
         .id("diff-titlebar")
+        .map(|bar| super::titlebar::app_owned(bar, window))
         .h(theme::TITLEBAR_HEIGHT)
         .flex_none()
         .flex()
@@ -1562,7 +1563,14 @@ fn render_titlebar(
                         .flex_1()
                         .min_w(px(0.))
                         .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
+                        .map(|region| {
+                            super::titlebar::drag_region(
+                                region,
+                                window,
+                                cx,
+                                "diff-titlebar-drag-leading",
+                            )
+                        }),
                 ),
         )
         .child(
@@ -1673,7 +1681,9 @@ fn render_titlebar(
                         .flex_1()
                         .min_w(px(0.))
                         .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
+                        .map(|region| {
+                            super::titlebar::drag_region(region, window, cx, "diff-titlebar-drag")
+                        }),
                 )
                 .child(comments_toggle_button(view, window, cx))
                 .child(
@@ -1684,7 +1694,14 @@ fn render_titlebar(
                         .w(px(theme::CHANGES_INSET))
                         .flex_none()
                         .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
+                        .map(|region| {
+                            super::titlebar::drag_region(
+                                region,
+                                window,
+                                cx,
+                                "diff-titlebar-drag-trailing",
+                            )
+                        }),
                 ),
         )
         // Outside the zones' padding: close must land in the physical corner.
@@ -2647,6 +2664,7 @@ fn render_nav_capsule(
 /// Group of toolbar buttons, `TOGGLE_SIZE` tall like any other button.
 fn capsule() -> Div {
     div()
+        .map(super::titlebar::consume_control_mouse_events)
         .flex_none()
         .h(theme::TOGGLE_SIZE)
         .flex()
@@ -2803,6 +2821,36 @@ fn traffic_lights_space() -> Option<Div> {
 #[cfg(test)]
 mod tests {
     use super::{LineSpan, Side, selection_matches_span, span_label};
+
+    #[gpui::test]
+    fn titlebar_capsule_consumes_clicks_on_buttons_and_padding(cx: &mut gpui::TestAppContext) {
+        use gpui::IntoElement;
+        for (enabled, position, activates) in [
+            (true, gpui::point(gpui::px(10.), gpui::px(10.)), true),
+            (false, gpui::point(gpui::px(10.), gpui::px(10.)), false),
+            (true, gpui::point(gpui::px(1.), gpui::px(1.)), false),
+        ] {
+            super::super::titlebar::tests::assert_consumes_clicks(
+                cx,
+                move |clicks| {
+                    use gpui::ParentElement;
+                    super::capsule()
+                        .child(super::nav_button(
+                            "test-nav",
+                            "chevron_right.svg",
+                            "Next Hunk",
+                            None,
+                            enabled,
+                            false,
+                            move |_, _, _| clicks.set(clicks.get() + 1),
+                        ))
+                        .into_any_element()
+                },
+                position,
+                activates,
+            );
+        }
+    }
 
     #[gpui::test]
     fn opening_a_draft_on_visible_selected_lines_keeps_code_in_place(
