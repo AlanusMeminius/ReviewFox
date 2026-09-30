@@ -1581,7 +1581,7 @@ fn render_titlebar(
                 // on the stage edge and shares it with the island. Collapsed: the
                 // island's own left inset, measured from the stage edge.
                 .when(view.tree_collapsed, |d| d.pl(px(theme::CHANGES_INSET)))
-                .child(render_nav_capsule(view, cx))
+                .child(render_nav_capsule(view, window, cx))
                 .child(
                     capsule()
                         .child(nav_button(
@@ -2524,9 +2524,52 @@ fn render_draft_dock(
 const NAV_INSET: f32 = 2.;
 const NAV_BUTTON_RADIUS: f32 = 5.;
 
+/// Reserve the widest index with as many digits as `total`, independent of
+/// the current position. Measure the UI face so proportional fonts work too.
+fn nav_counter(text: String, total: usize, window: &Window, cx: &App) -> Div {
+    let size = appearance::ui_text(cx, 12.);
+    let face = gpui::font(appearance::ui_font(cx));
+    let measure = |text: String| {
+        let text: SharedString = text.into();
+        let run = gpui::TextRun {
+            len: text.len(),
+            font: face.clone(),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .shape_line(text, size, &[run], None)
+            .width
+    };
+    let dash_width = measure("—".into());
+    let width = if total == 0 {
+        dash_width
+    } else {
+        let total_text = total.to_string();
+        let digit_width = ('0'..='9')
+            .map(|digit| measure(digit.to_string()))
+            .fold(px(0.), |width, next| width.max(next));
+        (digit_width * total_text.len() as f32).max(dash_width) + measure(format!("/{total_text}"))
+    };
+    div()
+        .flex_none()
+        .w(px(f32::from(width).ceil()))
+        .whitespace_nowrap()
+        .text_right()
+        .text_color(theme::text())
+        .child(text)
+}
+
 /// `« ‹ File 3/12 · Hunk 2/5 › »`: outer chevrons step files, inner ones hunks.
 /// Sized to `TOGGLE_SIZE` so it sits in the toolbar like any other button.
-fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
+fn render_nav_capsule(
+    view: &DiffView,
+    window: &Window,
+    cx: &mut Context<DiffView>,
+) -> impl IntoElement {
     let (index, total) = view.file_position();
     let file = match index {
         Some(i) => format!("{}/{total}", i + 1),
@@ -2576,10 +2619,10 @@ fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoE
                 .gap_1()
                 .ui_label_size(12., cx)
                 .child(div().text_color(theme::faint()).child("File"))
-                .child(div().text_color(theme::text()).child(file))
+                .child(nav_counter(file, total, window, cx))
                 .child(div().text_color(theme::faint()).child("·"))
                 .child(div().text_color(theme::faint()).child("Hunk"))
-                .child(div().text_color(theme::text()).child(hunk)),
+                .child(nav_counter(hunk, hunk_count, window, cx)),
         )
         .child(nav_button(
             "next-hunk",
