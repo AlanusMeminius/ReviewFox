@@ -361,7 +361,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            r#"{ "gitlab_base_url": "https://gitlab.example.com", "ui_font_size": "14", "code_font_family": 7, "code_font_size": 16 }"#,
+            r#"{ "gitlab_base_url": "https://gitlab.example.com", "ui_font_size": "14", "code_font_family": 7, "code_font_size": 16, "code_theme_light": 42, "code_theme_dark": ["one-light"] }"#,
         )
         .unwrap();
         let loaded = load_file_at(&path);

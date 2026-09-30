@@ -153,19 +153,45 @@ const FALLBACK_ID: &str = "one-light";
 
 /// Derived roles of the authored slots. Does not branch on theme id.
 ///
-/// No blend reproduces today's outlines, so the One Light pins live here.
-/// Knockout is the paper color. ponytail: a later palette reuses this function;
-/// extend the pins here rather than inventing a blend that shifts these hexes.
+/// Preserve the One Light pins while following changes to the source slot.
+/// ponytail: calibrated RGB offsets clamp at channel limits; validate these
+/// derived colors before shipping another palette.
+fn shifted(base: u32, reference: u32, source: Rgba) -> Rgba {
+    let channel = |base: u8, reference: u8, source: f32| {
+        (f32::from(base) + (source * 255. - f32::from(reference))).clamp(0., 255.) / 255.
+    };
+    Rgba {
+        r: channel((base >> 16) as u8, (reference >> 16) as u8, source.r),
+        g: channel((base >> 8) as u8, (reference >> 8) as u8, source.g),
+        b: channel(base as u8, reference as u8, source.b),
+        a: source.a,
+    }
+}
+
+/// Derive a pad toward paper, calibrated to One Light's comment and pad colors.
+fn comment_pad(comment: Rgba, paper: Rgba) -> Rgba {
+    let channel = |comment: f32, paper: f32, reference: u8, pad: u8| {
+        let amount = f32::from(pad - reference) / f32::from(255 - reference);
+        comment + (paper - comment) * amount
+    };
+    Rgba {
+        r: channel(comment.r, paper.r, 0x24, 0xf1),
+        g: channel(comment.g, paper.g, 0x57, 0xf5),
+        b: channel(comment.b, paper.b, 0xd6, 0xff),
+        a: paper.a,
+    }
+}
+
 fn derive(slots: &AuthoredSlots) -> DerivedRoles {
     DerivedRoles {
-        added_edge: rgb(0x7ccf98),
-        deleted_edge: rgb(0xa3aab3),
-        replaced_edge: rgb(0x7fa6ea),
-        unchanged_edge: rgb(0xdfe3ea),
-        omission_fill: rgb(0xe8eaef),
-        omission_wave: rgb(0x98a2b3),
+        added_edge: shifted(0x7ccf98, 0xe8f7ee, slots.added_band),
+        deleted_edge: shifted(0xa3aab3, 0xd8dce1, slots.deleted_band),
+        replaced_edge: shifted(0x7fa6ea, 0xe8f0fe, slots.replaced_band),
+        unchanged_edge: shifted(0xdfe3ea, 0xffffff, slots.paper),
+        omission_fill: shifted(0xe8eaef, 0xffffff, slots.paper),
+        omission_wave: shifted(0x98a2b3, 0xffffff, slots.paper),
         knockout: slots.paper,
-        open_comment_pad: rgb(0xf1f5ff),
+        open_comment_pad: comment_pad(slots.comment, slots.paper),
     }
 }
 
@@ -332,6 +358,51 @@ mod tests {
         assert_hex(palette.derived.omission_wave, 0x98a2b3);
         assert_hex(palette.derived.knockout, 0xffffff);
         assert_hex(palette.derived.open_comment_pad, 0xf1f5ff);
+    }
+
+    #[test]
+    fn derived_roles_follow_the_chosen_palettes_slots() {
+        let original = one_light_palette();
+        let mut theme = fixture("changed-slots", 0x202020);
+        theme.slots.added_band = rgb(0x90a090);
+        theme.slots.deleted_band = rgb(0x909090);
+        theme.slots.replaced_band = rgb(0x9090a0);
+        theme.slots.comment = rgb(0x804020);
+        let palette = resolve(
+            SoftwareThemeMode::Light,
+            &CodeThemePairing {
+                light: Some(theme.id.clone()),
+                dark: None,
+            },
+            &[theme, one_light()],
+        );
+        for (changed, previous) in [
+            (palette.derived.added_edge, original.derived.added_edge),
+            (palette.derived.deleted_edge, original.derived.deleted_edge),
+            (
+                palette.derived.replaced_edge,
+                original.derived.replaced_edge,
+            ),
+            (
+                palette.derived.unchanged_edge,
+                original.derived.unchanged_edge,
+            ),
+            (
+                palette.derived.omission_fill,
+                original.derived.omission_fill,
+            ),
+            (
+                palette.derived.omission_wave,
+                original.derived.omission_wave,
+            ),
+            (
+                palette.derived.open_comment_pad,
+                original.derived.open_comment_pad,
+            ),
+        ] {
+            assert_ne!(hex(changed), hex(previous));
+        }
+        assert_eq!(hex(palette.derived.knockout), hex(palette.slots.paper));
     }
 
     #[test]
