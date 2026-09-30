@@ -2,8 +2,8 @@ use gpui::{
     Animation, AnimationExt, App, Bounds, ClickEvent, ClipboardItem, Context, Corner, Div,
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, ParentElement, Pixels, Point, Render, Size, StatefulInteractiveElement, Styled,
-    TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowDecorations, WindowHandle,
-    WindowOptions, Transformation, anchored, canvas, deferred, div, ease_out_quint, percentage,
+    TitlebarOptions, Transformation, Window, WindowBounds, WindowControlArea, WindowDecorations,
+    WindowHandle, WindowOptions, anchored, canvas, deferred, div, ease_out_quint, percentage,
     prelude::*, px, rgb, svg,
 };
 use std::cell::{Cell, RefCell};
@@ -15,9 +15,7 @@ use std::time::Duration;
 use super::OpenSettings;
 use super::appearance::{self, UiTextSize};
 use super::diff_window::{DiffSnapshot, DiffView};
-use super::entry_chrome::{
-    self, EntryKind, KindSwitchAction, OpenEntry, RestoreFailureAction,
-};
+use super::entry_chrome::{self, EntryKind, KindSwitchAction, OpenEntry, RestoreFailureAction};
 use super::file_tree::{self, TreeRow};
 use super::file_tree_rows::{self, RowSurface};
 use super::gitlab_connection::{self, GitLabConnection};
@@ -38,6 +36,7 @@ use crate::gitlab::{
     self, FetchMergeRequestResult, ListMergeRequestCommitsResult, ListMergeRequestsResult,
     MergeRequestDetail, MergeRequestSummary, ResolveProjectResult, SettingsTarget,
 };
+use crate::loaded_browser::LoadedBrowser;
 use crate::settings_store;
 use crate::window_geometry_store::{self, DiffReopen};
 use crate::workspace_store::{self, MrEntryLabel, WorkspaceEntry, WorkspaceStore};
@@ -56,8 +55,6 @@ pub struct AppView {
     mr_toggle_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// In-memory MR Entry (list = GitLab commits; Comparison = diff_refs).
     mr_entry: Option<MrEntry>,
-    /// Checkout vs HEAD while the Worktree kind is selected. Branch Browser stays put.
-    worktree: Option<git::WorktreeEntry>,
     /// Bumped on every scan start and every leave, so a late scan cannot repaint.
     worktree_generation: u64,
     /// Path scan is in flight. An empty list is not yet "clean checkout".
@@ -112,7 +109,7 @@ struct CommitContextMenu {
 
 enum MainState {
     Empty,
-    Ready(BranchBrowser),
+    Ready(LoadedBrowser),
     Error(String),
 }
 
@@ -124,7 +121,7 @@ impl AppView {
         cx: &mut Context<Self>,
     ) -> Self {
         let state = match boot {
-            Some(loaded) => MainState::Ready(loaded),
+            Some(browser) => MainState::Ready(LoadedBrowser::install(browser)),
             None => MainState::Empty,
         };
         gitlab_connection::spawn_refresh_connection(gitlab_connection, cx.entity().downgrade(), cx);
@@ -140,7 +137,6 @@ impl AppView {
             branch_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
             mr_entry: None,
-            worktree: None,
             worktree_generation: 0,
             worktree_paths_pending: false,
             worktree_scan_error: None,
@@ -211,8 +207,11 @@ impl AppView {
                     this.sidebar_width
                 };
                 // HorizontalTrailing reports distance to viewport right; float is inset.
-                let width =
-                    splitter::clamp_files_width(requested - theme::CHANGES_INSET, available, sidebar);
+                let width = splitter::clamp_files_width(
+                    requested - theme::CHANGES_INSET,
+                    available,
+                    sidebar,
+                );
                 if this.files_width != width {
                     this.files_width = width;
                     cx.notify();
@@ -277,17 +276,13 @@ impl AppView {
     }
 
     fn sync_collapsed_dirs(&mut self) {
-        let next = if let Some(wt) = &self.worktree {
-            wt.changed_paths.iter().map(|p| p.path.clone()).collect()
-        } else {
-            match &self.state {
-                MainState::Ready(loaded) => loaded
-                    .changed_paths
-                    .iter()
-                    .map(|p| p.path.clone())
-                    .collect(),
-                MainState::Empty | MainState::Error(_) => Vec::new(),
-            }
+        let next = match &self.state {
+            MainState::Ready(loaded) => loaded
+                .changed_paths()
+                .iter()
+                .map(|p| p.path.clone())
+                .collect(),
+            MainState::Empty | MainState::Error(_) => Vec::new(),
         };
         if next != self.tree_path_fingerprint {
             self.tree_path_fingerprint = next;
@@ -300,15 +295,19 @@ impl AppView {
     }
 
     fn remember_current(&mut self) {
-        if let MainState::Ready(loaded) = &self.state {
-            let mr = self.current_mr_label();
-            workspace_store::remember_with_mr(
-                loaded.comparison.repository.path(),
-                &loaded.branch,
-                mr,
-            );
-            self.refresh_store();
-        }
+        let mr = self.current_mr_label();
+        let saved = match &self.state {
+            MainState::Ready(loaded) => Some((
+                loaded.repository().path().to_path_buf(),
+                loaded.branch_name().to_string(),
+            )),
+            MainState::Empty | MainState::Error(_) => None,
+        };
+        let Some((path, branch)) = saved else {
+            return;
+        };
+        workspace_store::remember_with_mr(&path, &branch, mr);
+        self.refresh_store();
     }
 
     fn current_mr_label(&self) -> Option<MrEntryLabel> {
@@ -322,10 +321,12 @@ impl AppView {
 
     /// Clears the selected MR Entry label only; last-MR memory is preserved (ADR-0011).
     fn clear_selected_mr_label(&mut self) {
-        if let MainState::Ready(loaded) = &self.state {
-            workspace_store::clear_selected_mr(loaded.comparison.repository.path());
-            self.refresh_store();
-        }
+        let path = match &self.state {
+            MainState::Ready(loaded) => loaded.repository().path().to_path_buf(),
+            MainState::Empty | MainState::Error(_) => return,
+        };
+        workspace_store::clear_selected_mr(&path);
+        self.refresh_store();
     }
 
     /// Restore MR Entry from a label.
@@ -360,7 +361,7 @@ impl AppView {
         let MainState::Ready(loaded) = &self.state else {
             return None;
         };
-        let path = loaded.comparison.repository.path();
+        let path = loaded.repository().path();
         self.store
             .workspaces
             .iter()
@@ -383,7 +384,7 @@ impl AppView {
         let MainState::Ready(loaded) = &self.state else {
             return None;
         };
-        let path = loaded.comparison.repository.path();
+        let path = loaded.repository().path();
         self.store
             .workspaces
             .iter()
@@ -399,7 +400,9 @@ impl AppView {
     }
 
     fn clear_worktree(&mut self) {
-        self.worktree = None;
+        if let MainState::Ready(loaded) = &mut self.state {
+            loaded.uncover();
+        }
         self.worktree_paths_pending = false;
         self.worktree_scan_error = None;
         self.worktree_generation = self.worktree_generation.wrapping_add(1);
@@ -418,7 +421,7 @@ impl AppView {
         self.worktree_paths_pending = true;
         self.worktree_scan_error = None;
         cx.spawn(async move |this, cx| {
-            let loaded = cx
+            let scanned = cx
                 .background_executor()
                 .spawn(async move { git::load_worktree(&repository) })
                 .await;
@@ -427,8 +430,12 @@ impl AppView {
                     return;
                 }
                 this.worktree_paths_pending = false;
-                match loaded {
-                    Ok(entry) => this.worktree = Some(entry),
+                match scanned {
+                    Ok(entry) => {
+                        if let MainState::Ready(loaded) = &mut this.state {
+                            loaded.replace_cover(entry);
+                        }
+                    }
                     Err(e) => {
                         if refresh {
                             this.worktree_scan_error = Some(e.0);
@@ -463,7 +470,7 @@ impl AppView {
         let current = entry_chrome::active_entry_kind(
             self.mr_entry.is_some(),
             self.empty_mr,
-            self.worktree.is_some(),
+            self.covering(),
         );
         let last_mr = self.current_last_mr();
         match entry_chrome::kind_switch_action(current, target, last_mr.as_ref()) {
@@ -491,10 +498,10 @@ impl AppView {
     }
 
     fn enter_worktree(&mut self, cx: &mut Context<Self>) {
-        let MainState::Ready(bb) = &self.state else {
-            return;
+        let repository = match &self.state {
+            MainState::Ready(loaded) => loaded.repository().clone(),
+            MainState::Empty | MainState::Error(_) => return,
         };
-        let repository = bb.comparison.repository.clone();
         let shell = match git::worktree_head(&repository) {
             Ok(entry) => entry,
             Err(e) => {
@@ -504,7 +511,9 @@ impl AppView {
         };
         self.branch_picker = None;
         self.mr_picker = None;
-        self.worktree = Some(shell);
+        if let MainState::Ready(loaded) = &mut self.state {
+            loaded.cover(shell);
+        }
         self.spawn_worktree_paths(repository, false, cx);
         if self.mr_entry.is_some() {
             self.clear_mr_entry(cx);
@@ -515,17 +524,17 @@ impl AppView {
     }
 
     fn refresh_worktree(&mut self, cx: &mut Context<Self>) {
-        let Some(current) = &self.worktree else {
-            return;
+        let repository = match &self.state {
+            MainState::Ready(loaded) if loaded.covering() => loaded.repository().clone(),
+            _ => return,
         };
-        let repository = current.comparison.repository.clone();
         self.spawn_worktree_paths(repository, true, cx);
         cx.notify();
     }
 
     fn select_repo(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if let MainState::Ready(loaded) = &self.state {
-            if loaded.comparison.repository.path() == path.as_path() {
+            if loaded.repository().path() == path.as_path() {
                 return;
             }
         }
@@ -543,7 +552,7 @@ impl AppView {
             last_mr,
         }) {
             Ok(bb) => {
-                self.state = MainState::Ready(bb);
+                self.state = MainState::Ready(LoadedBrowser::install(bb));
                 self.refresh_store();
                 self.branch_picker = None;
                 self.mr_picker = None;
@@ -571,8 +580,8 @@ impl AppView {
         let bounds = self.branch_toggle_bounds.get();
         let (branches, current) = match &self.state {
             MainState::Ready(loaded) => (
-                git::list_branches(loaded.comparison.repository.path()).unwrap_or_default(),
-                loaded.branch.clone(),
+                git::list_branches(loaded.repository().path()).unwrap_or_default(),
+                loaded.branch_name().to_string(),
             ),
             MainState::Empty | MainState::Error(_) => (Vec::new(), String::new()),
         };
@@ -595,7 +604,7 @@ impl AppView {
         let bounds = self.mr_toggle_bounds.get();
 
         let repo_path = match &self.state {
-            MainState::Ready(loaded) => loaded.comparison.repository.path().to_path_buf(),
+            MainState::Ready(loaded) => loaded.repository().path().to_path_buf(),
             MainState::Empty | MainState::Error(_) => {
                 self.mr_picker = Some(MrPicker::failed(
                     ErrorNote::plain("Open a repository to list merge requests."),
@@ -690,7 +699,7 @@ impl AppView {
 
     fn spawn_mr_activate(&mut self, iid: u64, cx: &mut Context<Self>) {
         let repo_path = match &self.state {
-            MainState::Ready(loaded) => loaded.comparison.repository.path().to_path_buf(),
+            MainState::Ready(loaded) => loaded.repository().path().to_path_buf(),
             MainState::Empty | MainState::Error(_) => return,
         };
 
@@ -866,9 +875,9 @@ impl AppView {
 
     fn restore_branch_commits(&mut self) {
         let result = match &mut self.state {
-            MainState::Ready(bb) => {
-                let branch = bb.branch.clone();
-                bb.switch_branch(&branch)
+            MainState::Ready(loaded) => {
+                let branch = loaded.branch_name().to_string();
+                loaded.switch_branch(&branch)
             }
             MainState::Empty | MainState::Error(_) => return,
         };
@@ -883,7 +892,7 @@ impl AppView {
         self.empty_mr = false;
         self.pending_kind_restore = false;
         let result = match &mut self.state {
-            MainState::Ready(bb) => bb.switch_branch(name),
+            MainState::Ready(loaded) => loaded.switch_branch(name),
             MainState::Empty | MainState::Error(_) => return,
         };
         match result {
@@ -913,7 +922,7 @@ impl AppView {
     /// Comparison, then show the commit context menu.
     fn open_commit_menu(&mut self, index: usize, position: Point<Pixels>, cx: &mut Context<Self>) {
         let outside = match &self.state {
-            MainState::Ready(bb) => !bb.in_range.get(index).copied().unwrap_or(false),
+            MainState::Ready(loaded) => !loaded.in_range().get(index).copied().unwrap_or(false),
             MainState::Empty | MainState::Error(_) => return,
         };
         if outside {
@@ -940,7 +949,7 @@ impl AppView {
     fn remove_repo(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let removing_current = matches!(
             &self.state,
-            MainState::Ready(loaded) if loaded.comparison.repository.path() == path.as_path()
+            MainState::Ready(loaded) if loaded.repository().path() == path.as_path()
         );
         workspace_store::drop_path(&path);
         self.refresh_store();
@@ -1008,7 +1017,7 @@ impl AppView {
             cx.notify();
             return;
         }
-        if self.worktree.is_some() {
+        if self.covering() {
             return;
         }
         let mods = &event.keystroke.modifiers;
@@ -1020,23 +1029,23 @@ impl AppView {
     /// Cmd/Ctrl+A: Branch → select all loaded + fold; MR Ready → restore `diff_refs`.
     fn handle_commits_select_all(&mut self, cx: &mut Context<Self>) {
         let result = match (&mut self.state, self.mr_entry.as_ref()) {
-            (MainState::Ready(bb), Some(entry)) => {
-                if bb.commits.is_empty() {
+            (MainState::Ready(loaded), Some(entry)) => {
+                if loaded.commits().is_empty() {
                     return;
                 }
                 match &entry.detail {
-                    MrDetailState::Ready(detail) => bb.restore_mr_diff_refs(
+                    MrDetailState::Ready(detail) => loaded.restore_mr_diff_refs(
                         &detail.diff_refs.base_sha,
                         &detail.diff_refs.head_sha,
                     ),
                     MrDetailState::Loading | MrDetailState::Failed(_) => return,
                 }
             }
-            (MainState::Ready(bb), None) => {
-                if bb.commits.is_empty() {
+            (MainState::Ready(loaded), None) => {
+                if loaded.commits().is_empty() {
                     return;
                 }
-                bb.select_all_commits()
+                loaded.select_all_commits()
             }
             (MainState::Empty | MainState::Error(_), _) => return,
         };
@@ -1047,29 +1056,29 @@ impl AppView {
         cx.notify();
     }
 
+    fn loaded(&self) -> Option<&LoadedBrowser> {
+        match &self.state {
+            MainState::Ready(loaded) => Some(loaded),
+            MainState::Empty | MainState::Error(_) => None,
+        }
+    }
+
+    fn covering(&self) -> bool {
+        self.loaded().is_some_and(|loaded| loaded.covering())
+    }
+
     /// Same gate as the Changes capsule Open Diff button / commit menu item.
     fn can_open_diff(&self) -> bool {
-        self.active_paths().is_some_and(|paths| !paths.is_empty())
+        self.loaded()
+            .is_some_and(|loaded| loaded.open_diff_allowed())
     }
 
     fn active_paths(&self) -> Option<&[ChangedPath]> {
-        if let Some(wt) = &self.worktree {
-            return Some(&wt.changed_paths);
-        }
-        match &self.state {
-            MainState::Ready(bb) => Some(&bb.changed_paths),
-            MainState::Empty | MainState::Error(_) => None,
-        }
+        self.loaded().map(|loaded| loaded.changed_paths())
     }
 
     fn active_comparison(&self) -> Option<&Comparison> {
-        if let Some(wt) = &self.worktree {
-            return Some(&wt.comparison);
-        }
-        match &self.state {
-            MainState::Ready(bb) => Some(&bb.comparison),
-            MainState::Empty | MainState::Error(_) => None,
-        }
+        self.loaded().map(|loaded| loaded.comparison())
     }
 
     fn open_diff(&mut self, cx: &mut Context<Self>) {
@@ -1115,10 +1124,10 @@ impl AppView {
 
     fn select_commit(&mut self, index: usize, shift: bool, cx: &mut Context<Self>) {
         let result = {
-            let MainState::Ready(bb) = &mut self.state else {
+            let MainState::Ready(loaded) = &mut self.state else {
                 return;
             };
-            bb.select_commit(index, shift)
+            loaded.select_commit(index, shift)
         };
         match result {
             Ok(()) => {}
@@ -1160,18 +1169,22 @@ impl AppView {
                 }
                 match BranchBrowser::open(&root) {
                     Ok(bb) => {
-                        this.state = MainState::Ready(bb);
+                        this.state = MainState::Ready(LoadedBrowser::install(bb));
                         this.mr_entry = None;
                         this.clear_worktree();
                         this.empty_mr = false;
                         this.pending_kind_restore = false;
                         this.mr_picker = None;
                         this.branch_picker = None;
-                        if let MainState::Ready(loaded) = &this.state {
-                            workspace_store::remember(
-                                loaded.comparison.repository.path(),
-                                &loaded.branch,
-                            );
+                        let remembered = match &this.state {
+                            MainState::Ready(loaded) => Some((
+                                loaded.repository().path().to_path_buf(),
+                                loaded.branch_name().to_string(),
+                            )),
+                            MainState::Empty | MainState::Error(_) => None,
+                        };
+                        if let Some((path, branch)) = remembered {
+                            workspace_store::remember(&path, &branch);
                             this.refresh_store();
                         }
                     }
@@ -1393,7 +1406,7 @@ impl Render for AppView {
                             .min_w(px(splitter::MIN_COMMITS_WIDTH))
                             .overflow_hidden()
                             .bg(theme::sidebar())
-                            .when(self.worktree.is_none(), |d| d.child(render_commits(self, cx)))
+                            .when(!self.covering(), |d| d.child(render_commits(self, cx)))
                             .child(render_files(self, cx)),
                     ),
             )
@@ -1420,7 +1433,7 @@ fn render_sidebar(
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let active_path = match &view.state {
-        MainState::Ready(loaded) => Some(loaded.comparison.repository.path().to_path_buf()),
+        MainState::Ready(loaded) => Some(loaded.repository().path().to_path_buf()),
         MainState::Empty | MainState::Error(_) => None,
     };
     let gitlab_base = settings_store::effective_base_url(&settings_store::load_file());
@@ -1751,20 +1764,18 @@ fn render_commit_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEle
 /// buttons close it out flush against the right edge — no floating overlay, no dead strip.
 fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -> impl IntoElement {
     let mono = appearance::code_font(cx);
-    let (branch, mut label) = match &view.state {
-        MainState::Ready(loaded) => (loaded.branch.clone(), loaded.comparison.label()),
-        MainState::Empty | MainState::Error(_) => ("—".into(), "—".into()),
+    let (branch, label, checkout) = match &view.state {
+        MainState::Ready(loaded) => {
+            let branch = loaded.branch_name().to_string();
+            let label = loaded.comparison().label();
+            let checkout = loaded.checkout_label().unwrap_or(&branch).to_string();
+            (branch, label, checkout)
+        }
+        MainState::Empty | MainState::Error(_) => ("—".into(), "—".into(), "—".into()),
     };
-    let checkout = view
-        .worktree
-        .as_ref()
-        .map(|wt| {
-            label = wt.comparison.label();
-            wt.checkout_label.clone()
-        })
-        .unwrap_or_else(|| branch.clone());
     let show_gitlab = gitlab_chrome_visible(view);
-    let entry_chrome = render_entry_chrome(view, &branch, &checkout, show_gitlab, cx).into_any_element();
+    let entry_chrome =
+        render_entry_chrome(view, &branch, &checkout, show_gitlab, cx).into_any_element();
 
     // Leading zone spans exactly what sits left of the stage, so the pills after it start on
     // the stage's left edge and share a left edge with the islands below.
@@ -1868,11 +1879,8 @@ fn render_entry_chrome(
     show_gitlab: bool,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    let kind = entry_chrome::active_entry_kind(
-        view.mr_entry.is_some(),
-        view.empty_mr,
-        view.worktree.is_some(),
-    );
+    let kind =
+        entry_chrome::active_entry_kind(view.mr_entry.is_some(), view.empty_mr, view.covering());
     let mr_iid = view.mr_entry.as_ref().map(|e| e.summary.iid);
     let value = entry_chrome::value_label(kind, branch, mr_iid, checkout);
     let picker_open = view.branch_picker.is_some() || view.mr_picker.is_some();
@@ -1959,11 +1967,12 @@ fn render_entry_chrome(
                     .size_full(),
                 )
                 .when(kind != EntryKind::Worktree, |d| {
-                    d.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| match kind {
-                        EntryKind::Branch => this.toggle_branch_picker(cx),
-                        EntryKind::Mr => this.toggle_mr_picker(cx),
-                        EntryKind::Worktree => {}
-                    }))
+                    d.cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| match kind {
+                            EntryKind::Branch => this.toggle_branch_picker(cx),
+                            EntryKind::Mr => this.toggle_mr_picker(cx),
+                            EntryKind::Worktree => {}
+                        }))
                 })
                 .when(kind == EntryKind::Mr && view.mr_entry.is_some(), |el| {
                     el.on_mouse_down(
@@ -2143,8 +2152,8 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
                     .pb_1()
                     .track_scroll(&scroll)
                     .overflow_y_scroll()
-                    .children(loaded.commits.iter().enumerate().map(|(i, commit)| {
-                        let in_range = loaded.in_range.get(i).copied().unwrap_or(false);
+                    .children(loaded.commits().iter().enumerate().map(|(i, commit)| {
+                        let in_range = loaded.in_range().get(i).copied().unwrap_or(false);
                         let summary = commit.summary.clone();
                         let meta = format!(
                             "{} · {} · {}",
@@ -2271,8 +2280,8 @@ fn finish_mr_activate(
             let base_sha = ready.detail.diff_refs.base_sha.clone();
             let head_sha = ready.detail.diff_refs.head_sha.clone();
             entry.detail = MrDetailState::Ready(ready.detail);
-            if let MainState::Ready(bb) = &mut view.state {
-                if let Err(e) = bb.apply_mr_commits(ready.commit_infos, &base_sha, &head_sha) {
+            if let MainState::Ready(loaded) = &mut view.state {
+                if let Err(e) = loaded.apply_mr_commits(ready.commit_infos, &base_sha, &head_sha) {
                     entry.detail = MrDetailState::Failed(ErrorNote::plain(e.0));
                 }
             }
@@ -2331,7 +2340,7 @@ fn gitlab_chrome_visible(view: &AppView) -> bool {
         return false;
     };
     let base = settings_store::effective_base_url(&settings_store::load_file());
-    gitlab::repo_matches_settings_host(loaded.comparison.repository.path(), &base)
+    gitlab::repo_matches_settings_host(loaded.repository().path(), &base)
 }
 
 enum MrDetailState {
@@ -2796,15 +2805,11 @@ fn picker_line(
 
 fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
     let mono = appearance::code_font(cx);
-    let worktree = view.worktree.is_some();
-    let paths = if let Some(wt) = &view.worktree {
-        wt.changed_paths.clone()
-    } else {
-        match &view.state {
-            MainState::Ready(loaded) => loaded.changed_paths.clone(),
-            MainState::Empty | MainState::Error(_) => Vec::new(),
-        }
-    };
+    let worktree = view.covering();
+    let paths = view
+        .loaded()
+        .map(|loaded| loaded.changed_paths().to_vec())
+        .unwrap_or_default();
     let can_open = view.can_open_diff();
     let awaiting_paths = worktree && view.worktree_paths_pending && paths.is_empty();
     let refresh_pending = worktree && view.worktree_paths_pending && !paths.is_empty();
@@ -2814,23 +2819,19 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         None
     };
     let rows = file_tree::flatten(&paths, &view.collapsed_dirs);
+    let mr_diff = view.mr_entry.as_ref().and_then(|e| match &e.detail {
+        MrDetailState::Ready(d) => {
+            let base = d.diff_refs.base_sha.parse::<Oid>().ok()?;
+            let head = d.diff_refs.head_sha.parse::<Oid>().ok()?;
+            Some((base, head))
+        }
+        MrDetailState::Loading | MrDetailState::Failed(_) => None,
+    });
     let head_meta = if worktree {
         None
     } else {
-        match &view.state {
-            MainState::Ready(loaded) => {
-                let mr_diff = view.mr_entry.as_ref().and_then(|e| match &e.detail {
-                    MrDetailState::Ready(d) => {
-                        let base = d.diff_refs.base_sha.parse::<Oid>().ok()?;
-                        let head = d.diff_refs.head_sha.parse::<Oid>().ok()?;
-                        Some((base, head))
-                    }
-                    MrDetailState::Loading | MrDetailState::Failed(_) => None,
-                });
-                head_commit_meta(loaded, mr_diff)
-            }
-            MainState::Empty | MainState::Error(_) => None,
-        }
+        view.loaded()
+            .and_then(|loaded| head_commit_meta(loaded, mr_diff))
     };
     let inset = px(theme::CHANGES_INSET);
     // Commit island is gone, so there is no gap and no splitter. Dock left at the
@@ -2959,20 +2960,21 @@ struct HeadMeta {
     range_label: Option<String>,
 }
 
-fn head_commit_meta(loaded: &BranchBrowser, mr_diff: Option<(Oid, Oid)>) -> Option<HeadMeta> {
+fn head_commit_meta(loaded: &LoadedBrowser, mr_diff: Option<(Oid, Oid)>) -> Option<HeadMeta> {
+    let comparison = loaded.comparison();
     let commit = loaded
-        .commits
+        .commits()
         .iter()
-        .find(|c| c.oid == loaded.comparison.head_oid)
+        .find(|c| c.oid == comparison.head_oid)
         .cloned()?;
-    let selected = loaded.in_range.iter().filter(|&&b| b).count();
+    let selected = loaded.in_range().iter().filter(|&&b| b).count();
     let on_mr_full = mr_diff.is_some_and(|(base, head)| {
-        loaded.comparison.base_oid == Some(base) && loaded.comparison.head_oid == head
+        comparison.base_oid == Some(base) && comparison.head_oid == head
     });
     let range_label = if on_mr_full {
         None
     } else if mr_diff.is_some() || selected > 1 {
-        Some(loaded.comparison.label())
+        Some(comparison.label())
     } else {
         None
     };
@@ -3265,7 +3267,9 @@ fn worktree_loading_row(cx: &App) -> impl IntoElement {
                 .with_animation(
                     "worktree-loading-spin",
                     Animation::new(Duration::from_secs(2)).repeat(),
-                    |icon, delta| icon.with_transformation(Transformation::rotate(percentage(delta))),
+                    |icon, delta| {
+                        icon.with_transformation(Transformation::rotate(percentage(delta)))
+                    },
                 ),
         )
         .child(

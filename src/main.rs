@@ -4,6 +4,7 @@ mod domain;
 mod export;
 mod git;
 mod gitlab;
+mod loaded_browser;
 mod reqwest_client;
 mod settings_store;
 mod syntax;
