@@ -282,6 +282,30 @@ pub fn sidebar_row_hover() -> Rgba {
 pub fn range() -> Rgba {
     rgb(0xf1f5ff)
 }
+/// Wash over the code of a drag-selected line span; translucent so the line
+/// kind tint (add / del / mod) still reads through it.
+pub fn selection_wash() -> Rgba {
+    Rgba {
+        a: 0.18,
+        ..accent()
+    }
+}
+/// Character TextSelection, painted above the line wash, word marks, find
+/// hits, and OccurrenceHighlight. The color does not change when focus leaves
+/// the Diff.
+pub fn text_selection() -> Rgba {
+    Rgba {
+        a: 0.45,
+        ..accent()
+    }
+}
+/// Other Identifier occurrences. Lighter than [`text_selection`].
+pub fn occurrence_highlight() -> Rgba {
+    Rgba {
+        a: 0.22,
+        ..accent()
+    }
+}
 pub fn accent() -> Rgba {
     rgb(0x2457d6)
 }

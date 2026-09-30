@@ -10,7 +10,7 @@ use gpui::{
     Timer, Window, div, font, px, size,
 };
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -19,12 +19,15 @@ use super::element::{
     insert_scrollbar_hitboxes, line_number_digits, ln_col_width, text_extent, thumb_for, top_at,
     wrap_plan_for_panes,
 };
-use super::layout::{HunkLand, Layout, Row, WrapPlan};
+use super::layout::{HunkLand, Layout, LineRow, Row, SideLayout, WrapPlan};
+use super::text_selection::{
+    Model as TextModel, OccurrenceHighlight, Phase, Place, RowClass, Sample, VerticalEdge,
+};
 use super::trace;
 use super::viewport::{self, Viewport};
 use crate::domain::{
     Alignment, AlignmentOp, Anchor, DiffFontSize, FoldState, HunkJumpTarget, SearchSide, Side,
-    first_match_byte, hunk_jump_target, match_jump_plan,
+    first_match_byte, hunk_jump_target, match_jump_plan, split_lines,
 };
 use crate::git::FileDiff;
 use crate::syntax::{self, Span};
@@ -48,6 +51,8 @@ pub enum PaneEvent {
     /// A gutter-band drag began a postimage selection, so any open DraftComment is
     /// no longer the user's target.
     SelectionStarted,
+    /// A press in the code column; the shell focuses the Diff.
+    FocusDiff,
     HunkIndexChanged(Option<usize>),
     HoverCopy(Option<String>),
 }
@@ -60,27 +65,14 @@ pub(super) struct PointerMove {
     pub h_hovered: [bool; 2],
     /// Pane y, only while the pointer is over the center gutter.
     pub gutter_y: Option<f32>,
+    /// Window x, wherever the pointer is. A text drag maps this into a column.
+    pub pane_x: f32,
     /// Pane y, wherever the pointer is; a selection drag reads only this.
     pub pane_y: f32,
     /// Pointer y inside each side's vertical track.
     pub track_y: [f32; 2],
     /// Pointer x inside each side's horizontal track.
     pub h_track_x: [f32; 2],
-}
-
-/// Contiguous, same-side, line-granular selection from a center-gutter drag
-/// on the line-number column. `start..=end` in 1-based line numbers of `side`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct LineSelection {
-    side: Side,
-    start: u32,
-    end: u32,
-}
-
-impl LineSelection {
-    fn span(self) -> (Side, u32, u32) {
-        (self.side, self.start, self.end)
-    }
 }
 
 /// A DraftComment as the pane needs it: the Anchor drives the row index and the
@@ -115,8 +107,15 @@ pub struct DualPane {
     comments: Vec<PaneComment>,
     /// LineSpan being drafted, highlighted in its pane.
     drafting: Option<(Side, u32, u32)>,
-    /// Current drag selection; the draft target while the dock is open.
-    selection: Option<LineSelection>,
+    /// TextSelection plus the gutter line span. Text gestures do not write the
+    /// gutter span; gutter drags do not write the TextSelection.
+    text: TextModel,
+    /// Last text-drag pointer `(window x, pane y, over the gutter)`. The next
+    /// frame repeats one reported scroll step while the button stays down.
+    text_drag: Option<(f32, f32, bool)>,
+    /// Bumped each time a repeat chain starts, so a stale frame cannot scroll twice.
+    text_scroll_gen: u64,
+    text_autoscroll: bool,
     /// Live drag: the side and the line the press landed on.
     sel_drag: Option<(Side, u32)>,
     /// Shared scroll parameter, in pixels, and the only vertical scroll
@@ -164,6 +163,8 @@ pub struct DualPane {
     view_h: f32,
     /// Code column width per side, set in prepaint.
     pane_w: [f32; 2],
+    /// Window x of each code pane's left edge, set in prepaint.
+    code_left: [f32; 2],
     /// Device pixels per logical pixel, from the last prepaint.
     scale: f32,
     hover_copy: Option<String>,
@@ -206,7 +207,10 @@ impl DualPane {
             shapes: ShapeCache::default(),
             comments: Vec::new(),
             drafting: None,
-            selection: None,
+            text: TextModel::default(),
+            text_drag: None,
+            text_scroll_gen: 0,
+            text_autoscroll: false,
             sel_drag: None,
             scroll_s: 0.,
             x_offsets: [0.; 2],
@@ -227,6 +231,7 @@ impl DualPane {
             ln_advance: None,
             view_h: 0.,
             pane_w: [0.; 2],
+            code_left: [0.; 2],
             scale: 1.,
             hover_copy: None,
             press: None,
@@ -353,9 +358,13 @@ impl DualPane {
             }
         }
         self.comments = comments;
-        // A selection belongs to the file it was dragged in.
-        self.selection = None;
+        // A gutter span belongs to the file it was dragged in.
+        self.text.clear_gutter();
+        self.text.cancel_press();
+        self.text_autoscroll = false;
         self.sel_drag = None;
+        // ChangedPath and Comparison both reopen the file.
+        self.clear_text_selection(cx);
         self.fold = FoldState::collapsed();
         self.set_hunk_index(None, cx);
         self.hunk_s = Some(0.);
@@ -376,6 +385,8 @@ impl DualPane {
                 file.alignment = alignment;
             }
         });
+        // Ignore-whitespace. Scroll, soft wrap, and Code Font size do not.
+        self.clear_text_selection(cx);
         self.set_hunk_index(None, cx);
         cx.notify();
     }
@@ -411,25 +422,59 @@ impl DualPane {
     /// DraftComment makes its span the draft target, so the wash and the icon
     /// follow the dock).
     pub fn select_span(&mut self, side: Side, start: u32, end: u32, cx: &mut Context<Self>) {
-        let next = Some(LineSelection { side, start, end });
         self.sel_drag = None;
-        if self.selection != next {
-            self.selection = next;
+        let next = Some((side, start, end));
+        if self.text.gutter() != next {
+            self.text.drag_gutter(side, start, end);
             cx.notify();
         }
     }
 
-    /// Current selection as `(side, start, end)` inclusive, if any.
+    /// Current gutter line span as `(side, start, end)` inclusive, if any.
     pub fn selection(&self) -> Option<(Side, u32, u32)> {
-        self.selection.map(LineSelection::span)
+        self.text.gutter()
+    }
+
+    /// Original text of the TextSelection, including lines a fold is hiding.
+    pub fn copied_text(&self) -> Option<String> {
+        let file = self.file.as_ref()?;
+        let pre = split_lines(&file.preimage_text);
+        let post = split_lines(&file.postimage_text);
+        self.text.clipboard(|side, ln| {
+            let src = match side {
+                Side::Preimage => &pre,
+                Side::Postimage => &post,
+            };
+            src.get((ln as usize).wrapping_sub(1))
+                .copied()
+                .unwrap_or("")
+        })
+    }
+
+    /// TextSelection is present. Esc checks this before find, draft, or the gutter.
+    pub fn has_text_selection(&self) -> bool {
+        self.text.selection().is_some()
+    }
+
+    /// Drop TextSelection. `open` calls this for a ChangedPath or Comparison
+    /// change. `set_alignment` calls this for ignore-whitespace. Scroll, soft
+    /// wrap, and Code Font size do not.
+    pub fn clear_text_selection(&mut self, cx: &mut Context<Self>) {
+        if self.text.selection().is_none() && self.text.press_side().is_none() {
+            return;
+        }
+        self.text.clear_text();
+        self.text_drag = None;
+        self.text_autoscroll = false;
+        cx.notify();
     }
 
     /// Drop the wash without opening or closing the dock.
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        if self.selection.is_none() && self.sel_drag.is_none() {
+        if self.text.gutter().is_none() && self.sel_drag.is_none() {
             return;
         }
-        self.selection = None;
+        self.text.clear_gutter();
         self.sel_drag = None;
         cx.notify();
     }
@@ -441,13 +486,13 @@ impl DualPane {
         match mark {
             element::IconMark::Filled(id) => cx.emit(PaneEvent::OpenEdit { id }),
             element::IconMark::Empty => {
-                let Some(sel) = self.selection else {
+                let Some((side, start, end)) = self.text.gutter() else {
                     return;
                 };
                 cx.emit(PaneEvent::OpenDraft {
-                    side: sel.side,
-                    start: sel.start,
-                    count: span_count(sel.start, sel.end),
+                    side,
+                    start,
+                    count: span_count(start, end),
                 });
             }
         }
@@ -1165,6 +1210,246 @@ impl DualPane {
         }
     }
 
+    fn column_at(&self, layout: &Layout, side: Side, line: &LineRow, x: f32) -> usize {
+        let ix = side_ix(side);
+        let left = self.code_left[ix];
+        let right = left + self.pane_w[ix];
+        let (_, _, inset) = element::comment_bar_layout(side, left, right);
+        let comment = if layout.side(side).has_comment(line.ln) {
+            inset
+        } else {
+            0.
+        };
+        // Same origin paint uses, including the snapped horizontal scroll.
+        let origin = element::code_text_x(
+            left,
+            viewport::snap(self.x_offsets[ix], self.scale),
+            self.shapes.text_leading(side, line.row),
+            comment,
+        );
+        if let Some(column) = self.shapes.column_near(layout, side, line, x - origin) {
+            return column;
+        }
+        let advance = self.mono_advance.map(|(_, advance)| advance).unwrap_or(0.);
+        element::display_column(
+            layout,
+            side,
+            line,
+            origin - self.shapes.text_leading(side, line.row),
+            x,
+            advance,
+        )
+    }
+
+    /// Where the pointer sits relative to the pressed side's code column.
+    fn drag_place(&self, side: Side, x: f32, y: f32, over_gutter: bool) -> Place {
+        let mut place = Place {
+            soft_wrap: self.soft_wrap,
+            sync_horizontal: self.sync_horizontal,
+            over_gutter,
+            ..Place::default()
+        };
+        if over_gutter {
+            return place;
+        }
+        let ix = side_ix(side);
+        if self.pane_w[ix] > 0. && !self.in_gutter_x(x) {
+            let left = self.code_left[ix];
+            let right = left + self.pane_w[ix];
+            if x < left {
+                place.horizontal = Some(-1);
+            } else if x >= right {
+                place.horizontal = Some(1);
+            }
+        }
+        if self.view_h > 0. && (y < 0. || y >= self.view_h) {
+            let dir = if y < 0. { -1 } else { 1 };
+            place.vertical = Some(self.vertical_edge(side, dir, x));
+        }
+        place
+    }
+
+    fn in_gutter_x(&self, x: f32) -> bool {
+        let pre_right = self.code_left[0] + self.pane_w[0];
+        let post_left = self.code_left[1];
+        self.pane_w[0] > 0. && self.pane_w[1] > 0. && x >= pre_right && x < post_left
+    }
+
+    fn vertical_edge(&self, side: Side, dir: i8, x: f32) -> VerticalEdge {
+        VerticalEdge {
+            dir,
+            entering: self.entering_class(side, dir),
+            column: self.entering_column(side, dir, x),
+            room: self.vertical_room(dir),
+        }
+    }
+
+    fn entering_index(&self, side: Side, dir: i8) -> Option<usize> {
+        let rows = self.viewport()?.visible_rows(side);
+        let n = self.layout.as_ref()?.side(side).rows();
+        if dir < 0 {
+            rows.start.checked_sub(1)
+        } else if rows.end < n {
+            Some(rows.end)
+        } else {
+            None
+        }
+    }
+
+    fn entering_class(&self, side: Side, dir: i8) -> Option<RowClass> {
+        let row = self
+            .layout
+            .as_ref()?
+            .side(side)
+            .row(self.entering_index(side, dir)?)?;
+        Some(match row {
+            Row::Omit(o) => RowClass::Omission { id: o.id },
+            Row::Line(line) if line.is_equal_padding() => RowClass::Padding { ln: line.ln },
+            Row::Line(line) => RowClass::Text { ln: line.ln },
+        })
+    }
+
+    fn entering_column(&self, side: Side, dir: i8, x: f32) -> usize {
+        let Some(layout) = self.layout.as_ref() else {
+            return 0;
+        };
+        let Some(idx) = self.entering_index(side, dir) else {
+            return 0;
+        };
+        match layout.side(side).row(idx) {
+            Some(Row::Line(line)) if !line.is_equal_padding() => {
+                self.column_at(layout, side, line, x)
+            }
+            _ => 0,
+        }
+    }
+
+    fn vertical_room(&self, dir: i8) -> bool {
+        let Some(layout) = self.layout.as_ref() else {
+            return false;
+        };
+        let row_h = self.row_h();
+        if row_h <= 0. {
+            return false;
+        }
+        let next = viewport::clamp_s(
+            layout,
+            self.scroll_s + f32::from(dir) * row_h,
+            self.view_h,
+            row_h,
+        );
+        (next - self.scroll_s).abs() > 0.5
+    }
+
+    fn sample_text_drag(&mut self, x: f32, y: f32, over_gutter: bool) -> bool {
+        let Some(side) = self.text.press_side() else {
+            return false;
+        };
+        self.text_drag = Some((x, y, over_gutter));
+        let mut sample = self.text_sample(side, x, y, Phase::Move, 1);
+        sample.place = self.drag_place(side, x, y, over_gutter);
+        note_text(&mut self.text, self.layout.as_ref(), sample)
+    }
+
+    fn text_scroll_pending(&self) -> bool {
+        let step = self.text.scroll_step();
+        step.rows != 0 || step.columns != 0
+    }
+
+    fn apply_text_scroll(&mut self, cx: &mut Context<Self>) {
+        let step = self.text.scroll_step();
+        if step.rows != 0 {
+            self.scroll_by(step.rows as f32 * self.row_h(), cx);
+        }
+        if step.columns == 0 {
+            return;
+        }
+        let Some(side) = self.text.press_side() else {
+            return;
+        };
+        let Some((_, advance)) = self.mono_advance else {
+            return;
+        };
+        if advance > 0. {
+            // Existing horizontal scroll already moves both sides when sync is on,
+            // and refuses to move while soft wrap is on.
+            self.scroll_x_by(side, step.columns as f32 * advance, cx);
+        }
+    }
+
+    fn arm_text_autoscroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.text_autoscroll {
+            return;
+        }
+        self.text_autoscroll = true;
+        self.text_scroll_gen = self.text_scroll_gen.wrapping_add(1);
+        let epoch = self.text_scroll_gen;
+        cx.on_next_frame(window, move |pane, window, cx| {
+            pane.pump_text_autoscroll(epoch, window, cx);
+        });
+    }
+
+    /// ponytail: one reported step per frame while the button stays down.
+    /// No timer type — the next frame repeats the step the model just reported.
+    fn pump_text_autoscroll(&mut self, epoch: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.text_autoscroll || self.text_scroll_gen != epoch {
+            return;
+        }
+        let Some((x, y, gutter)) = self.text_drag else {
+            self.text_autoscroll = false;
+            return;
+        };
+        if self.text.press_side().is_none() {
+            self.text_autoscroll = false;
+            return;
+        }
+        self.sample_text_drag(x, y, gutter);
+        if !self.text_scroll_pending() {
+            self.text_autoscroll = false;
+            return;
+        }
+        self.apply_text_scroll(cx);
+        cx.on_next_frame(window, move |pane, window, cx| {
+            pane.pump_text_autoscroll(epoch, window, cx);
+        });
+    }
+
+    fn text_sample(&self, side: Side, x: f32, y: f32, phase: Phase, clicks: usize) -> Sample {
+        let (class, column) = self.classify_text(side, x, y);
+        Sample {
+            phase,
+            side,
+            class,
+            column,
+            clicks,
+            place: Place::default(),
+        }
+    }
+
+    fn classify_text(&self, side: Side, x: f32, y: f32) -> (RowClass, usize) {
+        let Some(vp) = self.viewport() else {
+            return (RowClass::Hatch, 0);
+        };
+        let Some(layout) = self.layout.as_ref() else {
+            return (RowClass::Hatch, 0);
+        };
+        if self.view_h > 0. && (y < 0. || y >= self.view_h) {
+            return (RowClass::Outside, 0);
+        }
+        match vp.hit(side, y) {
+            Some(Row::Omit(o)) => (RowClass::Omission { id: o.id }, 0),
+            Some(Row::Line(line)) if line.is_equal_padding() => {
+                (RowClass::Padding { ln: line.ln }, 0)
+            }
+            Some(Row::Line(line)) => (
+                RowClass::Text { ln: line.ln },
+                self.column_at(layout, side, line, x),
+            ),
+            None if vp.gaps(side).iter().any(|&(a, b)| y >= a && y < b) => (RowClass::Hatch, 0),
+            None => (RowClass::Outside, 0),
+        }
+    }
+
     /// Logical line `side` shows at pane y `y`, skipping blank padding rows.
     fn line_at(&self, side: Side, y: f32) -> Option<u32> {
         match self.viewport()?.hit(side, y)? {
@@ -1173,35 +1458,47 @@ impl DualPane {
         }
     }
 
-    /// Left press in `side`'s code column: arm an omission-separator click only.
-    /// Line selection belongs to the gutter band so the code column stays free
-    /// for text selection.
-    pub(super) fn press_code(&mut self, side: Side, y: f32, _cx: &mut Context<Self>) {
+    /// Left press in `side`'s code column. Arms an omission-separator click and
+    /// a text gesture. Does not write the gutter line span.
+    pub(super) fn press_code(
+        &mut self,
+        side: Side,
+        x: f32,
+        y: f32,
+        clicks: usize,
+        cx: &mut Context<Self>,
+    ) {
         self.press = self.row_index_at(side, y).map(|row| (side, row));
+        cx.emit(PaneEvent::FocusDiff);
+        if self.layout.is_none() {
+            return;
+        }
+        let sample = self.text_sample(side, x, y, Phase::Press, clicks);
+        if note_text(&mut self.text, self.layout.as_ref(), sample) {
+            cx.notify();
+        }
     }
 
     /// Left press on `side`'s line-number column.
     /// On a line it starts a selection drag (replacing any selection, including
-    /// one on the other side).
+    /// one on the other side). Does not write the TextSelection.
     pub(super) fn press_gutter_select(&mut self, side: Side, y: f32, cx: &mut Context<Self>) {
         let Some(ln) = self.line_at(side, y) else {
             return;
         };
         self.press = None;
+        self.text.cancel_press();
         self.sel_drag = Some((side, ln));
-        self.selection = Some(LineSelection {
-            side,
-            start: ln,
-            end: ln,
-        });
+        self.text.drag_gutter(side, ln, ln);
         cx.emit(PaneEvent::SelectionStarted);
         cx.notify();
     }
 
-    /// Left release. Ends a thumb or selection drag, or completes a click on
-    /// the pressed omission separator by expanding its span.
-    pub(super) fn release(&mut self, side: Option<Side>, y: f32, cx: &mut Context<Self>) {
+    /// Left release. Ends a thumb or selection drag, finishes a text gesture,
+    /// or completes a click on the pressed omission separator.
+    pub(super) fn release(&mut self, side: Option<Side>, x: f32, y: f32, cx: &mut Context<Self>) {
         self.sel_drag = None;
+        self.text_autoscroll = false;
         if self.bars.drag.take().is_some() || self.bars.h_drag.take().is_some() {
             if !self.bars.hovered.iter().any(|&h| h) && !self.bars.h_hovered.iter().any(|&h| h) {
                 self.arm_bar_hide(cx);
@@ -1209,28 +1506,44 @@ impl DualPane {
             cx.notify();
             return;
         }
+        let mut dirty = false;
+        if let Some(pressed) = self.text.press_side() {
+            let sample = self.text_sample(pressed, x, y, Phase::Release, 1);
+            dirty = note_text(&mut self.text, self.layout.as_ref(), sample);
+        }
+        let expand = self.text.expand_separator();
         let (Some(pressed), Some(side)) = (self.press.take(), side) else {
+            if dirty {
+                cx.notify();
+            }
             return;
         };
         if pressed.0 != side {
+            if dirty {
+                cx.notify();
+            }
             return;
         }
-        let omit = self.viewport().and_then(|vp| match vp.hit(side, y)? {
-            Row::Omit(o) if o.row == pressed.1 => Some(o.id),
-            _ => None,
-        });
-        if let Some(id) = omit {
+        if let Some(id) = expand {
             self.expand_omit(id, cx);
+        } else if dirty {
+            cx.notify();
         }
     }
 
     /// Track hover per side, an active thumb or selection drag, and gutter
     /// hover copy.
-    pub(super) fn mouse_moved(&mut self, m: PointerMove, cx: &mut Context<Self>) {
+    pub(super) fn mouse_moved(
+        &mut self,
+        m: PointerMove,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let PointerMove {
             hovered,
             h_hovered,
             gutter_y,
+            pane_x,
             pane_y,
             track_y,
             h_track_x,
@@ -1242,10 +1555,21 @@ impl DualPane {
             && let Some(ln) = self.line_at(side, pane_y)
         {
             let (start, end) = selection_span(anchor, ln);
-            let next = Some(LineSelection { side, start, end });
-            if self.selection != next {
-                self.selection = next;
+            let next = Some((side, start, end));
+            if self.text.gutter() != next {
+                self.text.drag_gutter(side, start, end);
                 dirty = true;
+            }
+        } else if self.text.press_side().is_some() {
+            if self.sample_text_drag(pane_x, pane_y, gutter_y.is_some()) {
+                dirty = true;
+            }
+            if self.text_scroll_pending() {
+                self.apply_text_scroll(cx);
+                dirty = true;
+                self.arm_text_autoscroll(window, cx);
+            } else {
+                self.text_autoscroll = false;
             }
         }
         if self.bars.hovered != hovered {
@@ -1306,7 +1630,9 @@ impl DualPane {
         let ln_w = ln_col_width(line_number_digits(self.layout.as_ref()?), ln_advance);
         let geom = Geom::new(bounds, ln_w, self.scale);
         for side in [Side::Preimage, Side::Postimage] {
-            self.pane_w[side_ix(side)] = f32::from(geom.pane(side).size.width);
+            let ix = side_ix(side);
+            self.pane_w[ix] = f32::from(geom.pane(side).size.width);
+            self.code_left[ix] = f32::from(geom.pane(side).left());
         }
         self.sync_wrap_layout(self.pane_w, window, cx);
         let comment_starts = self.comment_starts();
@@ -1316,6 +1642,7 @@ impl DualPane {
             self.code_theme_id = code_theme.id.clone();
         }
         let layout = self.layout.as_ref()?;
+        let file = self.file.as_ref()?;
         let t_vp = trace::start();
         let vp = Viewport::new(layout, self.scroll_s, self.view_h, row_h).snapped(self.scale);
         let viewport_took = trace::since(t_vp);
@@ -1332,7 +1659,14 @@ impl DualPane {
                 scale: self.scale,
                 decorations: Decorations {
                     drafting: self.drafting,
-                    selection: self.selection.map(LineSelection::span),
+                    selection: self.text.gutter(),
+                    text: self.text.selection(),
+                    occurrences: occurrence_paint(
+                        &self.text,
+                        layout,
+                        &file.preimage_text,
+                        &file.postimage_text,
+                    ),
                     comment_starts,
                     search_query: (!self.search_query.is_empty())
                         .then(|| Arc::from(self.search_query.as_str())),
@@ -1729,6 +2063,47 @@ pub(super) fn nearest_hunk_index(s_rows: f32, lands: &[HunkLand]) -> Option<usiz
 /// Background highlight results apply only while this open is still current.
 fn should_apply_highlight(open_generation: u64, result_generation: u64) -> bool {
     open_generation == result_generation
+}
+
+fn note_text(text: &mut TextModel, layout: Option<&Layout>, sample: Sample) -> bool {
+    let Some(layout) = layout else {
+        return false;
+    };
+    let before = text.selection();
+    let pressing = text.press_side().is_some();
+    text.pointer(sample, |side, ln| {
+        layout.side(side).line_text(ln).unwrap_or("")
+    });
+    text.selection() != before || text.press_side().is_some() != pressing
+}
+
+/// Unfolded logical lines are the layout's first visual rows. Folded lines
+/// are absent, so they stay out of the scan.
+fn open_line_numbers(side: &SideLayout) -> HashSet<u32> {
+    let mut open = HashSet::new();
+    for i in 0..side.rows() {
+        if let Some(Row::Line(line)) = side.row(i)
+            && line.shows_line_number()
+        {
+            open.insert(line.ln);
+        }
+    }
+    open
+}
+
+fn occurrence_paint(
+    text: &TextModel,
+    layout: &Layout,
+    preimage: &str,
+    postimage: &str,
+) -> Vec<OccurrenceHighlight> {
+    let pre = split_lines(preimage);
+    let post = split_lines(postimage);
+    let open = [
+        open_line_numbers(layout.side(Side::Preimage)),
+        open_line_numbers(layout.side(Side::Postimage)),
+    ];
+    text.occurrences(&pre, &post, |side, ln| !open[side_ix(side)].contains(&ln))
 }
 
 /// Inclusive line span of a drag from `anchor` to the line under the pointer,

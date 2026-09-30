@@ -68,6 +68,18 @@ _Avoid_: virtual row (view projection), line matrix (rendering), mapping (vague)
 The attachment of a DraftComment to a place in a Comparison: either a file-level attachment (path only, no line span) or a line attachment (path, side preimage/postimage, line span, optional owning Hunk). v1 keys files by path only—no rename crossing. Not a ChangedPath (changeset listing).
 _Avoid_: position (vague), location, cursor
 
+**TextSelection**:
+A character span on one side (preimage or postimage) of the current ChangedPath's diff text. It is not an Anchor and does not attach a DraftComment.
+_Avoid_: caret, cursor, line selection, Anchor
+
+**Identifier**:
+A maximal run of Unicode letters, digits, and `_`, excluding Han, Hiragana, Katakana, and Hangul. Bounds a double-click TextSelection and an OccurrenceHighlight.
+_Avoid_: wrap word, token
+
+**OccurrenceHighlight**:
+The other visible whole-identifier occurrences, on both sides of the current ChangedPath, of a TextSelection that is exactly one Identifier. Folded lines are outside it.
+_Avoid_: word mark, find hit, search occurrence
+
 **UnresolvedAnchor**:
 An Anchor that could not be reliably re-located after Comparison or ViewOptions change; still kept on the Review but excluded from default Export. May carry at most one SuggestedAnchor.
 _Avoid_: broken comment, orphan, deleted comment

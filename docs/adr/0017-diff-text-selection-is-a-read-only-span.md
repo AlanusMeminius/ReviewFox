@@ -1,0 +1,3 @@
+# Diff text selection is a read-only character span
+
+The Diff code column was left free of line selection so it could take text selection, and a caret-plus-keyboard editor was the obvious reading of that. TextSelection is instead a caret-free character span on one side of the current ChangedPath, copied from the original line text. It is not an Anchor. Double-click and OccurrenceHighlight use Identifier (Unicode letters, digits, and `_`, excluding Han, Hiragana, Katakana, and Hangul), a different class from soft-wrap word characters, so the read-only diff does not become an editor. Extends ADR-0001.
