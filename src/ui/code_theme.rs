@@ -64,6 +64,58 @@ fn one_light() -> CodeTheme {
     }
 }
 
+fn atom_one_light() -> CodeTheme {
+    CodeTheme {
+        id: "atom-one-light".into(),
+        label: "Atom One Light".into(),
+        slots: AuthoredSlots {
+            paper: rgb(0xfafafa),
+            added_band: rgb(0xe6f4ea),
+            deleted_band: rgb(0xf0e1e1),
+            replaced_band: rgb(0xe5eefb),
+            word_difference: rgb(0xb8d2f2),
+            line_number: rgb(0x7f8794),
+            default_foreground: rgb(0x242936),
+            comment: rgb(0x4078c0),
+            idle_comment: rgb(0x8a93a2),
+            selection: Rgba {
+                a: 0.18,
+                ..rgb(0x4078c0)
+            },
+            search_hit: rgb(0xffe6a3),
+            search_current: rgb(0xffc857),
+            search_ring: rgb(0xc58900),
+            syntax: syntax_slots(&[
+                ("attribute", 0xa626a4),
+                ("comment", 0x6a737d),
+                ("comment.documentation", 0x59636e),
+                ("constant", 0x986801),
+                ("constant.builtin", 0x986801),
+                ("constructor", 0x005cc5),
+                ("delimiter", 0x586069),
+                ("escape", 0x005cc5),
+                ("function", 0x005cc5),
+                ("function.macro", 0x005cc5),
+                ("function.method", 0x005cc5),
+                ("function.special", 0x005cc5),
+                ("keyword", 0xa626a4),
+                ("label", 0x005cc5),
+                ("number", 0x986801),
+                ("operator", 0x0184bc),
+                ("property", 0xe45649),
+                ("punctuation.bracket", 0x586069),
+                ("punctuation.delimiter", 0x586069),
+                ("string", 0x50a14f),
+                ("type", 0x0184bc),
+                ("type.builtin", 0x0184bc),
+                ("variable", 0x242936),
+                ("variable.builtin", 0xa626a4),
+                ("variable.parameter", 0xe45649),
+            ]),
+        },
+    }
+}
+
 /// Light or dark appearance of the application chrome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoftwareThemeMode {
@@ -145,7 +197,8 @@ pub struct DerivedRoles {
 }
 
 pub fn builtin_catalog() -> &'static [CodeTheme] {
-    static CATALOG: LazyLock<Vec<CodeTheme>> = LazyLock::new(|| vec![one_light()]);
+    static CATALOG: LazyLock<Vec<CodeTheme>> =
+        LazyLock::new(|| vec![one_light(), atom_one_light()]);
     CATALOG.as_slice()
 }
 
@@ -345,6 +398,26 @@ mod tests {
             &CodeThemePairing::default(),
             builtin_catalog(),
         )
+    }
+
+    #[test]
+    fn builtin_catalog_exposes_atom_one_light_for_picker_switching() {
+        let catalog = builtin_catalog();
+        assert_eq!(catalog.len(), 2);
+        assert_eq!(catalog[1].id, "atom-one-light");
+        assert_eq!(catalog[1].label, "Atom One Light");
+
+        let palette = resolve(
+            SoftwareThemeMode::Light,
+            &CodeThemePairing {
+                light: Some("atom-one-light".into()),
+                dark: None,
+            },
+            catalog,
+        );
+        assert_eq!(palette.id, "atom-one-light");
+        assert_hex(palette.slots.paper, 0xfafafa);
+        assert_hex(palette.slots.default_foreground, 0x242936);
     }
 
     #[test]
