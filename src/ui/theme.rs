@@ -4,6 +4,131 @@
 use gpui::rgba;
 use gpui::{BoxShadow, Hsla, Pixels, Rgba, hsla, point, px, rgb};
 
+use super::code_theme::{self, SoftwareThemeMode};
+
+/// Semantic application colors. New screens can migrate one visible slice at a
+/// time while both built-in appearances keep the same set of roles.
+#[derive(Clone, Copy)]
+pub struct SoftwarePalette {
+    pub surface: SurfaceColors,
+    pub text: TextColors,
+    pub sidebar_row: SidebarRowColors,
+}
+
+#[derive(Clone, Copy)]
+pub struct SurfaceColors {
+    pub window_backing: Rgba,
+    /// Stable backing over the platform's frosted material. A small amount of
+    /// the material remains visible without letting the wallpaper set contrast.
+    pub sidebar_backing: Rgba,
+}
+
+#[derive(Clone, Copy)]
+pub struct TextColors {
+    pub primary: Rgba,
+    pub secondary: Rgba,
+    pub section: Rgba,
+}
+
+#[derive(Clone, Copy)]
+pub struct SidebarRowColors {
+    pub idle_indicator: Rgba,
+    pub hover_indicator: Rgba,
+    pub pressed_indicator: Rgba,
+    pub hover: Rgba,
+    pub pressed: Rgba,
+    pub selected: Rgba,
+    pub selected_hover: Rgba,
+    pub selected_pressed: Rgba,
+    pub selection_indicator: Rgba,
+}
+
+/// Pure resolver for the built-in Software Theme palettes.
+pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
+    match mode {
+        SoftwareThemeMode::Light => SoftwarePalette {
+            surface: SurfaceColors {
+                window_backing: window_backing(mode),
+                sidebar_backing: gpui::rgba(0xf4f5f7e6),
+            },
+            text: TextColors {
+                primary: rgb(0x172033),
+                secondary: rgb(0x596579),
+                section: rgb(0x4b5669),
+            },
+            sidebar_row: SidebarRowColors {
+                idle_indicator: gpui::rgba(0x00000000),
+                hover_indicator: rgb(0x596579),
+                pressed_indicator: rgb(0x2457d6),
+                hover: rgb(0xe9ebef),
+                pressed: rgb(0xdde3ec),
+                selected: rgb(0xdce8f8),
+                selected_hover: rgb(0xd1e1f7),
+                selected_pressed: rgb(0xc3d9f4),
+                selection_indicator: rgb(0x2457d6),
+            },
+        },
+        SoftwareThemeMode::Dark => SoftwarePalette {
+            surface: SurfaceColors {
+                window_backing: window_backing(mode),
+                sidebar_backing: gpui::rgba(0x1d202780),
+            },
+            text: TextColors {
+                primary: rgb(0xd5dae3),
+                secondary: rgb(0xaeb7c5),
+                section: rgb(0xe2e6ed),
+            },
+            sidebar_row: SidebarRowColors {
+                idle_indicator: gpui::rgba(0x00000000),
+                hover_indicator: rgb(0xaeb7c5),
+                pressed_indicator: rgb(0x89c7f7),
+                hover: rgb(0x343b47),
+                pressed: rgb(0x414a59),
+                selected: rgb(0x344a65),
+                selected_hover: rgb(0x3b5574),
+                selected_pressed: rgb(0x435f81),
+                selection_indicator: rgb(0x89c7f7),
+            },
+        },
+    }
+}
+
+pub fn software_palette() -> SoftwarePalette {
+    resolve_software_palette(if code_theme::is_dark() {
+        SoftwareThemeMode::Dark
+    } else {
+        SoftwareThemeMode::Light
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn window_backing(mode: SoftwareThemeMode) -> Rgba {
+    // NSVisualEffectView sits under Metal. Light needs no extra root tint;
+    // dark tint controls the otherwise system-light material.
+    match mode {
+        SoftwareThemeMode::Light => CLEAR,
+        SoftwareThemeMode::Dark => gpui::rgba(0x14161db3),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn window_backing(mode: SoftwareThemeMode) -> Rgba {
+    // Windows acrylic has a clear native tint; the root supplies its tone.
+    match mode {
+        SoftwareThemeMode::Light => rgba(0xf4f5f7e6),
+        SoftwareThemeMode::Dark => rgba(0x1d2027e0),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn window_backing(mode: SoftwareThemeMode) -> Rgba {
+    // No compositor backdrop is requested on other platforms.
+    match mode {
+        SoftwareThemeMode::Light => rgb(0xf4f5f7),
+        SoftwareThemeMode::Dark => rgb(0x1d2027),
+    }
+}
+
 pub const SIDEBAR_WIDTH: Pixels = gpui::px(188.);
 /// Workspace sidebar row (repos + Settings).
 pub const SIDEBAR_ROW_HEIGHT: f32 = 32.;
@@ -13,6 +138,11 @@ pub const SIDEBAR_ROW_GAP: f32 = 4.;
 pub const SIDEBAR_ROW_INSET: f32 = 8.;
 /// Inner pad inside the capsule so the icon's left edge sits at 14 (inset + this).
 pub const SIDEBAR_ROW_PAD_X: f32 = 6.;
+/// Selected row's blue edge grows with interaction; matching pad adjustments
+/// keep the icon and label fixed at their regular positions.
+pub const SIDEBAR_ROW_INDICATOR_IDLE_WIDTH: f32 = 2.;
+pub const SIDEBAR_ROW_INDICATOR_HOVER_WIDTH: f32 = 4.;
+pub const SIDEBAR_ROW_INDICATOR_PRESSED_WIDTH: f32 = 6.;
 pub const SIDEBAR_ROW_RADIUS: f32 = 8.;
 /// Icon is 16 wide starting at 14; this gap puts the label at 34.
 pub const SIDEBAR_ICON_LABEL_GAP: f32 = 4.;
@@ -225,51 +355,16 @@ const CLEAR: Rgba = Rgba {
     a: 0.,
 };
 
-/// The window's frosted material, and the *only* translucent fill in the tree.
-///
-/// Exactly one element per window may paint it — the window root. Everything
-/// between the root and the islands stays [`sidebar`]-clear, because stacked
-/// translucent layers compound (0.9 over 0.9 reads as 0.99) and the sidebar
-/// would drift lighter than the stage.
-#[cfg(target_os = "macos")]
+/// The window-wide frosted tint. Exactly one element per window paints it: the
+/// root. The workspace sidebar adds a bounded backing for text; other columns
+/// on the desk remain clear so their tint does not compound over this fill.
 pub fn frost() -> Rgba {
-    // Light: the DIY NSVisualEffectView sits *under* the Metal view, so the
-    // material is already behind us; painting here would only sit on top of it.
-    // Dark: that material follows the system (light) appearance, so tint it
-    // with a translucent ink fill — the vibrancy still shows through.
-    if crate::ui::code_theme::is_dark() {
-        gpui::rgba(0x14161db3)
-    } else {
-        CLEAR
-    }
+    software_palette().surface.window_backing
 }
 
-#[cfg(target_os = "windows")]
-pub fn frost() -> Rgba {
-    // gpui asks Windows for acrylic with a fully clear tint (`AccentPolicy`
-    // gradient 0x00000000), so the entire window tone comes from this fill.
-    // 0.9 keeps `muted()` legible over a dark wallpaper; below ~0.8 it stops
-    // being.
-    if crate::ui::code_theme::is_dark() {
-        gpui::rgba(0x1d2027e0)
-    } else {
-        rgba(0xf4f5f7e6)
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn frost() -> Rgba {
-    // No compositor backdrop requested (`WindowBackgroundAppearance::Opaque`).
-    if crate::ui::code_theme::is_dark() {
-        rgb(0x1d2027)
-    } else {
-        rgb(0xf4f5f7)
-    }
-}
-
-/// Columns that sit directly on the frosted desk: the workspace sidebar, the
-/// Diff file tree, the stage between islands. Clear wherever [`frost`] is
-/// translucent — see its note on compounding.
+/// Columns that sit directly on the frosted desk, such as the Diff file tree
+/// and stage between islands. The workspace sidebar uses the semantic
+/// `surface.sidebar_backing` role because its labels need a stable backdrop.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn sidebar() -> Rgba {
     // Columns on the frosted desk stay clear; in dark the desk is already
@@ -425,5 +520,138 @@ mod inset_tests {
     fn left_island_inset_follows_the_rail() {
         assert_eq!(left_island_inset(true), 0.);
         assert_eq!(left_island_inset(false), CHANGES_INSET);
+    }
+}
+
+#[cfg(test)]
+mod software_palette_tests {
+    use super::*;
+
+    fn composite(foreground: Rgba, background: Rgba) -> Rgba {
+        let a = foreground.a;
+        Rgba {
+            r: foreground.r * a + background.r * (1. - a),
+            g: foreground.g * a + background.g * (1. - a),
+            b: foreground.b * a + background.b * (1. - a),
+            a: 1.,
+        }
+    }
+
+    fn luminance(color: Rgba) -> f32 {
+        let linear = |channel: f32| {
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+    }
+
+    fn contrast(a: Rgba, b: Rgba) -> f32 {
+        let (light, dark) = if luminance(a) >= luminance(b) {
+            (luminance(a), luminance(b))
+        } else {
+            (luminance(b), luminance(a))
+        };
+        (light + 0.05) / (dark + 0.05)
+    }
+
+    #[test]
+    fn sidebar_text_survives_light_and_dark_wallpapers_and_row_states() {
+        for mode in [SoftwareThemeMode::Light, SoftwareThemeMode::Dark] {
+            let palette = resolve_software_palette(mode);
+            for wallpaper in [rgb(0x000000), rgb(0xffffff)] {
+                let window = composite(palette.surface.window_backing, wallpaper);
+                let backing = composite(palette.surface.sidebar_backing, window);
+                let states = [
+                    ("idle", backing),
+                    ("hover", palette.sidebar_row.hover),
+                    ("pressed", palette.sidebar_row.pressed),
+                    ("selected", palette.sidebar_row.selected),
+                    ("selected hover", palette.sidebar_row.selected_hover),
+                    ("selected pressed", palette.sidebar_row.selected_pressed),
+                ];
+                assert!(
+                    contrast(palette.text.section, backing) >= 4.5,
+                    "{mode:?} section label on {wallpaper:?}"
+                );
+                for (name, surface) in states {
+                    assert!(
+                        contrast(palette.text.primary, surface) >= 4.5,
+                        "{mode:?} primary text on {name}: {}",
+                        contrast(palette.text.primary, surface)
+                    );
+                    assert!(
+                        contrast(palette.text.secondary, surface) >= 3.,
+                        "{mode:?} icon on {name}: {}",
+                        contrast(palette.text.secondary, surface)
+                    );
+                }
+                for surface in [
+                    palette.sidebar_row.selected,
+                    palette.sidebar_row.selected_hover,
+                    palette.sidebar_row.selected_pressed,
+                ] {
+                    assert!(
+                        contrast(palette.sidebar_row.selection_indicator, surface) >= 3.,
+                        "{mode:?} selected row indicator: {}",
+                        contrast(palette.sidebar_row.selection_indicator, surface)
+                    );
+                }
+                for (name, indicator, surface) in [
+                    (
+                        "hover",
+                        palette.sidebar_row.hover_indicator,
+                        palette.sidebar_row.hover,
+                    ),
+                    (
+                        "pressed",
+                        palette.sidebar_row.pressed_indicator,
+                        palette.sidebar_row.pressed,
+                    ),
+                ] {
+                    assert!(
+                        contrast(indicator, surface) >= 3.,
+                        "{mode:?} {name} row indicator: {}",
+                        contrast(indicator, surface)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sidebar_row_states_have_distinct_fills() {
+        for mode in [SoftwareThemeMode::Light, SoftwareThemeMode::Dark] {
+            let rows = resolve_software_palette(mode).sidebar_row;
+            let colors = [
+                rows.hover,
+                rows.pressed,
+                rows.selected,
+                rows.selected_hover,
+                rows.selected_pressed,
+            ];
+            for (index, color) in colors.iter().enumerate() {
+                assert!(colors[index + 1..].iter().all(|other| color != other));
+            }
+        }
+    }
+
+    #[test]
+    fn selected_row_indicator_grows_on_hover_and_press_without_moving_content() {
+        let widths = [
+            SIDEBAR_ROW_INDICATOR_IDLE_WIDTH,
+            SIDEBAR_ROW_INDICATOR_HOVER_WIDTH,
+            SIDEBAR_ROW_INDICATOR_PRESSED_WIDTH,
+        ];
+        assert_eq!(widths, [2., 4., 6.]);
+        for pair in widths.windows(2) {
+            assert!(pair[1] - pair[0] >= 2.);
+        }
+        for width in widths {
+            assert!(width <= SIDEBAR_ROW_PAD_X);
+            assert_eq!(width + (SIDEBAR_ROW_PAD_X - width), SIDEBAR_ROW_PAD_X);
+        }
     }
 }

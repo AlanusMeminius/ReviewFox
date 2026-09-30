@@ -1338,6 +1338,7 @@ fn render_sidebar(
     width: gpui::Pixels,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let palette = theme::software_palette();
     let active_path = match &view.state {
         MainState::Ready(loaded) => Some(loaded.repository().path().to_path_buf()),
         MainState::Empty | MainState::Error(_) => None,
@@ -1370,7 +1371,7 @@ fn render_sidebar(
         .flex()
         .flex_col()
         .overflow_hidden()
-        .bg(theme::sidebar())
+        .bg(palette.surface.sidebar_backing)
         .child({
             let (scroll, sb) = scrollbar::vertical("sidebar-repos-sb", cx);
             scrollbar::overlay_flex(
@@ -1438,11 +1439,17 @@ fn sidebar_nav_row(
     selected: bool,
     cx: &App,
 ) -> gpui::Stateful<Div> {
+    let palette = theme::software_palette();
     div()
         .id(id)
         .w_full()
         .h(px(theme::SIDEBAR_ROW_HEIGHT))
-        .px(px(theme::SIDEBAR_ROW_PAD_X))
+        .pl(px(
+            theme::SIDEBAR_ROW_PAD_X - theme::SIDEBAR_ROW_INDICATOR_IDLE_WIDTH
+        ))
+        .pr(px(theme::SIDEBAR_ROW_PAD_X))
+        .border_l(px(theme::SIDEBAR_ROW_INDICATOR_IDLE_WIDTH))
+        .border_color(palette.sidebar_row.idle_indicator)
         .rounded(px(theme::SIDEBAR_ROW_RADIUS))
         .min_w(px(0.))
         .overflow_hidden()
@@ -1450,17 +1457,40 @@ fn sidebar_nav_row(
         .items_center()
         .gap(px(theme::SIDEBAR_ICON_LABEL_GAP))
         .cursor_pointer()
-        .when(selected, |d| d.bg(theme::sidebar_row_selected()))
+        .when(selected, |d| {
+            d.bg(palette.sidebar_row.selected)
+                .border_color(palette.sidebar_row.selection_indicator)
+                .hover(|d| {
+                    d.bg(palette.sidebar_row.selected_hover)
+                        .border_l(px(theme::SIDEBAR_ROW_INDICATOR_HOVER_WIDTH))
+                        .pl(px(
+                            theme::SIDEBAR_ROW_PAD_X - theme::SIDEBAR_ROW_INDICATOR_HOVER_WIDTH
+                        ))
+                })
+                .active(|d| {
+                    d.bg(palette.sidebar_row.selected_pressed)
+                        .border_l(px(theme::SIDEBAR_ROW_INDICATOR_PRESSED_WIDTH))
+                        .pl(px(
+                            theme::SIDEBAR_ROW_PAD_X - theme::SIDEBAR_ROW_INDICATOR_PRESSED_WIDTH
+                        ))
+                })
+        })
         .when(!selected, |d| {
-            d.hover(|d| d.bg(theme::sidebar_row_hover()))
-                .active(|d| d.bg(theme::sidebar_row_selected()))
+            d.hover(|d| {
+                d.bg(palette.sidebar_row.hover)
+                    .border_color(palette.sidebar_row.hover_indicator)
+            })
+            .active(|d| {
+                d.bg(palette.sidebar_row.pressed)
+                    .border_color(palette.sidebar_row.pressed_indicator)
+            })
         })
         .child(
             svg()
                 .size(theme::ICON_SIZE)
                 .flex_none()
                 .path(icon)
-                .text_color(theme::muted()),
+                .text_color(palette.text.secondary),
         )
         .child(
             div()
@@ -1469,7 +1499,7 @@ fn sidebar_nav_row(
                 .text_ellipsis()
                 .whitespace_nowrap()
                 .ui_label_size(13., cx)
-                .text_color(theme::text())
+                .text_color(palette.text.primary)
                 .child(label.into()),
         )
 }
@@ -1482,7 +1512,7 @@ fn sidebar_section_header(label: &'static str, extra_top: bool, cx: &App) -> imp
         .flex()
         .items_end()
         .ui_text_size(11., cx)
-        .text_color(theme::faint())
+        .text_color(theme::software_palette().text.section)
         .child(label)
 }
 

@@ -81,7 +81,7 @@ The user-chosen family and size for code: Diff text, Diff line numbers and monos
 _Avoid_: mono font, buffer font, editor font, diff font (as a separate setting)
 
 **Software Theme**:
-The light or dark appearance of the application chrome: sidebar, settings, and the window material.
+The light or dark appearance of the application UI: its surfaces, labels, fields, controls, scrollbars, and window material. Independent of the Code Theme selected for Diff.
 _Avoid_: dark mode (as a name for code colors), Code Theme
 
 **Code Theme**:
