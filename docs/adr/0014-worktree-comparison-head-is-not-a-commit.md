@@ -1,4 +1,4 @@
-Status: naming and the label suffix superseded by [ADR-0015](./0015-uncommitted-is-the-third-entry-kind.md). The behavior below stands; "Worktree" means Uncommitted, and the label suffix is `uncommitted`.
+Status: naming and the label suffix superseded by [ADR-0016](./0016-uncommitted-is-the-third-entry-kind.md). The behavior below stands; "Worktree" means Uncommitted, and the label suffix is `uncommitted`.
 
 # Worktree Comparison head is not a commit
 

@@ -44,7 +44,7 @@ fn oid_to_git(oid: Oid) -> git2::Oid {
 
 const COMMIT_LIST_LIMIT: usize = 200;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitInfo {
     pub oid: Oid,
     pub summary: String,
@@ -426,31 +426,40 @@ fn run_fetch(mut cmd: std::process::Command) -> Result<()> {
     )))
 }
 
+/// Forge commit metadata used to label a commit that is already in the local object store.
+#[derive(Clone, Debug)]
+pub struct MrCommitMeta {
+    pub id: String,
+    pub title: String,
+    pub author_name: String,
+    pub authored_date: String,
+}
+
 /// Build CommitInfo rows from forge commit metadata after objects exist locally.
 /// Prefers API title/author for list parity with GitLab; uses local author time when present.
 pub fn commit_infos_from_mr_specs(
     repo_path: &Path,
-    specs: &[(String, String, String, String)],
+    specs: &[MrCommitMeta],
 ) -> Result<Vec<CommitInfo>> {
     let repo = git2::Repository::open(repo_path).map_err(map_git)?;
     let mut out = Vec::with_capacity(specs.len());
-    for (id, title, author_name, authored_date) in specs {
-        let git_oid = git2::Oid::from_str(id.trim()).map_err(|e| err(e.to_string()))?;
+    for spec in specs {
+        let git_oid = git2::Oid::from_str(spec.id.trim()).map_err(|e| err(e.to_string()))?;
         let commit = repo.find_commit(git_oid).map_err(|e| {
             err(format!(
                 "commit {} not in local repository after fetch: {e}",
-                short_sha_str(id)
+                short_sha_str(&spec.id)
             ))
         })?;
         let mut info = commit_info_from(&commit);
-        if !title.trim().is_empty() {
-            info.summary = title.clone();
+        if !spec.title.trim().is_empty() {
+            info.summary = spec.title.clone();
         }
-        if !author_name.trim().is_empty() {
-            info.author = author_name.clone();
+        if !spec.author_name.trim().is_empty() {
+            info.author = spec.author_name.clone();
         }
-        if info.time_label.is_empty() && !authored_date.is_empty() {
-            info.time_label = authored_date.chars().take(10).collect();
+        if info.time_label.is_empty() && !spec.authored_date.is_empty() {
+            info.time_label = spec.authored_date.chars().take(10).collect();
         }
         out.push(info);
     }

@@ -29,7 +29,7 @@ pub struct DiffReopen {
     pub head_oid: String,
     pub selected_path: String,
     /// Uncommitted Comparison (ADR-0014). Absent in older geometry files.
-    /// Previous files use the key `worktree` (ADR-0015).
+    /// Previous files use the key `worktree` (ADR-0016).
     #[serde(default, alias = "worktree")]
     pub uncommitted: bool,
 }
