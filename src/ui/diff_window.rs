@@ -3,7 +3,7 @@ use gpui::{
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent,
     ParentElement, Render, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
     Subscription, Task, Timer, WeakEntity, Window, WindowControlArea, actions, canvas, div,
-    ease_out_quint, prelude::*, px,
+    ease_out_quint, prelude::*, px, svg,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -109,6 +109,10 @@ pub struct DiffView {
     collapsed_dirs: HashSet<String>,
     /// Reset collapsed_dirs when this no longer matches current ChangedPath list.
     tree_path_fingerprint: Vec<String>,
+    /// Sidebar path filter. Empty shows every changed file. Mirrored from [`Self::tree_filter`].
+    tree_query: String,
+    tree_filter: Entity<TextField>,
+    _tree_filter_sub: Subscription,
     pane: Entity<DualPane>,
     _pane_events: Subscription,
     /// Cached view that renders the shell; created on the first render.
@@ -222,6 +226,23 @@ impl DiffView {
                 },
             ),
         ];
+        let tree_filter = cx.new(|cx| {
+            TextField::new("search", false, cx).with_style(TextFieldStyle::Search)
+        });
+        let tree_filter_sub = cx.observe(&tree_filter, |this, field, cx| {
+            let q = field.read(cx).content().to_string();
+            if q == this.tree_query {
+                return;
+            }
+            // Only the empty → text step opens matching dirs. A collapse during
+            // the same query stays until the field is cleared.
+            let was_empty = this.tree_query.trim().is_empty();
+            this.tree_query = q;
+            if was_empty {
+                this.expand_dirs_for_tree_query();
+            }
+            cx.notify();
+        });
         let draft_field = cx.new(|cx| {
             TextField::new("Write a comment…", false, cx).with_style(TextFieldStyle::Draft)
         });
@@ -251,6 +272,9 @@ impl DiffView {
             export_status: None,
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
+            tree_query: String::new(),
+            tree_filter,
+            _tree_filter_sub: tree_filter_sub,
             pane,
             _pane_events: pane_events,
             shell: None,
@@ -509,35 +533,30 @@ impl DiffView {
         self.with_pane(cx, |pane, cx| pane.jump_hunk(dir, cx));
     }
 
-    /// Selected path's position in tree order, as `(index, total)`.
-    fn file_position(&self) -> (usize, usize) {
+    /// Open file's place in the nav order: `(Some(index), total)` when it is in
+    /// the list, `(None, total)` when a filter has excluded it. Empty query uses
+    /// every changed file. Collapse does not affect this list.
+    fn file_position(&self) -> (Option<usize>, usize) {
         let Some(snap) = &self.snapshot else {
-            return (0, 0);
+            return (None, 0);
         };
-        let order = file_tree::file_order(&snap.changed_paths);
-        let index = order
-            .iter()
-            .position(|p| *p == snap.selected_path)
-            .unwrap_or(0);
+        let order = file_tree::file_order_query(&snap.changed_paths, &self.tree_query);
+        let index = order.iter().position(|p| *p == snap.selected_path);
         (index, order.len())
     }
 
-    /// Steps to the neighbouring file in tree order; stops at either end.
+    /// Steps to the neighbouring file in nav order. Stops at either end.
+    /// An open file outside the list moves to the first match forward, or the last backward.
     fn jump_file(&mut self, dir: i32, cx: &mut Context<Self>) {
         let Some(snap) = &self.snapshot else {
             return;
         };
-        let order = file_tree::file_order(&snap.changed_paths);
-        let (index, _) = self.file_position();
-        let target = if dir < 0 {
-            index.checked_sub(1)
-        } else {
-            Some(index + 1)
+        let order = file_tree::file_order_query(&snap.changed_paths, &self.tree_query);
+        let Some(path) = file_tree::step_file(&order, &snap.selected_path, dir) else {
+            return;
         };
-        if let Some(path) = target.and_then(|i| order.get(i).cloned()) {
-            self.select_path(path, cx);
-            cx.notify();
-        }
+        self.select_path(path, cx);
+        cx.notify();
     }
 
     fn jump_to_search_match(&mut self, m: SearchMatch, cx: &mut Context<Self>) {
@@ -895,6 +914,34 @@ impl DiffView {
         })
     }
 
+    fn expand_dirs_for_tree_query(&mut self) {
+        if self.tree_query.trim().is_empty() {
+            return;
+        }
+        let Some(paths) = self.snapshot.as_ref().map(|s| s.changed_paths.clone()) else {
+            return;
+        };
+        self.collapsed_dirs.retain(|dir| {
+            !paths.iter().any(|p| {
+                file_tree::path_matches_query(&p.path, &self.tree_query)
+                    && (p.path == *dir || p.path.starts_with(&format!("{dir}/")))
+            })
+        });
+    }
+
+    fn collapse_all_dirs(&mut self) {
+        let Some(paths) = self.snapshot.as_ref().map(|s| s.changed_paths.clone()) else {
+            return;
+        };
+        self.collapsed_dirs = file_tree::flatten(&paths, &HashSet::new())
+            .into_iter()
+            .filter_map(|row| match row {
+                TreeRow::Dir { path, .. } => Some(path),
+                TreeRow::File { .. } => None,
+            })
+            .collect();
+    }
+
     fn sync_collapsed_dirs(&mut self) {
         let next = self
             .snapshot
@@ -1223,7 +1270,7 @@ impl DiffView {
                     .min_h(px(0.))
                     .flex()
                     .overflow_hidden()
-                    .child(render_tree_pane(self, tree_w, cx))
+                    .child(render_tree_pane(self, tree_w, window, cx))
                     .when(show_tree_split, |d| {
                         d.child(splitter::handle(
                             "diff-tree-resize-handle",
@@ -1623,6 +1670,7 @@ fn render_titlebar(
 fn render_tree_pane(
     view: &DiffView,
     width: gpui::Pixels,
+    window: &Window,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
     let mono = appearance::code_font(cx);
@@ -1636,7 +1684,12 @@ fn render_tree_pane(
         .as_ref()
         .map(|s| s.selected_path.clone())
         .unwrap_or_default();
-    let rows = file_tree::flatten(&paths, &view.collapsed_dirs);
+    let rows = file_tree::flatten_query(&paths, &view.collapsed_dirs, &view.tree_query);
+    let filter_focused = view
+        .tree_filter
+        .read(cx)
+        .focus_handle(cx)
+        .is_focused(window);
 
     div()
         .id("diff-tree")
@@ -1647,8 +1700,109 @@ fn render_tree_pane(
         .flex_col()
         .overflow_hidden()
         // A clear column straight on the frosted desk, not an island - same role as
-        // the main window's workspace sidebar. Its chrome lives in `#diff-titlebar`.
+        // the main window's workspace sidebar. Filter and fold sit at the top;
+        // the titlebar still owns the tree toggle.
         .bg(theme::sidebar())
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_2()
+                .pt_1()
+                .child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.))
+                        .h(px(theme::FIND_FIELD_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(if filter_focused {
+                            theme::border_focused()
+                        } else {
+                            theme::line()
+                        })
+                        .bg(theme::sidebar_row_selected())
+                        .child(
+                            svg()
+                                .ml_2()
+                                .size(theme::ICON_SIZE_SM)
+                                .flex_none()
+                                .path("search.svg")
+                                .text_color(theme::faint()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .h_full()
+                                .child(view.tree_filter.clone()),
+                        )
+                        .when(!view.tree_query.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .id("diff-tree-filter-clear")
+                                    .mr_1()
+                                    .size(px(18.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(4.))
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(theme::hover()))
+                                    .tooltip(Tooltip::text("Clear", None))
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                                        window.prevent_default();
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.tree_filter.update(cx, |field, cx| {
+                                            field.set_content("", cx);
+                                        });
+                                        let handle = this.tree_filter.read(cx).focus_handle(cx);
+                                        window.focus(&handle);
+                                    }))
+                                    .child(
+                                        svg()
+                                            .size(px(12.))
+                                            .flex_none()
+                                            .path("close.svg")
+                                            .text_color(theme::faint()),
+                                    ),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_1()
+                        .child(
+                            IconButton::new(
+                                "diff-tree-collapse",
+                                "fold_vertical.svg",
+                                "Collapse All",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.collapse_all_dirs();
+                                cx.notify();
+                            })),
+                        )
+                        .child(
+                            IconButton::new(
+                                "diff-tree-expand",
+                                "unfold_vertical.svg",
+                                "Expand All",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.collapsed_dirs.clear();
+                                cx.notify();
+                            })),
+                        ),
+                ),
+        )
         .child({
             let (scroll, sb) = scrollbar::vertical("diff-tree-sb", cx);
             let pane_width = f32::from(width);
@@ -2350,10 +2504,18 @@ const NAV_BUTTON_RADIUS: f32 = 5.;
 /// Sized to `TOGGLE_SIZE` so it sits in the toolbar like any other button.
 fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     let (index, total) = view.file_position();
-    let file = if total == 0 {
-        "—".to_string()
-    } else {
-        format!("{}/{total}", index + 1)
+    let file = match index {
+        Some(i) => format!("{}/{total}", i + 1),
+        None if total == 0 => "—".to_string(),
+        None => format!("—/{total}"),
+    };
+    let prev_file = match index {
+        Some(i) => i > 0,
+        None => total > 0,
+    };
+    let next_file = match index {
+        Some(i) => i + 1 < total,
+        None => total > 0,
     };
     let hunk_count = view.pane.read(cx).hunk_count().unwrap_or(0);
     let hunk = if hunk_count == 0 {
@@ -2367,7 +2529,7 @@ fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoE
             "chevrons_left.svg",
             "Previous File",
             Some("{".into()),
-            index > 0,
+            prev_file,
             false,
             cx.listener(|this, _, _, cx| this.jump_file(-1, cx)),
         ))
@@ -2409,7 +2571,7 @@ fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoE
             "chevrons_right.svg",
             "Next File",
             Some("}".into()),
-            index + 1 < total,
+            next_file,
             false,
             cx.listener(|this, _, _, cx| this.jump_file(1, cx)),
         ))
