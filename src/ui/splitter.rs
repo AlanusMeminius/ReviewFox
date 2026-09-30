@@ -170,7 +170,7 @@ pub fn clamp_files_width(requested: f32, available: f32, sidebar_width: f32) -> 
         0.
     };
     let stage = (available - sidebar_width - rail).max(0.);
-    let left_inset = if rail_open { 0. } else { theme::CHANGES_INSET };
+    let left_inset = theme::left_island_inset(rail_open);
     let clear = left_inset + theme::CHANGES_INSET + theme::CHANGES_SHADOW_GAP;
     let maximum = MAX_FILES_WIDTH.min((stage - MIN_COMMITS_WIDTH - clear).max(MIN_FILES_WIDTH));
     requested.clamp(MIN_FILES_WIDTH, maximum)

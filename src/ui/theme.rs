@@ -46,6 +46,17 @@ pub const CHANGES_INSET: f32 = 12.;
 pub const CHANGES_TOP_INSET: f32 = 6.;
 /// Gap between neighboring floating capsules — same as the edge inset.
 pub const CHANGES_SHADOW_GAP: f32 = CHANGES_INSET;
+
+/// Left inset of a sidebar-adjacent island, measured inside the stage.
+/// The titlebar pills use the same value, so the island stays under the kind track.
+///
+/// Rail open: [`CHANGES_SHADOW_GAP`] is the seam outside the stage, so the inset
+/// is 0. Rail collapsed: the parked handle occupies that gutter inside the stage,
+/// so the inset is [`CHANGES_INSET`].
+pub fn left_island_inset(rail_open: bool) -> f32 {
+    if rail_open { 0. } else { CHANGES_INSET }
+}
+
 /// Corner radius of floating capsules.
 pub const CHANGES_RADIUS: f32 = 12.;
 
@@ -518,5 +529,16 @@ mod syntax_palette_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod inset_tests {
+    use super::*;
+
+    #[test]
+    fn left_island_inset_follows_the_rail() {
+        assert_eq!(left_island_inset(true), 0.);
+        assert_eq!(left_island_inset(false), CHANGES_INSET);
     }
 }

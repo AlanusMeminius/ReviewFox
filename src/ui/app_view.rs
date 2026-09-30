@@ -1876,10 +1876,8 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                 // Balances the pills against the island below; see `titlebar-leading`.
                 .pt(px(theme::CHANGES_TOP_INSET))
                 .gap(px(theme::CHROME_GAP))
-                // Sidebar open: the rail seam is the left gap, so the pills start
-                // on the stage edge and share it with the island. Collapsed: the
-                // island's own left inset, measured from the stage edge.
-                .when(view.repos_collapsed, |d| d.pl(px(theme::CHANGES_INSET)))
+                // Same left edge as the island below. See `theme::left_island_inset`.
+                .pl(px(theme::left_island_inset(!view.repos_collapsed)))
                 .child(entry_chrome)
                 .child(
                     div()
@@ -2135,9 +2133,8 @@ fn render_commits(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement
         .min_h(px(0.))
         .flex()
         .flex_col()
-        // Sidebar open: the rail seam is this gap, so padding here would double it.
-        // Collapsed: the island still needs the window-edge inset.
-        .when(view.repos_collapsed, |d| d.pl(inset))
+        // Seam is outside the stage while the rail is open; don't pad it twice.
+        .pl(px(theme::left_island_inset(!view.repos_collapsed)))
         // No right padding: `changes_float_clearance` already ends this column one
         // gap short of the Changes island, so padding here would count it twice.
         .pt(px(theme::CHANGES_TOP_INSET))
@@ -2900,8 +2897,8 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
             .and_then(|loaded| head_commit_meta(loaded, mr_diff))
     };
     let inset = px(theme::CHANGES_INSET);
-    // Commit island is gone, so there is no gap and no splitter. Dock left at the
-    // same inset the Commit island used.
+    // Commit island is gone, so there is no Commit|Changes gap and no splitter.
+    // Left edge is the Commit island's, which is also the kind pills' left edge.
     let slot_w = if worktree {
         view.files_width
     } else {
@@ -2916,7 +2913,9 @@ fn render_files(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
         .top(px(theme::CHANGES_TOP_INSET))
         .bottom(inset)
         .w(px(slot_w))
-        .when(worktree, |d| d.left(inset))
+        .when(worktree, |d| {
+            d.left(px(theme::left_island_inset(!view.repos_collapsed)))
+        })
         .when(!worktree, |d| d.right(inset))
         .flex()
         .flex_row()
