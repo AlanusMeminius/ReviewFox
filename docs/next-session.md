@@ -76,5 +76,5 @@ Smoke: `cargo test --bin reviewfox`
 - GitLab MR = read-only Entry (`diff_refs` → Comparison); see ADR-0006
 - Diff stays a separate window with its own snapshot
 - Default Export is narrative snippets, not the full patch
-- Main Changes tree is browse-only; enter Diff via **Open Diff**
-- Diff keeps its own snapshot; changing Comparison on main does not refresh Diff until **Open Diff** again
+- Double-click a file in the main Changes tree to open its Diff; single-click leaves it unchanged, and directory rows only toggle expansion
+- Diff keeps its own snapshot; changing Comparison on main does not refresh Diff until **Open Diff** or a file double-click
