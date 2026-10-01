@@ -1,7 +1,7 @@
 //! git2 adapter: Repository / Comparison I/O → domain types. No UI chrome.
 
 use crate::domain::{
-    Alignment, AlignmentOp, ChangedPath, Comparison, LineSpan, Oid, PathStatus, Repository, Side,
+    Alignment, AlignmentOp, ChangedPath, Comparison, LineSpan, Oid, PathStatus, Repository,
     ViewOptions, split_lines,
 };
 use crate::workspace_store::{self, WorkspaceEntry};
@@ -795,25 +795,6 @@ pub fn load_uncommitted(repository: &Repository) -> Result<UncommittedEntry> {
     })
 }
 
-/// Lines of the blob on `side` of `path` within the Comparison (1-based indexing for callers).
-pub fn side_lines(comparison: &Comparison, side: Side, path: &str) -> Result<Vec<String>> {
-    let repo = open_repo(comparison)?;
-    let bytes = if comparison.uncommitted && side == Side::Postimage {
-        uncommitted_bytes(&repo, path)?
-    } else {
-        let oid = match side {
-            Side::Preimage => comparison.base_oid,
-            Side::Postimage => Some(comparison.head_oid),
-        };
-        blob_text_at(&repo, oid, path)?.unwrap_or_default()
-    };
-    if is_binary(&bytes) {
-        return Err(err("binary file"));
-    }
-    let text = String::from_utf8_lossy(&bytes);
-    Ok(split_lines(&text).into_iter().map(str::to_string).collect())
-}
-
 /// Blob bytes of `path` at `commit_oid`; `None` commit = empty tree (no blob).
 fn blob_text_at(
     repo: &git2::Repository,
@@ -987,6 +968,15 @@ fn alignment_from_diff_ops(ops: &[DiffOp]) -> Alignment {
         }
     }
     Alignment { ops: out }
+}
+
+/// Text-exact Alignment for Export, including CRLF and final-newline changes.
+/// Each token is one line including its terminator; Anchor line numbers stay unchanged.
+pub fn compute_exact_alignment(preimage_text: &str, postimage_text: &str) -> Alignment {
+    let old: Vec<_> = preimage_text.split_inclusive('\n').collect();
+    let new: Vec<_> = postimage_text.split_inclusive('\n').collect();
+    let diff = TextDiff::from_slices(&old, &new);
+    alignment_from_diff_ops(diff.ops())
 }
 
 pub fn compute_alignment(
@@ -1402,16 +1392,6 @@ mod tests {
             }
             other => panic!("expected text diff, got {other:?}"),
         }
-        assert!(
-            side_lines(&bb.comparison, Side::Preimage, "a.txt")
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            side_lines(&bb.comparison, Side::Postimage, "a.txt").unwrap(),
-            vec!["one".to_string()]
-        );
-
         // Rebuilding the same Comparison from its OIDs (Diff reopen path) works too.
         let reloaded = list_changed_paths_for(&bb.comparison).expect("reload");
         assert_eq!(reloaded, bb.changed_paths);

@@ -1046,6 +1046,15 @@ impl DiffView {
         cx: &mut Context<Self>,
     ) {
         let view = self.open_review.begin_draft(side, start, count);
+        if let Some(FileDiff::Text {
+            preimage_text,
+            postimage_text,
+            ..
+        }) = self.snapshot.as_ref().map(|snapshot| &snapshot.file)
+        {
+            self.open_review
+                .capture_draft_context(preimage_text.clone(), postimage_text.clone());
+        }
         self.open_dock(view, String::new(), window, cx);
     }
 
@@ -1247,7 +1256,7 @@ impl DiffView {
     }
 
     fn export_to_clipboard(&mut self, cx: &mut Context<Self>) {
-        let text = export::export_review(self.open_review.review());
+        let text = export::export_review(self.open_review.review(), self.open_review.contexts());
         if text.is_empty() {
             self.export_status = Some("No DraftComments to export".into());
         } else {

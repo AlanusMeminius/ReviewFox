@@ -37,12 +37,12 @@ A user's ongoing work against one Comparison, holding draft comments and survivi
 _Avoid_: session (unless talking implementation), review result, review content (use Export), live-linked review
 
 **DraftComment**:
-A locally stored comment attached to a position within a Review; not published to any remote (MR path stays read-only toward the forge).
+A locally stored comment attached through an Anchor to a file or a selected line range within one Comparison, rather than to an entire change block. It is not published to any remote (MR path stays read-only toward the forge).
 _Avoid_: note, annotation, discussion, published comment
 
 **Export**:
-A plain-text projection of a Review for the clipboard; default form is narrative snippets only where DraftComments attach (path, sides, line numbers, context, comment body), not the full patch.
-_Avoid_: review content, review result, report, unified diff (as the default Export)
+A plain-text projection of a Review for the clipboard, primarily for a coding agent to read. Each DraftComment's target (side and selected line range) and body are distinct from its related change context: unified diff excerpts may include both sides without extending the Anchor, and comments on the same block share one excerpt rather than repeating it. Context reflects the file versions the author saw when creating the comment, including actual whitespace changes, rather than later on-disk edits. It is not the full patch.
+_Avoid_: review content, review result, report, full patch (as the default Export)
 
 **SuggestedAnchor**:
 A candidate re-binding offered for an UnresolvedAnchor when exactly one fuzzy match exists; never applied until the user confirms.

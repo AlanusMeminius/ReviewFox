@@ -2,6 +2,8 @@
 //! The dock is ephemeral and not a domain term. No GPUI.
 
 use crate::domain::{Anchor, Comparison, DraftComment, LineSpan, Review, Side};
+use crate::export::{CommentContext, ReviewContexts};
+use std::sync::Arc;
 
 /// What one operation left on the current path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +31,8 @@ pub struct OpenReview {
     review: Review,
     path: String,
     dock: Option<LineDock>,
+    contexts: ReviewContexts,
+    draft_context: Option<Arc<CommentContext>>,
 }
 
 impl OpenReview {
@@ -37,11 +41,36 @@ impl OpenReview {
             review: Review::new(comparison),
             path: path.into(),
             dock: None,
+            contexts: ReviewContexts::new(),
+            draft_context: None,
         }
     }
 
     pub fn review(&self) -> &Review {
         &self.review
+    }
+
+    pub fn contexts(&self) -> &ReviewContexts {
+        &self.contexts
+    }
+
+    /// Freeze the text the author selected, not whatever is on disk at Copy time.
+    pub fn capture_draft_context(&mut self, preimage: Arc<str>, postimage: Arc<str>) {
+        if self.dock.is_none_or(|dock| dock.editing.is_some()) {
+            return;
+        }
+        let context = CommentContext {
+            preimage,
+            postimage,
+        };
+        // Comments created against the same file text share the underlying snapshot.
+        self.draft_context = Some(
+            self.contexts
+                .values()
+                .find(|saved| saved.as_ref() == &context)
+                .cloned()
+                .unwrap_or_else(|| Arc::new(context)),
+        );
     }
 
     pub fn dock(&self) -> Option<LineDock> {
@@ -61,6 +90,8 @@ impl OpenReview {
             self.review = Review::new(comparison);
             self.path = path;
             self.dock = None;
+            self.contexts.clear();
+            self.draft_context = None;
         } else {
             self.set_path(path);
         }
@@ -75,6 +106,7 @@ impl OpenReview {
 
     /// Open the dock for a new line comment. `side` is the caller's selection.
     pub fn begin_draft(&mut self, side: Side, start: u32, count: u32) -> PathView {
+        self.draft_context = None;
         self.dock = Some(LineDock {
             side,
             span: LineSpan { start, count },
@@ -98,6 +130,7 @@ impl OpenReview {
         let Some((body, side, span)) = hit else {
             return self.snapshot(None);
         };
+        self.draft_context = None;
         self.dock = Some(LineDock {
             side,
             span,
@@ -112,6 +145,7 @@ impl OpenReview {
         let Some(dock) = self.dock.take() else {
             return self.snapshot(None);
         };
+        let context = self.draft_context.take();
         let body = body.trim();
         if body.is_empty() {
             return self.snapshot(None);
@@ -121,13 +155,16 @@ impl OpenReview {
                 self.review.update_comment_body(id, body);
             }
             None => {
-                self.review.add_line_span_comment(
+                let comment = self.review.add_line_span_comment(
                     self.path.clone(),
                     dock.side,
                     dock.span.start,
                     dock.span.count,
                     body,
                 );
+                if let Some(context) = context {
+                    self.contexts.insert(comment.id, context);
+                }
             }
         }
         self.snapshot(None)
@@ -136,14 +173,17 @@ impl OpenReview {
     /// Clear the dock. DraftComments stay.
     pub fn cancel(&mut self) -> PathView {
         self.dock = None;
+        self.draft_context = None;
         self.snapshot(None)
     }
 
     /// Remove that DraftComment. Ids are not reused. Editing that id clears the dock.
     pub fn delete(&mut self, id: u64) -> PathView {
         self.review.delete_comment(id);
+        self.contexts.remove(&id);
         if self.dock.is_some_and(|d| d.editing == Some(id)) {
             self.dock = None;
+            self.draft_context = None;
         }
         self.snapshot(None)
     }
@@ -152,6 +192,7 @@ impl OpenReview {
         if self.path != path {
             self.path = path;
             self.dock = None;
+            self.draft_context = None;
         }
     }
 
@@ -452,5 +493,108 @@ mod tests {
                 line(2, "a.rs", Side::Postimage, 8, 1, "added"),
             ]
         );
+    }
+
+    #[test]
+    fn context_survives_navigation_and_body_edit_but_not_delete_or_comparison_change() {
+        let mut open = OpenReview::new(uncommitted(4), "a.rs");
+        open.begin_draft(Side::Postimage, 1, 1);
+        open.capture_draft_context("old\n".into(), "selected\n".into());
+        open.commit("first");
+        let saved = open.contexts().get(&1).unwrap().clone();
+        open.select_path("b.rs");
+        open.select_path("a.rs");
+        open.begin_edit(1);
+        open.capture_draft_context("old\n".into(), "changed since selection\n".into());
+        open.commit("edited");
+        assert!(Arc::ptr_eq(&saved, open.contexts().get(&1).unwrap()));
+        let text = crate::export::export_review(open.review(), open.contexts());
+        assert!(text.contains("+selected"));
+        assert!(text.contains("Body:\nedited"));
+        assert!(!text.contains("changed since selection"));
+
+        open.begin_draft(Side::Postimage, 1, 1);
+        open.capture_draft_context("old\n".into(), "selected\n".into());
+        open.commit("second");
+        assert!(Arc::ptr_eq(
+            open.contexts().get(&1).unwrap(),
+            open.contexts().get(&2).unwrap()
+        ));
+        open.delete(1);
+        assert!(!open.contexts().contains_key(&1));
+        open.show(uncommitted(5), "a.rs");
+        assert!(open.contexts().is_empty());
+    }
+
+    #[test]
+    fn cancelled_draft_does_not_supply_context_to_a_later_comment() {
+        let mut open = OpenReview::new(cmp(2), "a.rs");
+        open.begin_draft(Side::Postimage, 1, 1);
+        open.capture_draft_context("old\n".into(), "cancelled\n".into());
+        open.cancel();
+        open.begin_draft(Side::Postimage, 1, 1);
+        open.commit("no context");
+        assert!(open.contexts().is_empty());
+    }
+
+    #[test]
+    fn uncommitted_export_uses_loaded_text_after_file_is_changed_and_removed() {
+        use crate::domain::{PathStatus, ViewOptions};
+        use crate::git::{self, FileDiff};
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, "before\n").unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["add", "a.rs"],
+            vec!["commit", "--quiet", "-m", "base"],
+        ] {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::fs::write(&path, "selected\n").unwrap();
+        let repository = Repository::new(dir.path().to_path_buf());
+        let comparison = git::uncommitted_head(&repository).unwrap().comparison;
+        let FileDiff::Text {
+            preimage_text,
+            postimage_text,
+            ..
+        } = git::file_diff(
+            &comparison,
+            "a.rs",
+            PathStatus::Modify,
+            &ViewOptions::default(),
+        )
+        else {
+            panic!("expected text diff");
+        };
+        let mut open = OpenReview::new(comparison, "a.rs");
+        open.begin_draft(Side::Postimage, 1, 1);
+        open.capture_draft_context(preimage_text, postimage_text);
+        // A disk edit while the comment editor is open must not change its context.
+        std::fs::write(&path, "later\n").unwrap();
+        open.commit("review selected version");
+        open.select_path("another.rs");
+        std::fs::remove_file(&path).unwrap();
+        let text = crate::export::export_review(open.review(), open.contexts());
+        assert!(text.contains("-before\n+selected"));
+        assert!(!text.contains("later"));
+        assert!(!text.contains("Unavailable"));
     }
 }
