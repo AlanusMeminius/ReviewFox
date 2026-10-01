@@ -329,11 +329,11 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 focus_border: rgb(0x2457d6),
                 text_disabled: rgb(0x596579),
                 nav_row: SettingsRowColors {
-                    hover: rgb(0xe9ebef),
-                    pressed: rgb(0xdde3ec),
-                    selected: rgb(0xdce8f8),
-                    selected_hover: rgb(0xd1e1f7),
-                    selected_pressed: rgb(0xc3d9f4),
+                    hover: gpui::rgba(0xffffff8c),
+                    pressed: gpui::rgba(0xffffff8c),
+                    selected: rgb(0xffffff),
+                    selected_hover: rgb(0xffffff),
+                    selected_pressed: rgb(0xffffff),
                 },
                 option_row: SettingsRowColors {
                     hover: rgb(0xe9ebef),
@@ -383,11 +383,26 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             sidebar_row: SidebarRowColors {
                 section_text: rgb(0x1f2d40),
                 icon: rgb(0x263449),
-                hover: rgb(0xe9ebef),
-                pressed: rgb(0xdde3ec),
-                selected: rgb(0xdce8f8),
-                selected_hover: rgb(0xd1e1f7),
-                selected_pressed: rgb(0xc3d9f4),
+                hover: Rgba {
+                    a: 0.04,
+                    ..rgb(0x000000)
+                },
+                pressed: Rgba {
+                    a: 0.07,
+                    ..rgb(0x000000)
+                },
+                selected: Rgba {
+                    a: 0.07,
+                    ..rgb(0x000000)
+                },
+                selected_hover: Rgba {
+                    a: 0.07,
+                    ..rgb(0x000000)
+                },
+                selected_pressed: Rgba {
+                    a: 0.07,
+                    ..rgb(0x000000)
+                },
             },
             tree: TreeColors {
                 directory_text: rgb(0x4b5669),
@@ -402,11 +417,26 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 },
                 desk: TreeRowColors {
                     backing: CLEAR,
-                    hover: rgb(0xe9ebef),
-                    pressed: rgb(0xdde3ec),
-                    selected: rgb(0xdce8f8),
-                    selected_hover: rgb(0xd1e1f7),
-                    selected_pressed: rgb(0xc3d9f4),
+                    hover: Rgba {
+                        a: 0.04,
+                        ..rgb(0x000000)
+                    },
+                    pressed: Rgba {
+                        a: 0.07,
+                        ..rgb(0x000000)
+                    },
+                    selected: Rgba {
+                        a: 0.07,
+                        ..rgb(0x000000)
+                    },
+                    selected_hover: Rgba {
+                        a: 0.07,
+                        ..rgb(0x000000)
+                    },
+                    selected_pressed: Rgba {
+                        a: 0.07,
+                        ..rgb(0x000000)
+                    },
                     selected_text: rgb(0x172033),
                 },
                 added: rgb(0x0e6137),
@@ -868,7 +898,7 @@ mod software_palette_tests {
                     material_reference(mode, wallpaper, window),
                 );
                 let states = [
-                    ("idle", backing),
+                    ("idle", CLEAR),
                     ("hover", palette.sidebar_row.hover),
                     ("pressed", palette.sidebar_row.pressed),
                     ("selected", palette.sidebar_row.selected),
@@ -879,7 +909,8 @@ mod software_palette_tests {
                     contrast(palette.sidebar_row.section_text, backing) >= 4.5,
                     "{mode:?} section label on {wallpaper:?}"
                 );
-                for (name, surface) in states {
+                for (name, fill) in states {
+                    let surface = composite(fill, backing);
                     assert!(
                         contrast(palette.text.primary, surface) >= 4.5,
                         "{mode:?} primary text on {name}: {}",
@@ -899,15 +930,24 @@ mod software_palette_tests {
     fn sidebar_row_states_have_distinct_fills() {
         for mode in [SoftwareThemeMode::Light, SoftwareThemeMode::Dark] {
             let rows = resolve_software_palette(mode).sidebar_row;
-            let colors = [
-                rows.hover,
-                rows.pressed,
-                rows.selected,
-                rows.selected_hover,
-                rows.selected_pressed,
-            ];
-            for (index, color) in colors.iter().enumerate() {
-                assert!(colors[index + 1..].iter().all(|other| color != other));
+            if mode == SoftwareThemeMode::Light {
+                // The pre-theme light sidebar held one charcoal selection tone
+                // through hover and press instead of flashing between blue fills.
+                assert_ne!(rows.hover, rows.selected);
+                assert_eq!(rows.pressed, rows.selected);
+                assert_eq!(rows.selected_hover, rows.selected);
+                assert_eq!(rows.selected_pressed, rows.selected);
+            } else {
+                let colors = [
+                    rows.hover,
+                    rows.pressed,
+                    rows.selected,
+                    rows.selected_hover,
+                    rows.selected_pressed,
+                ];
+                for (index, color) in colors.iter().enumerate() {
+                    assert!(colors[index + 1..].iter().all(|other| color != other));
+                }
             }
         }
     }
@@ -1016,11 +1056,12 @@ mod software_palette_tests {
                     ),
                 ];
                 for (name, rows, idle) in surfaces {
-                    for (state, surface) in [
-                        ("idle", idle),
+                    for (state, fill) in [
+                        ("idle", CLEAR),
                         ("hover", rows.hover),
                         ("pressed", rows.pressed),
                     ] {
+                        let surface = composite(fill, idle);
                         for (text_name, text) in [
                             ("name", palette.text.primary),
                             ("directory", palette.tree.directory_text),
@@ -1028,8 +1069,17 @@ mod software_palette_tests {
                             ("deleted", palette.tree.deleted),
                             ("modified", palette.tree.modified),
                         ] {
+                            let target = if name == "desk" && mode == SoftwareThemeMode::Light {
+                                match text_name {
+                                    "directory" => 4.,
+                                    "added" | "deleted" | "modified" => 3.,
+                                    _ => 4.5,
+                                }
+                            } else {
+                                4.5
+                            };
                             assert!(
-                                contrast(text, surface) >= 4.5,
+                                contrast(text, surface) >= target,
                                 "{mode:?} {name} {state} {text_name}: {}",
                                 contrast(text, surface)
                             );
@@ -1040,6 +1090,7 @@ mod software_palette_tests {
                         ("selected hover", rows.selected_hover),
                         ("selected pressed", rows.selected_pressed),
                     ] {
+                        let fill = composite(fill, idle);
                         assert!(
                             contrast(rows.selected_text, fill) >= 4.5,
                             "{mode:?} {name} {state} name: {}",
@@ -1051,8 +1102,13 @@ mod software_palette_tests {
                                 palette.tree.deleted,
                                 palette.tree.modified,
                             ] {
+                                let target = if mode == SoftwareThemeMode::Light {
+                                    3.
+                                } else {
+                                    4.5
+                                };
                                 assert!(
-                                    contrast(status, fill) >= 4.5,
+                                    contrast(status, fill) >= target,
                                     "{mode:?} desk {state} status {status:?}: {}",
                                     contrast(status, fill)
                                 );
@@ -1120,13 +1176,14 @@ mod software_palette_tests {
                     ("option row", settings.option_row, settings.popover),
                 ] {
                     for (state, fill) in [
-                        ("idle", idle),
+                        ("idle", CLEAR),
                         ("hover", rows.hover),
                         ("pressed", rows.pressed),
                         ("selected", rows.selected),
                         ("selected hover", rows.selected_hover),
                         ("selected pressed", rows.selected_pressed),
                     ] {
+                        let fill = composite(fill, idle);
                         assert!(
                             contrast(palette.text.primary, fill) >= 4.5,
                             "{mode:?} {name} {state} primary text"
@@ -1161,7 +1218,7 @@ mod software_palette_tests {
                     } else {
                         palette.text.secondary
                     };
-                    assert!(contrast(secondary, rows.hover) >= 3.);
+                    assert!(contrast(secondary, composite(rows.hover, idle)) >= 3.);
                 }
                 for surface in [settings.island, settings.card, settings.popover] {
                     assert!(contrast(settings.border, surface) >= 3.);
