@@ -111,6 +111,7 @@ pub struct DiffView {
     open_review: OpenReview,
     publication_store: Option<PublicationStore>,
     publication_records: HashMap<u64, PublicationRecord>,
+    publication_protected: HashSet<u64>,
     publication_error: Option<String>,
     publishing: HashSet<(Comparison, ReviewOrigin, u64)>,
     export_status: Option<String>,
@@ -274,6 +275,11 @@ impl DiffView {
                 TextFieldEvent::Confirm => this.commit_draft(window, cx),
             },
         );
+        let publication_store = PublicationStore::application().ok();
+        let open_review = match &publication_store {
+            Some(store) => open_review.with_publication_store(store.clone()),
+            None => open_review,
+        };
         // Grow/shrink the bottom dock when Shift+Enter adds lines.
         let draft_observe = cx.observe(&draft_field, |_, _, cx| cx.notify());
         let shell = window_geometry_store::snapshot();
@@ -290,8 +296,9 @@ impl DiffView {
             comment_resize_state: Rc::new(ResizeState::with_drag_latch()),
             snapshot: Some(snapshot),
             open_review,
-            publication_store: PublicationStore::application().ok(),
+            publication_store,
             publication_records: HashMap::new(),
+            publication_protected: HashSet::new(),
             publication_error: None,
             publishing: HashSet::new(),
             export_status: None,
@@ -345,6 +352,10 @@ impl DiffView {
             self.publication_error = Some("Publication storage unavailable".into());
             return;
         };
+        match store.protected_comments(&self.open_review.review().comparison) {
+            Ok(protected) => self.publication_protected = protected,
+            Err(error) => self.publication_error = Some(format!("{error:#}")),
+        }
         for comment in &self.open_review.review().comments {
             match store.load(
                 &self.open_review.review().comparison,
@@ -363,11 +374,14 @@ impl DiffView {
     }
 
     fn publication_in_progress(&self, id: u64) -> bool {
-        self.publishing.contains(&(
-            self.open_review.review().comparison.clone(),
-            self.open_review.origin().clone(),
-            id,
-        ))
+        self.publishing.iter().any(|(comparison, _, comment)| {
+            comparison == &self.open_review.review().comparison && *comment == id
+        })
+    }
+    fn can_delete_comment(&self, id: u64) -> bool {
+        self.publication_error.is_none()
+            && !self.publication_in_progress(id)
+            && !self.publication_protected.contains(&id)
     }
 
     fn can_publish(&self, id: u64) -> bool {
@@ -419,10 +433,12 @@ impl DiffView {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.publishing.remove(&key);
+                if this.open_review.review().comparison == key.0 {
+                    this.reload_publications();
+                }
                 if this.open_review.review().comparison == key.0
                     && this.open_review.origin().same_target(&key.1)
                 {
-                    this.reload_publications();
                     match result {
                         Ok(record) => {
                             this.publication_records.insert(id, record);
@@ -1260,12 +1276,7 @@ impl DiffView {
     /// Immediate delete. Closes the dock if it was editing this id; clears the
     /// wash if it pointed at this comment's span.
     fn delete_comment(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if self.publication_in_progress(id)
-            || self
-                .publication_records
-                .get(&id)
-                .is_some_and(|record| !matches!(record.state, PublicationState::Failed(_)))
-        {
+        if !self.can_delete_comment(id) {
             return;
         }
         let clear_wash = self.comment_target(id).is_some_and(|(side, span)| {
@@ -2609,7 +2620,7 @@ fn render_comment_island(
                                             "trash.svg",
                                             "Delete DraftComment",
                                         )
-                                        .disabled(view.publication_in_progress(id) || view.publication_records.get(&id).is_some_and(|r| !matches!(r.state, PublicationState::Failed(_))))
+                                        .disabled(!view.can_delete_comment(id))
                                         .on_click(
                                             cx.listener(move |this, _, window, cx| {
                                                 cx.stop_propagation();
@@ -2629,6 +2640,7 @@ fn render_comment_island(
                                 if view.publication_in_progress(id) { "Publishing to GitLab…".into() }
                                 else if let Some(error) = &view.publication_error { error.clone() }
                                 else if let Some(record) = view.publication_records.get(&id) { record.state.label() }
+                                else if view.publication_protected.contains(&id) { "Published or awaiting confirmation on another MR".into() }
                                 else if let Err(reason) = view.open_review.origin().preparation_eligibility(&view.open_review.review().comparison) { reason.into() }
                                 else if !matches!(&c.anchor, Anchor::Line { span, .. } if span.count==1) { "Multiline publication unavailable".into() }
                                 else { "Local draft · publish explicitly".into() }

@@ -62,42 +62,23 @@ impl ReviewOrigin {
     }
     /// Only the complete, actually reviewed MR diff pair is publishable.
     pub fn eligibility(&self, comparison: &Comparison) -> Result<(), &'static str> {
-        match self {
-            Self::Local => Err("Local Review · publication unavailable"),
-            Self::GitLab {
-                base_url,
-                project,
-                iid,
-                base_sha,
-                start_sha,
-                head_sha,
-            } => {
-                if base_url.is_empty()
-                    || project.is_empty()
-                    || *iid == 0
-                    || base_sha.parse::<Oid>().is_err()
-                    || head_sha.parse::<Oid>().is_err()
-                    || start_sha
-                        .as_deref()
-                        .is_none_or(|sha| sha.parse::<Oid>().is_err())
-                {
-                    return Err("MR version information incomplete · publication unavailable");
-                }
-                if comparison.uncommitted
-                    || comparison.base_oid != base_sha.parse().ok()
-                    || Some(comparison.head_oid) != head_sha.parse().ok()
-                {
-                    return Err("MR commit subset · publication unavailable");
-                }
-                Ok(())
-            }
+        self.preparation_eligibility(comparison)?;
+        let Self::GitLab { start_sha, .. } = self else {
+            unreachable!()
+        };
+        if start_sha
+            .as_deref()
+            .is_none_or(|sha| sha.parse::<Oid>().is_err())
+        {
+            return Err("MR version information incomplete · publication unavailable");
         }
+        Ok(())
     }
 }
 
 use crate::domain::{DraftComment, Review};
 use crate::export::ReviewContexts;
-use crate::gitlab_publication::GitLabPublication;
+use crate::gitlab_publication::{GitLabDiffPosition, GitLabPublication};
 use anyhow::{Context, Result, bail};
 use gpui_http_client::HttpClient;
 use std::{path::PathBuf, sync::Arc};
@@ -132,20 +113,6 @@ impl Connection {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiffPosition {
-    pub position_type: String,
-    pub base_sha: String,
-    pub start_sha: String,
-    pub head_sha: String,
-    pub old_path: String,
-    pub new_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub old_line: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub new_line: Option<u32>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicationReceipt {
     pub discussion_id: String,
     pub note_id: u64,
@@ -172,7 +139,7 @@ pub struct PublicationRecord {
     pub operation_id: String,
     pub body: String,
     pub author_id: Option<u64>,
-    pub position: Option<DiffPosition>,
+    pub position: Option<GitLabDiffPosition>,
     pub state: PublicationState,
 }
 impl PublicationRecord {
@@ -184,7 +151,7 @@ impl PublicationRecord {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PublicationStore {
     directory: PathBuf,
 }
@@ -246,6 +213,41 @@ impl PublicationStore {
         }
         Ok(Some(saved.record))
     }
+    /// Any remote counterpart or uncertain create protects the shared local draft.
+    pub fn protected_comments(
+        &self,
+        comparison: &Comparison,
+    ) -> Result<std::collections::HashSet<u64>> {
+        let entries = match std::fs::read_dir(&self.directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Default::default());
+            }
+            Err(error) => return Err(error).context("Cannot inspect Publication storage"),
+        };
+        let mut protected = std::collections::HashSet::new();
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let saved: StoredPublication = serde_json::from_slice(&std::fs::read(&path)?)
+                .with_context(|| {
+                    format!("Unreadable Publication preserved at {}", path.display())
+                })?;
+            if saved.comparison != *comparison {
+                continue;
+            }
+            let record = self
+                .load(comparison, &saved.origin, saved.comment_id)?
+                .context("Publication disappeared while reading")?;
+            if !matches!(record.state, PublicationState::Failed(_)) {
+                protected.insert(saved.comment_id);
+            }
+        }
+        Ok(protected)
+    }
+
     pub fn save(
         &self,
         comparison: &Comparison,
@@ -508,8 +510,9 @@ mod tests {
     fn cancelling_a_sent_create_leaves_unknown_intent_for_reopen() {
         use futures::FutureExt;
         let directory = tempfile::tempdir().unwrap();
-        let open = drafted(directory.path(), Side::Postimage, 2);
+        let mut open = drafted(directory.path(), Side::Postimage, 2);
         let store = PublicationStore::new(directory.path().join("remote"));
+        open = open.with_publication_store(store.clone());
         let client = FakeHttpClient::create(|request| async move {
             if let Some(value) = preflight(request.uri().path()) {
                 return Ok(response(value));
@@ -528,6 +531,12 @@ mod tests {
         assert!(matches!(record.state, PublicationState::Unknown(_)));
         assert!(record.position.is_some());
         assert_eq!(record.author_id, Some(42));
+        open.show_origin(comparison(), "a.rs", ReviewOrigin::Local);
+        assert_eq!(
+            open.delete(1).comments.len(),
+            1,
+            "an uncertain create on another origin must keep shared work accessible"
+        );
     }
 
     #[test]
@@ -800,7 +809,7 @@ mod tests {
         );
         let no_network =
             FakeHttpClient::create(|_| async { panic!("a confirmed create must not be repeated") });
-        let reopened = PublicationService::new(no_network, store);
+        let reopened = PublicationService::new(no_network, store.clone());
         assert_eq!(
             futures::executor::block_on(reopened.publish(
                 open.review(),
@@ -811,6 +820,17 @@ mod tests {
             ))
             .unwrap(),
             saved
+        );
+        open = open.with_publication_store(store);
+        let mut other = origin();
+        if let ReviewOrigin::GitLab { iid, .. } = &mut other {
+            *iid = 11;
+        }
+        open.show_origin(comparison(), "a.rs", other);
+        assert_eq!(
+            open.delete(1).comments.len(),
+            1,
+            "a receipt on another target must stay reachable"
         );
     }
 }

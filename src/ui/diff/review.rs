@@ -3,7 +3,10 @@
 
 use crate::domain::{Anchor, Comparison, DraftComment, LineSpan, Review, Side};
 use crate::export::{CommentContext, ReviewContexts};
-use crate::{publication::ReviewOrigin, review_store::ReviewStore};
+use crate::{
+    publication::{PublicationStore, ReviewOrigin},
+    review_store::ReviewStore,
+};
 use std::sync::Arc;
 
 /// What one operation left on the current path.
@@ -35,6 +38,7 @@ pub struct OpenReview {
     contexts: ReviewContexts,
     draft_context: Option<Arc<CommentContext>>,
     origin: ReviewOrigin,
+    publication_store: Option<PublicationStore>,
     store: Option<ReviewStore>,
     storage_error: Option<String>,
     load_failed: bool,
@@ -49,10 +53,16 @@ impl OpenReview {
             contexts: ReviewContexts::new(),
             draft_context: None,
             origin: ReviewOrigin::Local,
+            publication_store: None,
             store: None,
             storage_error: None,
             load_failed: false,
         }
+    }
+
+    pub fn with_publication_store(mut self, store: PublicationStore) -> Self {
+        self.publication_store = Some(store);
+        self
     }
 
     pub fn unavailable(
@@ -124,6 +134,7 @@ impl OpenReview {
     ) -> PathView {
         let path = path.into();
         if self.review.comparison != comparison {
+            let publications = self.publication_store.clone();
             if let Some(store) = self.store.clone() {
                 *self = Self::reopen(comparison, path, origin, store);
             } else {
@@ -137,6 +148,7 @@ impl OpenReview {
                     }
                 };
             }
+            self.publication_store = publications;
         } else {
             self.origin = origin;
             self.set_path(path);
@@ -269,6 +281,16 @@ impl OpenReview {
 
     /// Remove that DraftComment. Ids are not reused. Editing that id clears the dock.
     pub fn delete(&mut self, id: u64) -> PathView {
+        if let Some(store) = &self.publication_store {
+            match store.protected_comments(&self.review.comparison) {
+                Ok(protected) if protected.contains(&id) => return self.snapshot(None),
+                Err(error) => {
+                    self.storage_error = Some(format!("{error:#}"));
+                    return self.snapshot(None);
+                }
+                _ => {}
+            }
+        }
         self.review.delete_comment(id);
         self.contexts.remove(&id);
         if self.dock.is_some_and(|d| d.editing == Some(id)) {

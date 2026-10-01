@@ -3,14 +3,27 @@ use crate::{
     domain::{Anchor, DraftComment, Side},
     export::CommentContext,
     publication::{
-        Connection, DiffPosition, PublicationReceipt, PublicationRecord, PublicationState,
-        ReviewOrigin,
+        Connection, PublicationReceipt, PublicationRecord, PublicationState, ReviewOrigin,
     },
 };
 use futures::{AsyncReadExt, FutureExt};
 use gpui_http_client::{AsyncBody, HttpClient, RedirectPolicy, http};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitLabDiffPosition {
+    pub position_type: String,
+    pub base_sha: String,
+    pub start_sha: String,
+    pub head_sha: String,
+    pub old_path: String,
+    pub new_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_line: Option<u32>,
+}
 
 #[derive(Clone)]
 pub struct GitLabPublication {
@@ -153,7 +166,7 @@ impl GitLabPublication {
         comment: &DraftComment,
         context: Option<&CommentContext>,
         connection: &Connection,
-    ) -> Result<DiffPosition, String> {
+    ) -> Result<GitLabDiffPosition, String> {
         let ReviewOrigin::GitLab {
             base_sha,
             head_sha,
@@ -257,7 +270,7 @@ impl GitLabPublication {
                 return Err("Unchanged position does not match both captured file versions".into());
             }
         }
-        Ok(DiffPosition {
+        Ok(GitLabDiffPosition {
             position_type: "text".into(),
             base_sha: base_sha.clone(),
             start_sha: version.start_commit_sha,
