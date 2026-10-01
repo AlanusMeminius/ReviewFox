@@ -78,7 +78,7 @@ impl ReviewOrigin {
 
 use crate::domain::{DraftComment, Review};
 use crate::export::ReviewContexts;
-use crate::gitlab_publication::{GitLabDiffPosition, GitLabPublication};
+use crate::gitlab_publication::{GitLabDiffPosition, GitLabPublication, RemoteNote, UpdateOutcome};
 use anyhow::{Context, Result, bail};
 use gpui_http_client::HttpClient;
 use std::{path::PathBuf, sync::Arc};
@@ -118,6 +118,10 @@ pub struct PublicationReceipt {
     pub note_id: u64,
     pub confirmed_body: String,
     pub remote_position: serde_json::Value,
+    #[serde(default)]
+    pub resolved: Option<bool>,
+    #[serde(default)]
+    pub outdated: Option<bool>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PublicationState {
@@ -135,14 +139,86 @@ impl PublicationState {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EditStatus {
+    Pending,
+    Sending { sent_body: String },
+    Failed(String),
+    Unknown { sent_body: String, message: String },
+    Conflict { website_body: String },
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingEdit {
+    pub body: String,
+    pub status: EditStatus,
+}
+
+pub struct RemoteRead {
+    pub note: Option<RemoteNote>,
+    pub confirmed_body: String,
+}
+
+pub struct RefreshOutcome {
+    pub record: PublicationRecord,
+    pub adopt_body: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicationRecord {
     pub operation_id: String,
     pub body: String,
     pub author_id: Option<u64>,
     pub position: Option<GitLabDiffPosition>,
     pub state: PublicationState,
+    #[serde(default)]
+    pub edit: Option<PendingEdit>,
+    #[serde(default)]
+    pub website_body: Option<String>,
+    #[serde(default)]
+    pub website_deleted: bool,
 }
 impl PublicationRecord {
+    pub fn receipt(&self) -> Option<&PublicationReceipt> {
+        match &self.state {
+            PublicationState::Published(receipt) => Some(receipt),
+            _ => None,
+        }
+    }
+    fn observe_remote(&mut self, remote: &RemoteNote) {
+        self.website_deleted = false;
+        self.website_body = Some(remote.body.clone());
+        if let PublicationState::Published(receipt) = &mut self.state {
+            receipt.remote_position = remote.position.clone();
+            receipt.resolved = remote.resolved;
+            receipt.outdated = remote.outdated;
+        }
+    }
+    pub fn status_label(&self) -> String {
+        if self.website_deleted {
+            return "Website deleted · local comment retained".into();
+        }
+        match self.edit.as_ref().map(|edit| &edit.status) {
+            Some(EditStatus::Pending) => "Local changes pending".into(),
+            Some(EditStatus::Sending { .. }) => "Updating GitLab…".into(),
+            Some(EditStatus::Failed(message)) => format!("Update failed: {message}"),
+            Some(EditStatus::Unknown { message, .. }) => {
+                format!("Update result unknown: {message}")
+            }
+            Some(EditStatus::Conflict { .. }) => "Local and website bodies conflict".into(),
+            None if self.website_body.as_ref().is_some_and(|website| {
+                self.receipt()
+                    .is_some_and(|receipt| website != &receipt.confirmed_body)
+            }) =>
+            {
+                "Website changed · active editor preserved".into()
+            }
+            None => self.state.label(),
+        }
+    }
+    pub fn visible_body(&self, raw: &str) -> String {
+        raw.replace(&format!("\n\n{}", self.marker()), "")
+            .replace(&self.marker(), "")
+    }
+
     pub fn marker(&self) -> String {
         format!("<!-- reviewfox:operation={} -->", self.operation_id)
     }
@@ -281,6 +357,304 @@ impl PublicationService {
             store,
         }
     }
+    fn known(
+        &self,
+        comparison: &Comparison,
+        origin: &ReviewOrigin,
+        id: u64,
+    ) -> Result<PublicationRecord> {
+        let record = self
+            .store
+            .load(comparison, origin, id)?
+            .context("Publication no longer exists")?;
+        if record.receipt().is_none() {
+            bail!("No confirmed remote identity is available");
+        }
+        Ok(record)
+    }
+    async fn authorize(
+        &self,
+        origin: &ReviewOrigin,
+        connection: &Connection,
+        record: &PublicationRecord,
+    ) -> Result<()> {
+        if !connection.matches(origin) || connection.pat.trim().is_empty() {
+            bail!("Reconnect this Review's GitLab host and token");
+        }
+        let author = self
+            .adapter
+            .author(origin, connection)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        if record.author_id != Some(author) {
+            bail!("GitLab account changed; reconnect the original account");
+        }
+        Ok(())
+    }
+    /// Reads only the known counterpart. Local edits are coordinated after the read completes.
+    pub async fn read(
+        &self,
+        comparison: &Comparison,
+        origin: &ReviewOrigin,
+        id: u64,
+        connection: &Connection,
+    ) -> Result<RemoteRead> {
+        let record = self.known(comparison, origin, id)?;
+        self.authorize(origin, connection, &record).await?;
+        let note = self
+            .adapter
+            .read_known(origin, connection, &record)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        Ok(RemoteRead {
+            note,
+            confirmed_body: record.receipt().unwrap().confirmed_body.clone(),
+        })
+    }
+
+    pub fn reconcile(
+        &self,
+        comparison: &Comparison,
+        origin: &ReviewOrigin,
+        id: u64,
+        local_body: &str,
+        editing: bool,
+        remote: RemoteRead,
+    ) -> Result<RefreshOutcome> {
+        let mut record = self.known(comparison, origin, id)?;
+        let mut adopt_body = None;
+        if record.receipt().unwrap().confirmed_body != remote.confirmed_body {
+            return Ok(RefreshOutcome { record, adopt_body });
+        }
+        match remote.note {
+            None => record.website_deleted = true,
+            Some(remote) => {
+                record.observe_remote(&remote);
+                let confirmed = record.receipt().unwrap().confirmed_body.clone();
+                let busy = record.edit.as_ref().is_some_and(|edit| {
+                    matches!(
+                        edit.status,
+                        EditStatus::Sending { .. } | EditStatus::Unknown { .. }
+                    )
+                });
+                if !busy {
+                    if !editing && (local_body == confirmed || local_body == remote.body) {
+                        if local_body != remote.body {
+                            adopt_body = Some(remote.body.clone());
+                        }
+                        if let PublicationState::Published(receipt) = &mut record.state {
+                            receipt.confirmed_body = remote.body.clone();
+                        }
+                        record.edit = None;
+                    } else if local_body != confirmed {
+                        record.edit = Some(PendingEdit {
+                            body: local_body.to_owned(),
+                            status: if remote.body != confirmed && local_body != remote.body {
+                                EditStatus::Conflict {
+                                    website_body: remote.body.clone(),
+                                }
+                            } else {
+                                record
+                                    .edit
+                                    .as_ref()
+                                    .filter(|edit| edit.body == local_body)
+                                    .map(|edit| edit.status.clone())
+                                    .filter(|status| matches!(status, EditStatus::Failed(_)))
+                                    .unwrap_or(EditStatus::Pending)
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        self.store.save(comparison, origin, id, &record)?;
+        Ok(RefreshOutcome { record, adopt_body })
+    }
+
+    pub fn queue_edit(
+        &self,
+        comparison: &Comparison,
+        origin: &ReviewOrigin,
+        id: u64,
+        body: &str,
+    ) -> Result<PublicationRecord> {
+        let mut record = self.known(comparison, origin, id)?;
+        let status = record
+            .edit
+            .as_ref()
+            .map(|edit| edit.status.clone())
+            .filter(|status| {
+                matches!(
+                    status,
+                    EditStatus::Sending { .. }
+                        | EditStatus::Unknown { .. }
+                        | EditStatus::Conflict { .. }
+                )
+            })
+            .unwrap_or(EditStatus::Pending);
+        if body == record.receipt().unwrap().confirmed_body && matches!(status, EditStatus::Pending)
+        {
+            record.edit = None;
+        } else {
+            record.edit = Some(PendingEdit {
+                body: body.into(),
+                status,
+            });
+        }
+        self.store.save(comparison, origin, id, &record)?;
+        Ok(record)
+    }
+    pub fn adopt_website(
+        &self,
+        comparison: &Comparison,
+        origin: &ReviewOrigin,
+        id: u64,
+    ) -> Result<RefreshOutcome> {
+        let mut record = self.known(comparison, origin, id)?;
+        if record.website_deleted
+            || record.edit.as_ref().is_some_and(|edit| {
+                matches!(
+                    edit.status,
+                    EditStatus::Sending { .. } | EditStatus::Unknown { .. }
+                )
+            })
+        {
+            bail!("Cannot adopt while the remote outcome is uncertain");
+        }
+        let body = record
+            .website_body
+            .clone()
+            .context("No website body available")?;
+        if let PublicationState::Published(receipt) = &mut record.state {
+            receipt.confirmed_body = body.clone();
+        }
+        record.edit = None;
+        self.store.save(comparison, origin, id, &record)?;
+        Ok(RefreshOutcome {
+            record,
+            adopt_body: Some(body),
+        })
+    }
+    /// Records an interrupted send conservatively, without initiating any network write.
+    pub fn restore_interrupted(
+        &self,
+        comparison: &Comparison,
+        origin: &ReviewOrigin,
+        id: u64,
+    ) -> Result<PublicationRecord> {
+        let mut record = self.known(comparison, origin, id)?;
+        if let Some(edit) = &mut record.edit {
+            if let EditStatus::Sending { sent_body } = &edit.status {
+                edit.status = EditStatus::Unknown {
+                    sent_body: sent_body.clone(),
+                    message: "Previous update confirmation unavailable".into(),
+                };
+                self.store.save(comparison, origin, id, &record)?;
+            }
+        }
+        Ok(record)
+    }
+    pub async fn update(
+        &self,
+        comparison: &Comparison,
+        origin: &ReviewOrigin,
+        id: u64,
+        connection: &Connection,
+        overwrite: bool,
+    ) -> Result<PublicationRecord> {
+        let mut record = self.known(comparison, origin, id)?;
+        let Some(edit) = record.edit.as_ref() else {
+            return Ok(record);
+        };
+        if record.website_deleted
+            || matches!(
+                edit.status,
+                EditStatus::Sending { .. } | EditStatus::Unknown { .. }
+            )
+        {
+            return Ok(record);
+        }
+        let sent_body = edit.body.clone();
+        let expected_website = match &edit.status {
+            EditStatus::Conflict { website_body } => Some(website_body.clone()),
+            _ => None,
+        };
+        record.edit.as_mut().unwrap().status = EditStatus::Sending {
+            sent_body: sent_body.clone(),
+        };
+        self.store.save(comparison, origin, id, &record)?;
+        let remote = self
+            .read(comparison, origin, id, connection)
+            .await
+            .map(|snapshot| snapshot.note);
+        let outcome = match remote {
+            Err(error) => UpdateOutcome::Failed(error.to_string()),
+            Ok(None) => {
+                let mut current = self.known(comparison, origin, id)?;
+                current.website_deleted = true;
+                if let Some(edit) = &mut current.edit {
+                    edit.status = EditStatus::Pending;
+                }
+                self.store.save(comparison, origin, id, &current)?;
+                return Ok(current);
+            }
+            Ok(Some(remote)) => {
+                let confirmed = record.receipt().unwrap().confirmed_body.clone();
+                if remote.body != confirmed
+                    && remote.body != sent_body
+                    && (!overwrite || expected_website.as_ref() != Some(&remote.body))
+                {
+                    let mut current = self.known(comparison, origin, id)?;
+                    current.observe_remote(&remote);
+                    if let Some(edit) = &mut current.edit {
+                        edit.status = EditStatus::Conflict {
+                            website_body: remote.body,
+                        };
+                    }
+                    self.store.save(comparison, origin, id, &current)?;
+                    return Ok(current);
+                }
+                if remote.body == sent_body {
+                    UpdateOutcome::Confirmed(remote)
+                } else {
+                    record.body = sent_body.clone();
+                    self.adapter.update_known(origin, connection, &record).await
+                }
+            }
+        };
+        // Re-read after awaiting: a newer explicit save may have queued another body.
+        let mut current = self.known(comparison, origin, id)?;
+        match outcome {
+            UpdateOutcome::Confirmed(remote) => {
+                current.observe_remote(&remote);
+                if let PublicationState::Published(receipt) = &mut current.state {
+                    receipt.confirmed_body = remote.body.clone();
+                }
+                if current
+                    .edit
+                    .as_ref()
+                    .is_none_or(|edit| edit.body == remote.body)
+                {
+                    current.edit = None;
+                } else if let Some(edit) = &mut current.edit {
+                    edit.status = EditStatus::Pending;
+                }
+            }
+            UpdateOutcome::Failed(message) => {
+                if let Some(edit) = &mut current.edit {
+                    edit.status = EditStatus::Failed(message);
+                }
+            }
+            UpdateOutcome::Unknown(message) => {
+                if let Some(edit) = &mut current.edit {
+                    edit.status = EditStatus::Unknown { sent_body, message };
+                }
+            }
+        }
+        self.store.save(comparison, origin, id, &current)?;
+        Ok(current)
+    }
+
     pub async fn publish(
         &self,
         review: &Review,
@@ -315,6 +689,9 @@ impl PublicationService {
             body: comment.body.clone(),
             author_id: previous.and_then(|r| r.author_id),
             position: None,
+            edit: None,
+            website_body: None,
+            website_deleted: false,
             state: PublicationState::Unknown(
                 "Confirmation unavailable; check GitLab before publishing again".into(),
             ),
@@ -440,6 +817,466 @@ mod tests {
         } else {
             None
         }
+    }
+
+    fn published(directory: &std::path::Path) -> (OpenReview, PublicationStore) {
+        let open = drafted(directory, Side::Postimage, 2);
+        let store = PublicationStore::new(directory.join("remote"));
+        let client = FakeHttpClient::create(|mut request| async move {
+            if let Some(value) = preflight(request.uri().path()) {
+                return Ok(response(value));
+            }
+            let mut bytes = Vec::new();
+            request.body_mut().read_to_end(&mut bytes).await.unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            Ok(response(
+                serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":payload["body"],"author":{"id":42},"position":payload["position"]}]}),
+            ))
+        });
+        let service = PublicationService::new(client, store.clone());
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        assert!(matches!(
+            futures::executor::block_on(service.publish(
+                open.review(),
+                open.contexts(),
+                &origin(),
+                1,
+                &connection
+            ))
+            .unwrap()
+            .state,
+            PublicationState::Published(_)
+        ));
+        (open.with_publication_store(store.clone()), store)
+    }
+    fn website_client(body: &str) -> Arc<dyn HttpClient> {
+        let body = body.to_owned();
+        FakeHttpClient::create(move |request| {
+            let body = body.clone();
+            async move {
+                assert_eq!(request.method(), http::Method::GET);
+                if request.uri().path().ends_with("/user") {
+                    return Ok(response(serde_json::json!({"id":42})));
+                }
+                Ok(response(
+                    serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":body,"author":{"id":42},"position":{"new_line":9},"resolved":false}]}),
+                ))
+            }
+        })
+    }
+    #[test]
+    fn conflicting_saved_bodies_require_explicit_adoption_and_refresh_preserves_active_editor() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut open, store) = published(directory.path());
+        let service = PublicationService::new(website_client("website body"), store.clone());
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        open.begin_edit(1);
+        let remote =
+            futures::executor::block_on(service.read(&comparison(), &origin(), 1, &connection))
+                .unwrap();
+        let outcome = service
+            .reconcile(&comparison(), &origin(), 1, "please explain", true, remote)
+            .unwrap();
+        assert!(outcome.adopt_body.is_none());
+        assert_eq!(open.current().comments[0].body, "please explain");
+        assert!(open.dock().is_some());
+        open.commit("local body");
+        service
+            .queue_edit(&comparison(), &origin(), 1, "local body")
+            .unwrap();
+        let remote =
+            futures::executor::block_on(service.read(&comparison(), &origin(), 1, &connection))
+                .unwrap();
+        let outcome = service
+            .reconcile(&comparison(), &origin(), 1, "local body", false, remote)
+            .unwrap();
+        assert!(
+            matches!(outcome.record.edit.unwrap().status,EditStatus::Conflict {website_body} if website_body=="website body")
+        );
+        assert_eq!(open.current().comments[0].body, "local body");
+        let adopted = service.adopt_website(&comparison(), &origin(), 1).unwrap();
+        open.adopt_body(1, &adopted.adopt_body.unwrap());
+        assert_eq!(open.current().comments[0].body, "website body");
+        assert!(
+            store
+                .load(&comparison(), &origin(), 1)
+                .unwrap()
+                .unwrap()
+                .edit
+                .is_none()
+        );
+    }
+    #[test]
+    fn later_saved_body_survives_earlier_update_response_and_stale_refresh() {
+        use futures::FutureExt;
+        let directory = tempfile::tempdir().unwrap();
+        let (mut open, store) = published(directory.path());
+        let original = store.load(&comparison(), &origin(), 1).unwrap().unwrap();
+        let marker = original.marker();
+        let (release, wait) = futures::channel::oneshot::channel::<()>();
+        let waiting = Arc::new(std::sync::Mutex::new(Some(wait)));
+        let client = FakeHttpClient::create(move |mut request| {
+            let waiting = waiting.clone();
+            let marker = marker.clone();
+            async move {
+                if request.uri().path().ends_with("/user") {
+                    return Ok(response(serde_json::json!({"id":42})));
+                }
+                if request.method() == http::Method::GET {
+                    return Ok(response(
+                        serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":"please explain","author":{"id":42},"position":{"new_line":2}}]}),
+                    ));
+                }
+                let mut bytes = Vec::new();
+                request.body_mut().read_to_end(&mut bytes).await.unwrap();
+                let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(payload["body"], format!("body B\n\n{marker}"));
+                let wait = waiting.lock().unwrap().take().unwrap();
+                wait.await.unwrap();
+                Ok(response(
+                    serde_json::json!({"id":51,"body":payload["body"],"author":{"id":42},"position":{"new_line":2}}),
+                ))
+            }
+        });
+        let service = PublicationService::new(client, store.clone());
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        let stale =
+            futures::executor::block_on(service.read(&comparison(), &origin(), 1, &connection))
+                .unwrap();
+        open.begin_edit(1);
+        open.commit("body B");
+        service
+            .queue_edit(&comparison(), &origin(), 1, "body B")
+            .unwrap();
+        let cmp = comparison();
+        let target = origin();
+        let mut update = Box::pin(service.update(&cmp, &target, 1, &connection, false));
+        assert!(update.as_mut().now_or_never().is_none());
+        open.begin_edit(1);
+        open.commit("body C");
+        service
+            .queue_edit(&comparison(), &origin(), 1, "body C")
+            .unwrap();
+        release.send(()).unwrap();
+        let result = futures::executor::block_on(update).unwrap();
+        assert_eq!(result.receipt().unwrap().confirmed_body, "body B");
+        assert!(
+            matches!(result.edit,Some(PendingEdit {body,status:EditStatus::Pending}) if body=="body C")
+        );
+        assert_eq!(open.current().comments[0].body, "body C");
+        let outcome = service
+            .reconcile(&comparison(), &origin(), 1, "body C", false, stale)
+            .unwrap();
+        assert!(outcome.adopt_body.is_none());
+        assert_eq!(outcome.record.receipt().unwrap().confirmed_body, "body B");
+        let reopened = OpenReview::reopen(
+            comparison(),
+            "a.rs",
+            origin(),
+            ReviewStore::new(directory.path().join("local")),
+        );
+        assert_eq!(reopened.current().comments[0].body, "body C");
+    }
+    #[test]
+    fn failed_and_unknown_updates_preserve_prior_receipt_and_never_retry_on_read() {
+        for status in [403, 0] {
+            let directory = tempfile::tempdir().unwrap();
+            let (mut open, store) = published(directory.path());
+            let client = FakeHttpClient::create(move |request| async move {
+                if request.uri().path().ends_with("/user") {
+                    return Ok(response(serde_json::json!({"id":42})));
+                }
+                if request.method() == http::Method::GET {
+                    return Ok(response(
+                        serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":"please explain","author":{"id":42},"position":{"new_line":2}}]}),
+                    ));
+                }
+                if status == 0 {
+                    return Err(anyhow::anyhow!("private token detail"));
+                }
+                Ok(http::Response::builder()
+                    .status(status)
+                    .body(AsyncBody::empty())
+                    .unwrap())
+            });
+            let service = PublicationService::new(client, store.clone());
+            let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+            open.begin_edit(1);
+            open.commit("body B");
+            service
+                .queue_edit(&comparison(), &origin(), 1, "body B")
+                .unwrap();
+            let record = futures::executor::block_on(service.update(
+                &comparison(),
+                &origin(),
+                1,
+                &connection,
+                false,
+            ))
+            .unwrap();
+            assert_eq!(record.receipt().unwrap().confirmed_body, "please explain");
+            if status == 0 {
+                assert!(
+                    matches!(record.edit.as_ref().unwrap().status,EditStatus::Unknown {ref sent_body,..} if sent_body=="body B")
+                );
+            } else {
+                assert!(matches!(
+                    record.edit.as_ref().unwrap().status,
+                    EditStatus::Failed(_)
+                ));
+            }
+            assert!(!record.status_label().contains("private"));
+            let reopened = PublicationService::new(website_client("please explain"), store.clone());
+            let remote = futures::executor::block_on(reopened.read(
+                &comparison(),
+                &origin(),
+                1,
+                &connection,
+            ))
+            .unwrap();
+            let outcome = reopened
+                .reconcile(&comparison(), &origin(), 1, "body B", false, remote)
+                .unwrap();
+            assert_eq!(
+                outcome.record.edit, record.edit,
+                "read-only reopen retains failure or uncertainty"
+            );
+            assert_eq!(open.current().comments[0].body, "body B");
+        }
+    }
+    #[test]
+    fn only_verified_remote_absence_marks_website_deleted() {
+        for forbidden in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let (open, store) = published(directory.path());
+            let client = FakeHttpClient::create(move |request| async move {
+                assert_eq!(request.method(), http::Method::GET);
+                if request.uri().path().ends_with("/user") {
+                    return Ok(response(serde_json::json!({"id":42})));
+                }
+                if request.uri().path().ends_with("/discussions/discussion-1") {
+                    return Ok(http::Response::builder()
+                        .status(404)
+                        .body(AsyncBody::empty())
+                        .unwrap());
+                }
+                if forbidden {
+                    return Ok(http::Response::builder()
+                        .status(403)
+                        .body(AsyncBody::empty())
+                        .unwrap());
+                }
+                Ok(response(serde_json::json!([])))
+            });
+            let service = PublicationService::new(client, store.clone());
+            let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+            let result =
+                futures::executor::block_on(service.read(&comparison(), &origin(), 1, &connection));
+            if forbidden {
+                assert!(result.is_err());
+                assert!(
+                    !store
+                        .load(&comparison(), &origin(), 1)
+                        .unwrap()
+                        .unwrap()
+                        .website_deleted
+                );
+            } else {
+                let outcome = service
+                    .reconcile(
+                        &comparison(),
+                        &origin(),
+                        1,
+                        &open.current().comments[0].body,
+                        false,
+                        result.unwrap(),
+                    )
+                    .unwrap();
+                assert!(outcome.record.website_deleted);
+                assert!(outcome.adopt_body.is_none());
+            }
+            assert_eq!(open.current().comments[0].body, "please explain");
+        }
+    }
+
+    #[test]
+    fn overwrite_rechecks_the_body_shown_in_conflict_before_updating() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut open, store) = published(directory.path());
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        open.begin_edit(1);
+        open.commit("local C");
+        let first = PublicationService::new(website_client("website B"), store.clone());
+        first
+            .queue_edit(&comparison(), &origin(), 1, "local C")
+            .unwrap();
+        let conflict = futures::executor::block_on(first.update(
+            &comparison(),
+            &origin(),
+            1,
+            &connection,
+            false,
+        ))
+        .unwrap();
+        assert!(
+            matches!(conflict.edit.as_ref().unwrap().status,EditStatus::Conflict {ref website_body} if website_body=="website B")
+        );
+        assert_eq!(
+            conflict.receipt().unwrap().remote_position,
+            serde_json::json!({"new_line":9})
+        );
+        assert_eq!(conflict.receipt().unwrap().resolved, Some(false));
+        let second = PublicationService::new(website_client("website D"), store.clone());
+        let changed = futures::executor::block_on(second.update(
+            &comparison(),
+            &origin(),
+            1,
+            &connection,
+            true,
+        ))
+        .unwrap();
+        assert!(
+            matches!(changed.edit.as_ref().unwrap().status,EditStatus::Conflict {ref website_body} if website_body=="website D")
+        );
+        let client = FakeHttpClient::create(|mut request| async move {
+            if request.uri().path().ends_with("/user") {
+                return Ok(response(serde_json::json!({"id":42})));
+            }
+            if request.method() == http::Method::GET {
+                return Ok(response(
+                    serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":"website D","author":{"id":42},"position":{"new_line":9}}]}),
+                ));
+            }
+            let mut bytes = Vec::new();
+            request.body_mut().read_to_end(&mut bytes).await.unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(
+                payload["body"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("local C\n\n<!-- reviewfox:operation=")
+            );
+            Ok(response(
+                serde_json::json!({"id":51,"body":payload["body"],"author":{"id":42},"position":{"new_line":9}}),
+            ))
+        });
+        let confirmed = PublicationService::new(client, store);
+        let record = futures::executor::block_on(confirmed.update(
+            &comparison(),
+            &origin(),
+            1,
+            &connection,
+            true,
+        ))
+        .unwrap();
+        assert_eq!(record.receipt().unwrap().confirmed_body, "local C");
+        assert!(record.edit.is_none());
+    }
+
+    #[test]
+    fn saving_a_published_body_updates_the_same_native_note_and_preserves_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut open, store) = published(directory.path());
+        let old = store.load(&comparison(), &origin(), 1).unwrap().unwrap();
+        let marker = old.marker();
+        open.begin_edit(1);
+        open.commit("new local body");
+        let client = FakeHttpClient::create(move |mut request| {
+            let marker = marker.clone();
+            async move {
+                if request.uri().path().ends_with("/user") {
+                    return Ok(response(serde_json::json!({"id":42})));
+                }
+                if request.method() == http::Method::GET {
+                    return Ok(response(
+                        serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":format!("please explain\n\n{marker}"),"author":{"id":42},"position":{"new_line":2}}]}),
+                    ));
+                }
+                assert_eq!(request.method(), http::Method::PUT);
+                assert!(
+                    request
+                        .uri()
+                        .path()
+                        .ends_with("/discussions/discussion-1/notes/51")
+                );
+                let mut bytes = Vec::new();
+                request.body_mut().read_to_end(&mut bytes).await.unwrap();
+                let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(payload["body"], format!("new local body\n\n{marker}"));
+                assert!(payload.get("position").is_none());
+                Ok(response(
+                    serde_json::json!({"id":51,"body":payload["body"],"author":{"id":42},"position":{"new_line":2}}),
+                ))
+            }
+        });
+        let service = PublicationService::new(client, store.clone());
+        service
+            .queue_edit(&comparison(), &origin(), 1, "new local body")
+            .unwrap();
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        let record = futures::executor::block_on(service.update(
+            &comparison(),
+            &origin(),
+            1,
+            &connection,
+            false,
+        ))
+        .unwrap();
+        assert_eq!(record.receipt().unwrap().note_id, 51);
+        assert_eq!(record.receipt().unwrap().confirmed_body, "new local body");
+        assert!(record.edit.is_none());
+        assert_eq!(open.current().comments[0].body, "new local body");
+    }
+
+    #[test]
+    fn refresh_adopts_website_only_edits_without_changing_anchor_or_export_context() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut open, store) = published(directory.path());
+        let before = open.current().comments[0].anchor.clone();
+        let context = open.contexts().clone();
+        let client = FakeHttpClient::create(|request| async move {
+            assert_eq!(request.method(), http::Method::GET);
+            if request.uri().path().ends_with("/user") {
+                return Ok(response(serde_json::json!({"id":42})));
+            }
+            assert!(request.uri().path().ends_with("/discussions/discussion-1"));
+            Ok(response(
+                serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":"website revision","author":{"id":42},"position":{"new_line":8},"resolved":true}]}),
+            ))
+        });
+        let service = PublicationService::new(client, store.clone());
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        let remote =
+            futures::executor::block_on(service.read(&comparison(), &origin(), 1, &connection))
+                .unwrap();
+        let result = service
+            .reconcile(
+                &comparison(),
+                &origin(),
+                1,
+                &open.current().comments[0].body,
+                false,
+                remote,
+            )
+            .unwrap();
+        open.adopt_body(1, &result.adopt_body.unwrap());
+        assert_eq!(open.current().comments[0].body, "website revision");
+        assert_eq!(open.current().comments[0].anchor, before);
+        assert_eq!(open.contexts(), &context);
+        let PublicationState::Published(receipt) = result.record.state else {
+            panic!("known correspondence retained")
+        };
+        assert_eq!(receipt.confirmed_body, "website revision");
+        assert_eq!(receipt.resolved, Some(true));
+        assert_eq!(receipt.remote_position, serde_json::json!({"new_line":8}));
+        assert_eq!(
+            store
+                .load(&comparison(), &origin(), 1)
+                .unwrap()
+                .unwrap()
+                .edit,
+            None
+        );
     }
 
     #[test]

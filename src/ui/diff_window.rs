@@ -1,6 +1,6 @@
 use crate::publication::{
-    Connection, PublicationRecord, PublicationService, PublicationState, PublicationStore,
-    ReviewOrigin,
+    Connection, EditStatus, PublicationRecord, PublicationService, PublicationState,
+    PublicationStore, ReviewOrigin,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity,
@@ -114,6 +114,9 @@ pub struct DiffView {
     publication_protected: HashSet<u64>,
     publication_error: Option<String>,
     publishing: HashSet<(Comparison, ReviewOrigin, u64)>,
+    updating: HashSet<(Comparison, ReviewOrigin, u64)>,
+    queued_updates: HashSet<(Comparison, ReviewOrigin, u64)>,
+    refreshing: HashSet<(Comparison, ReviewOrigin)>,
     export_status: Option<String>,
     /// Ephemeral; paths in set are collapsed. Default empty = all expanded.
     collapsed_dirs: HashSet<String>,
@@ -301,6 +304,9 @@ impl DiffView {
             publication_protected: HashSet::new(),
             publication_error: None,
             publishing: HashSet::new(),
+            updating: HashSet::new(),
+            queued_updates: HashSet::new(),
+            refreshing: HashSet::new(),
             export_status: None,
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
@@ -341,6 +347,7 @@ impl DiffView {
             pane.set_soft_wrap(this.soft_wrap, cx);
         });
         this.reload_publications();
+        this.refresh_publications(cx);
         this.open_in_pane(cx);
         this
     }
@@ -374,9 +381,12 @@ impl DiffView {
     }
 
     fn publication_in_progress(&self, id: u64) -> bool {
-        self.publishing.iter().any(|(comparison, _, comment)| {
-            comparison == &self.open_review.review().comparison && *comment == id
-        })
+        self.publishing
+            .iter()
+            .chain(self.updating.iter())
+            .any(|(comparison, _, comment)| {
+                comparison == &self.open_review.review().comparison && *comment == id
+            })
     }
     fn can_delete_comment(&self, id: u64) -> bool {
         self.publication_error.is_none()
@@ -447,11 +457,244 @@ impl DiffView {
                             this.publication_error = Some(format!("{error:#}"));
                         }
                     }
+                    if this.queued_updates.remove(&key)
+                        && this
+                            .publication_records
+                            .get(&id)
+                            .is_some_and(|record| record.receipt().is_some())
+                    {
+                        this.queue_comment_update(id, cx);
+                    }
                 }
                 cx.notify();
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    fn publication_service(&self, cx: &App) -> Option<PublicationService> {
+        self.publication_store
+            .clone()
+            .map(|store| PublicationService::new(cx.http_client(), store))
+    }
+    fn saved_connection() -> Connection {
+        Connection::new(
+            crate::settings_store::effective_base_url(&crate::settings_store::load_file()),
+            crate::settings_store::load_pat().unwrap_or_default(),
+        )
+    }
+    fn refresh_publications(&mut self, cx: &mut Context<Self>) {
+        let comparison = self.open_review.review().comparison.clone();
+        let origin = self.open_review.origin().clone();
+        let key = (comparison.clone(), origin.clone());
+        if self.refreshing.contains(&key) {
+            return;
+        }
+        let ids: Vec<_> = self
+            .publication_records
+            .iter()
+            .filter_map(|(id, record)| record.receipt().map(|_| *id))
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let Some(service) = self.publication_service(cx) else {
+            return;
+        };
+        self.refreshing.insert(key.clone());
+        // Convert durable sends with no live task to uncertainty; restart never retries them.
+        for id in &ids {
+            if !self.publication_in_progress(*id) {
+                if let Ok(record) = service.restore_interrupted(&comparison, &origin, *id) {
+                    self.publication_records.insert(*id, record);
+                }
+            }
+        }
+        cx.spawn(async move |this, cx| {
+            let reader = service.clone();
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    let connection = Self::saved_connection();
+                    let mut results = Vec::new();
+                    for id in ids {
+                        results
+                            .push((id, reader.read(&comparison, &origin, id, &connection).await));
+                    }
+                    results
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.refreshing.remove(&key);
+                if this.open_review.review().comparison == key.0
+                    && this.open_review.origin().same_target(&key.1)
+                {
+                    this.reload_publications();
+                    for (id, result) in results {
+                        let Some(comment) = this
+                            .open_review
+                            .review()
+                            .comments
+                            .iter()
+                            .find(|comment| comment.id == id)
+                        else {
+                            continue;
+                        };
+                        let editing = this
+                            .open_review
+                            .dock()
+                            .is_some_and(|dock| dock.editing == Some(id));
+                        match result.and_then(|remote| {
+                            service.reconcile(&key.0, &key.1, id, &comment.body, editing, remote)
+                        }) {
+                            Ok(outcome) => {
+                                if let Some(body) = outcome.adopt_body {
+                                    let view = this.open_review.adopt_body(id, &body);
+                                    this.apply_review(&view, cx);
+                                }
+                                this.publication_records.insert(id, outcome.record);
+                            }
+                            Err(error) => {
+                                this.publication_error = Some(format!("Refresh failed: {error:#}"))
+                            }
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    fn queue_comment_update(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(service) = self.publication_service(cx) else {
+            return;
+        };
+        let comparison = self.open_review.review().comparison.clone();
+        let origin = self.open_review.origin().clone();
+        let Some(comment) = self
+            .open_review
+            .review()
+            .comments
+            .iter()
+            .find(|comment| comment.id == id)
+        else {
+            return;
+        };
+        match service.queue_edit(&comparison, &origin, id, &comment.body) {
+            Ok(record) => {
+                self.publication_records.insert(id, record);
+            }
+            Err(error) => {
+                self.publication_error = Some(format!("{error:#}"));
+                return;
+            }
+        }
+        let key = (comparison, origin, id);
+        if self.updating.contains(&key) || self.publication_in_progress(id) {
+            self.queued_updates.insert(key);
+            return;
+        }
+        self.update_comment(id, false, cx);
+    }
+    fn update_comment(&mut self, id: u64, overwrite: bool, cx: &mut Context<Self>) {
+        if self.publication_in_progress(id) || self.open_review.storage_error().is_some() {
+            return;
+        }
+        let Some(record) = self.publication_records.get(&id) else {
+            return;
+        };
+        if record.website_deleted
+            || record.edit.as_ref().is_none_or(|edit| {
+                matches!(
+                    edit.status,
+                    EditStatus::Sending { .. } | EditStatus::Unknown { .. }
+                ) || (!overwrite && matches!(edit.status, EditStatus::Conflict { .. }))
+            })
+        {
+            return;
+        }
+        let Some(service) = self.publication_service(cx) else {
+            return;
+        };
+        let key = (
+            self.open_review.review().comparison.clone(),
+            self.open_review.origin().clone(),
+            id,
+        );
+        self.updating.insert(key.clone());
+        let task_key = key.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    service
+                        .update(
+                            &task_key.0,
+                            &task_key.1,
+                            id,
+                            &Self::saved_connection(),
+                            overwrite,
+                        )
+                        .await
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.updating.remove(&key);
+                let queued = this.queued_updates.remove(&key);
+                if this.open_review.review().comparison == key.0
+                    && this.open_review.origin().same_target(&key.1)
+                {
+                    this.reload_publications();
+                    match result {
+                        Ok(record) => {
+                            this.publication_records.insert(id, record);
+                        }
+                        Err(error) => this.publication_error = Some(format!("{error:#}")),
+                    }
+                    if queued
+                        && this.publication_records.get(&id).is_some_and(|record| {
+                            record
+                                .edit
+                                .as_ref()
+                                .is_some_and(|edit| matches!(edit.status, EditStatus::Pending))
+                        })
+                    {
+                        this.update_comment(id, false, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    fn adopt_website_body(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(service) = self.publication_service(cx) else {
+            return;
+        };
+        match service.adopt_website(
+            &self.open_review.review().comparison,
+            self.open_review.origin(),
+            id,
+        ) {
+            Ok(outcome) => {
+                if self
+                    .open_review
+                    .dock()
+                    .is_some_and(|dock| dock.editing == Some(id))
+                {
+                    self.close_dock(window, cx);
+                }
+                if let Some(body) = outcome.adopt_body {
+                    let view = self.open_review.adopt_body(id, &body);
+                    self.apply_review(&view, cx);
+                }
+                self.publication_records.insert(id, outcome.record);
+            }
+            Err(error) => self.publication_error = Some(format!("{error:#}")),
+        }
         cx.notify();
     }
 
@@ -1123,6 +1366,7 @@ impl DiffView {
             self.clear_draft_field(cx);
         }
         self.reload_publications();
+        self.refresh_publications(cx);
         self.invalidate_all_search_texts();
         self.recompute_alignment();
         self.open_in_pane(cx);
@@ -1304,12 +1548,30 @@ impl DiffView {
         if self.open_review.dock().is_none() {
             return;
         }
+        let edited_id = self.open_review.dock().and_then(|dock| dock.editing);
         let body = self.draft_field.read(cx).content().to_string();
         let blank = body.trim().is_empty();
         let view = self.open_review.commit(&body);
         self.apply_review(&view, cx);
         self.clear_draft_field(cx);
         window.focus(&self.focus);
+        if !blank {
+            if let Some(id) = edited_id {
+                if self
+                    .publication_records
+                    .get(&id)
+                    .is_some_and(|record| record.receipt().is_some())
+                {
+                    self.queue_comment_update(id, cx);
+                } else if self.publication_in_progress(id) {
+                    self.queued_updates.insert((
+                        self.open_review.review().comparison.clone(),
+                        self.open_review.origin().clone(),
+                        id,
+                    ));
+                }
+            }
+        }
         if blank {
             self.with_pane(cx, |pane, cx| pane.clear_selection(cx));
         }
@@ -2510,6 +2772,7 @@ fn render_comment_island(
                         .text_color(theme::software_palette().text.section)
                         .child("COMMENTS"),
                 )
+                .child(div().id("refresh-publications").ui_text_size(11.,cx).text_color(theme::software_palette().text.link).cursor_pointer().child("Refresh GitLab").on_click(cx.listener(|this,_,_,cx|this.refresh_publications(cx))))
                 .when(n > 0, |header| {
                     header.child(
                         div()
@@ -2639,12 +2902,27 @@ fn render_comment_island(
                             .child(div().mt(px(4.)).ui_text_size(11., cx).text_color(palette.text.secondary).child(
                                 if view.publication_in_progress(id) { "Publishing to GitLab…".into() }
                                 else if let Some(error) = &view.publication_error { error.clone() }
-                                else if let Some(record) = view.publication_records.get(&id) { record.state.label() }
+                                else if let Some(record) = view.publication_records.get(&id) { record.status_label() }
                                 else if view.publication_protected.contains(&id) { "Published or awaiting confirmation on another MR".into() }
                                 else if let Err(reason) = view.open_review.origin().preparation_eligibility(&view.open_review.review().comparison) { reason.into() }
                                 else if !matches!(&c.anchor, Anchor::Line { span, .. } if span.count==1) { "Multiline publication unavailable".into() }
                                 else { "Local draft · publish explicitly".into() }
                             ))
+                            .when(view.publication_records.get(&id).and_then(|record|record.receipt()).is_some(),|row| {
+                                let receipt=view.publication_records.get(&id).and_then(|record|record.receipt()).unwrap();
+                                let label=match (receipt.outdated,receipt.resolved) {(Some(true),Some(true))=>"Outdated · resolved on GitLab",(Some(true),_)=>"Outdated on GitLab",(_,Some(true))=>"Resolved on GitLab",_=>""};
+                                row.child(div().ui_text_size(11.,cx).text_color(palette.text.secondary).child(label))
+                            })
+                            .when(view.publication_records.get(&id).is_some_and(|record|record.edit.is_some()),|row| {
+                                let record=view.publication_records.get(&id).unwrap();
+                                match &record.edit.as_ref().unwrap().status {
+                                    EditStatus::Conflict {website_body}=>row.child(div().mt(px(6.)).ui_text_size(11.,cx).child("Website body:").child(div().child(website_body.clone())))
+                                        .child(div().id(("adopt-website",id as usize)).cursor_pointer().ui_text_size(11.,cx).text_color(palette.text.link).child("Adopt website body").on_click(cx.listener(move|this,_,window,cx|{cx.stop_propagation();this.adopt_website_body(id,window,cx);})))
+                                        .child(div().id(("overwrite-website",id as usize)).cursor_pointer().ui_text_size(11.,cx).text_color(palette.text.link).child("Overwrite with local body").on_click(cx.listener(move|this,_,_,cx|{cx.stop_propagation();this.update_comment(id,true,cx);}))),
+                                    EditStatus::Pending|EditStatus::Failed(_)=>row.child(div().id(("retry-update",id as usize)).cursor_pointer().ui_text_size(11.,cx).text_color(palette.text.link).child("Retry update").on_click(cx.listener(move|this,_,_,cx|{cx.stop_propagation();this.update_comment(id,false,cx);}))),
+                                    _=>row,
+                                }
+                            })
                     })),
                 sb,
             )

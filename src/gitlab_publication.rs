@@ -62,7 +62,27 @@ struct Note {
     id: u64,
     body: String,
     author: Author,
+    #[serde(default)]
     position: serde_json::Value,
+    #[serde(default)]
+    resolved: Option<bool>,
+    #[serde(default)]
+    outdated: Option<bool>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RemoteNote {
+    pub body: String,
+    pub position: serde_json::Value,
+    pub resolved: Option<bool>,
+    /// None when the server's API does not report this capability.
+    pub outdated: Option<bool>,
+}
+
+pub enum UpdateOutcome {
+    Confirmed(RemoteNote),
+    Failed(String),
+    Unknown(String),
 }
 
 impl GitLabPublication {
@@ -281,6 +301,152 @@ impl GitLabPublication {
             new_line,
         })
     }
+    fn known_note(
+        discussion: Discussion,
+        record: &PublicationRecord,
+    ) -> Result<Option<RemoteNote>, String> {
+        let receipt = record.receipt().ok_or("Remote identity unavailable")?;
+        if discussion.id != receipt.discussion_id {
+            return Err("GitLab returned another discussion".into());
+        }
+        let Some(note) = discussion
+            .notes
+            .into_iter()
+            .find(|note| note.id == receipt.note_id)
+        else {
+            return Ok(None);
+        };
+        if Some(note.author.id) != record.author_id {
+            return Err("Remote comment author no longer matches".into());
+        }
+        Ok(Some(RemoteNote {
+            body: record.visible_body(&note.body),
+            position: note.position,
+            resolved: note.resolved,
+            outdated: note.outdated,
+        }))
+    }
+    pub async fn read_known(
+        &self,
+        origin: &ReviewOrigin,
+        connection: &Connection,
+        record: &PublicationRecord,
+    ) -> Result<Option<RemoteNote>, String> {
+        let endpoint = Self::endpoint(origin)?;
+        let receipt = record.receipt().ok_or("Remote identity unavailable")?;
+        let discussion_id = url::form_urlencoded::byte_serialize(receipt.discussion_id.as_bytes())
+            .collect::<String>();
+        let (status, bytes, _) = self
+            .request(
+                http::Method::GET,
+                format!("{endpoint}/discussions/{discussion_id}"),
+                &connection.pat,
+                None,
+            )
+            .await
+            .map_err(str::to_owned)?;
+        if status == 404 {
+            // A 404 alone can mean denied access. Verify absence in a successful paginated list.
+            let mut page = 1;
+            loop {
+                let (bytes, next) = self
+                    .get(
+                        format!("{endpoint}/discussions?per_page=100&page={page}"),
+                        connection,
+                    )
+                    .await?;
+                let discussions: Vec<Discussion> = serde_json::from_slice(&bytes)
+                    .map_err(|_| "Invalid GitLab discussion response")?;
+                let full = discussions.len() == 100;
+                if let Some(discussion) = discussions
+                    .into_iter()
+                    .find(|discussion| discussion.id == receipt.discussion_id)
+                {
+                    return Self::known_note(discussion, record);
+                }
+                if let Some(next) = next.filter(|next| !next.is_empty()) {
+                    let next = next
+                        .parse::<u64>()
+                        .map_err(|_| "Invalid GitLab pagination")?;
+                    if next <= page {
+                        return Err("Invalid GitLab pagination".into());
+                    }
+                    page = next;
+                } else if full {
+                    page += 1;
+                } else {
+                    return Ok(None);
+                }
+            }
+        }
+        if !(200..300).contains(&status) {
+            return Err(status_message(status));
+        }
+        let discussion: Discussion =
+            serde_json::from_slice(&bytes).map_err(|_| "Invalid GitLab discussion response")?;
+        Self::known_note(discussion, record)
+    }
+
+    // GitLab has no conditional body PUT here. A website edit between the pre-read
+    // and this request can still race; checking first does not provide atomicity.
+    pub async fn update_known(
+        &self,
+        origin: &ReviewOrigin,
+        connection: &Connection,
+        record: &PublicationRecord,
+    ) -> UpdateOutcome {
+        let Ok(endpoint) = Self::endpoint(origin) else {
+            return UpdateOutcome::Failed("No GitLab target".into());
+        };
+        let Some(receipt) = record.receipt() else {
+            return UpdateOutcome::Failed("Remote identity unavailable".into());
+        };
+        let discussion_id = url::form_urlencoded::byte_serialize(receipt.discussion_id.as_bytes())
+            .collect::<String>();
+        let url = format!(
+            "{endpoint}/discussions/{discussion_id}/notes/{}",
+            receipt.note_id
+        );
+        match self
+            .request(
+                http::Method::PUT,
+                url,
+                &connection.pat,
+                Some(serde_json::json!({"body":record.remote_body()})),
+            )
+            .await
+        {
+            Err(message) => UpdateOutcome::Unknown(message.into()),
+            Ok((status, _, _))
+                if matches!(status, 400 | 401 | 403 | 404 | 405 | 409 | 413 | 422 | 429) =>
+            {
+                UpdateOutcome::Failed(status_message(status))
+            }
+            Ok((status, bytes, _)) if (200..300).contains(&status) => {
+                match serde_json::from_slice::<Note>(&bytes) {
+                    Ok(note)
+                        if note.id == receipt.note_id
+                            && Some(note.author.id) == record.author_id
+                            && note.body == record.remote_body() =>
+                    {
+                        UpdateOutcome::Confirmed(RemoteNote {
+                            body: record.body.clone(),
+                            position: note.position,
+                            resolved: note.resolved,
+                            outdated: note.outdated,
+                        })
+                    }
+                    _ => UpdateOutcome::Unknown(
+                        "Update response did not confirm the expected body".into(),
+                    ),
+                }
+            }
+            Ok((status, _, _)) => {
+                UpdateOutcome::Unknown(format!("GitLab HTTP {status}; update may have succeeded"))
+            }
+        }
+    }
+
     pub async fn create(
         &self,
         origin: &ReviewOrigin,
@@ -324,6 +490,8 @@ impl GitLabPublication {
                             note_id: note.id,
                             confirmed_body: record.body.clone(),
                             remote_position: note.position.clone(),
+                            resolved: note.resolved,
+                            outdated: note.outdated,
                         })
                     }
                     _ => PublicationState::Unknown(

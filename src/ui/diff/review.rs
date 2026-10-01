@@ -280,6 +280,13 @@ impl OpenReview {
     }
 
     /// Remove that DraftComment. Ids are not reused. Editing that id clears the dock.
+    /// Adopt a confirmed website body without touching the active editor or Anchor.
+    pub fn adopt_body(&mut self, id: u64, body: &str) -> PathView {
+        self.review.update_comment_body(id, body);
+        self.persist();
+        self.snapshot(None)
+    }
+
     pub fn delete(&mut self, id: u64) -> PathView {
         if let Some(store) = &self.publication_store {
             match store.protected_comments(&self.review.comparison) {

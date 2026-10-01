@@ -2,6 +2,14 @@
 
 Local clipboard-oriented code review over a Git two-tree comparison: browse structured diffs, attach draft comments, and export plain text for pasting elsewhere.
 
+## GitLab comments
+
+Publish a local DraftComment explicitly from its complete GitLab MR Review. A PAT with `api` scope and permission to comment on that MR enables writing; `read_api` supports browsing.
+
+Saving a published body updates its existing GitLab note. Opening a Review or clicking Refresh GitLab reads its known counterparts. Website-only edits are adopted; simultaneous local and website edits show both bodies for an explicit choice. Active editor input is preserved. Failed updates require a manual retry; uncertain outcomes retain the sent body and original correspondence. Reopening never sends writes.
+
+The pre-update read detects ordinary conflicts but is not an atomic conditional update: a website edit can still arrive between reading and writing. Remote placement and resolution are separate from synchronization; outdated status is shown only if the server supplies it.
+
 ## Requirements
 
 - macOS
