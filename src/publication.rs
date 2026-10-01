@@ -211,6 +211,14 @@ impl PublicationRecord {
         }
     }
     pub fn status_label(&self) -> String {
+        if self.website_deleted
+            && !matches!(
+                self.deletion,
+                Some(DeleteStatus::Sending | DeleteStatus::Unknown(_) | DeleteStatus::Confirmed)
+            )
+        {
+            return "Website deleted · local comment retained".into();
+        }
         if let Some(deletion) = &self.deletion {
             let label = match deletion {
                 DeleteStatus::Pending if !self.website_deleted => {

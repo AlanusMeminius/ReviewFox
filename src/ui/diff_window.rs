@@ -385,12 +385,15 @@ impl DiffView {
     }
 
     fn publication_in_progress(&self, id: u64) -> bool {
+        self.publication_in_progress_for(&self.open_review.review().comparison, id)
+    }
+    fn publication_in_progress_for(&self, comparison: &Comparison, id: u64) -> bool {
         self.publishing
             .iter()
             .chain(self.updating.iter())
             .chain(self.deleting.iter())
-            .any(|(comparison, _, comment)| {
-                comparison == &self.open_review.review().comparison && *comment == id
+            .any(|(active_comparison, _, comment)| {
+                active_comparison == comparison && *comment == id
             })
     }
     fn can_delete_comment(&self, id: u64) -> bool {
@@ -554,13 +557,7 @@ impl DiffView {
         confirm_changed_body: bool,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .publishing
-            .iter()
-            .chain(self.updating.iter())
-            .chain(self.deleting.iter())
-            .any(|active| active.0 == key.0 && active.2 == key.2)
-        {
+        if self.publication_in_progress_for(&key.0, key.2) {
             return;
         }
         let Some(service) = self.publication_service(cx) else {
@@ -3115,7 +3112,7 @@ fn render_comment_island(
                             .when(view.publication_records.get(&id).is_some_and(|record|record.deletion.is_some()),|row| {
                                 let record=view.publication_records.get(&id).unwrap();
                                 match record.deletion.as_ref().unwrap() {
-                                    DeleteStatus::Conflict {website_body} => row
+                                    DeleteStatus::Conflict {website_body} if !record.website_deleted => row
                                         .child(div().mt(px(6.)).ui_text_size(11.,cx).child("Website body:").child(div().child(website_body.clone())))
                                         .child(div().id(("confirm-delete",id as usize)).cursor_pointer().ui_text_size(11.,cx).text_color(palette.text.link).child("Delete this website comment").on_click(cx.listener(move|this,_,_,cx|{cx.stop_propagation();this.retry_delete(id,true,cx);}))),
                                     DeleteStatus::Pending | DeleteStatus::Failed(_) if record.receipt().is_some() && !record.website_deleted => row
