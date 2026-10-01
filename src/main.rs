@@ -9,6 +9,7 @@ mod mr_entry;
 mod reqwest_client;
 mod settings_store;
 mod syntax;
+mod theme_defaults;
 mod ui;
 mod window_geometry_store;
 mod workspace_store;

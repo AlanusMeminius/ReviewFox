@@ -1,58 +1,59 @@
-//! Light Code Theme choice: an outlined trigger and a list of built-in labels.
+//! A small options dropdown: filled trigger + list of (id, label) rows.
+//! Used for the Software Theme choice and both Code Theme pairing choices.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    App, Bounds, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, KeyBinding,
+    App, Bounds, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, KeyBinding, KeyContext,
     MouseDownEvent, Pixels, Render, SharedString, Subscription, Window, actions, anchored, canvas,
     deferred, div, point, prelude::*, px, relative,
 };
 
-use super::{Button, ButtonSize, ButtonStyle};
+use super::{Button, ButtonSize, ButtonStyle, option_row::option_row};
 use crate::ui::appearance::{self, Appearance, UiTextSize};
 use crate::ui::code_theme::{self, CodeThemePairing, SoftwareThemeMode};
 use crate::ui::theme;
 
 actions!(
-    code_theme_picker,
+    options_picker,
     [
         Open, SelectPrev, SelectNext, Confirm, Dismiss, FocusNext, FocusPrev
     ]
 );
 
-/// Key context on the trigger (Enter / Space open the list).
-const TRIGGER_CONTEXT: &str = "CodeThemePickerTrigger";
-/// Key context on the open list. Deeper than Settings, so Esc closes the list
-/// instead of the window.
-const CONTEXT: &str = "CodeThemePicker";
-
 const WIDTH: f32 = 210.;
 const ROW_HEIGHT: f32 = 28.;
 
-pub fn key_bindings() -> Vec<KeyBinding> {
+/// Key bindings for one picker instance; contexts are per `id_prefix` so two
+/// pickers never answer the same keys.
+pub fn key_bindings(id_prefix: &'static str) -> Vec<KeyBinding> {
+    let trigger = format!("{id_prefix}-trigger");
+    let list = format!("{id_prefix}-list");
     vec![
-        KeyBinding::new("enter", Open, Some(TRIGGER_CONTEXT)),
-        KeyBinding::new("space", Open, Some(TRIGGER_CONTEXT)),
-        KeyBinding::new("up", SelectPrev, Some(CONTEXT)),
-        KeyBinding::new("down", SelectNext, Some(CONTEXT)),
-        KeyBinding::new("enter", Confirm, Some(CONTEXT)),
-        KeyBinding::new("escape", Dismiss, Some(CONTEXT)),
-        KeyBinding::new("tab", FocusNext, Some(CONTEXT)),
-        KeyBinding::new("shift-tab", FocusPrev, Some(CONTEXT)),
+        KeyBinding::new("enter", Open, Some(&trigger)),
+        KeyBinding::new("space", Open, Some(&trigger)),
+        KeyBinding::new("up", SelectPrev, Some(&list)),
+        KeyBinding::new("down", SelectNext, Some(&list)),
+        KeyBinding::new("enter", Confirm, Some(&list)),
+        KeyBinding::new("escape", Dismiss, Some(&list)),
+        KeyBinding::new("tab", FocusNext, Some(&list)),
+        KeyBinding::new("shift-tab", FocusPrev, Some(&list)),
     ]
 }
 
-/// The built-in id the user picked. `one-light` clears the stored field.
+/// The option id the user picked.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CodeThemePickerEvent {
+pub enum OptionsPickerEvent {
     Confirm(SharedString),
 }
 
-/// Lists [`code_theme::builtin_catalog`] by label. The trigger shows the label
-/// the light choice resolves to, which is One Light when the stored id is absent
-/// or unknown.
-pub struct CodeThemePicker {
+/// Lists `options` (id, label) by label. The trigger shows the label of the
+/// current id; an unknown current id shows the first option.
+pub struct OptionsPicker {
+    id_prefix: &'static str,
+    options: Vec<(SharedString, SharedString)>,
+    current: SharedString,
     trigger_focus: FocusHandle,
     list_focus: FocusHandle,
     trigger_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -61,8 +62,15 @@ pub struct CodeThemePicker {
     _on_blur: Subscription,
 }
 
-impl CodeThemePicker {
-    pub fn new(tab_index: isize, window: &mut Window, cx: &mut Context<Self>) -> Self {
+impl OptionsPicker {
+    pub fn new(
+        id_prefix: &'static str,
+        options: Vec<(SharedString, SharedString)>,
+        current: SharedString,
+        tab_index: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let list_focus = cx.focus_handle().tab_stop(true);
         let on_blur = cx.on_blur(&list_focus, window, |picker, window, cx| {
             if window.is_window_active() {
@@ -71,6 +79,9 @@ impl CodeThemePicker {
             }
         });
         Self {
+            id_prefix,
+            options,
+            current,
             trigger_focus: cx.focus_handle().tab_index(tab_index).tab_stop(true),
             list_focus,
             trigger_bounds: Rc::new(Cell::new(Bounds::default())),
@@ -81,11 +92,25 @@ impl CodeThemePicker {
     }
 
     fn element_id(&self, suffix: &str) -> ElementId {
-        ElementId::Name(format!("settings-code-theme-{suffix}").into())
+        ElementId::Name(format!("{}-{suffix}", self.id_prefix).into())
+    }
+
+    fn current_index(&self) -> usize {
+        self.options
+            .iter()
+            .position(|(id, _)| *id == self.current)
+            .unwrap_or(0)
+    }
+
+    fn current_label(&self) -> SharedString {
+        self.options
+            .get(self.current_index())
+            .map(|(_, label)| label.clone())
+            .unwrap_or_default()
     }
 
     fn open_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.selected = selected_index(cx);
+        self.selected = self.current_index();
         self.open = true;
         window.focus(&self.list_focus);
         cx.notify();
@@ -108,16 +133,17 @@ impl CodeThemePicker {
     }
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(theme) = code_theme::builtin_catalog().get(self.selected) else {
+        let Some((id, _)) = self.options.get(self.selected) else {
             return;
         };
-        let id: SharedString = theme.id.clone().into();
+        let id = id.clone();
+        self.current = id.clone();
         self.dismiss(window, cx);
-        cx.emit(CodeThemePickerEvent::Confirm(id));
+        cx.emit(OptionsPickerEvent::Confirm(id));
     }
 
     fn nudge(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let len = code_theme::builtin_catalog().len();
+        let len = self.options.len();
         if !self.open || len == 0 {
             return;
         }
@@ -128,9 +154,10 @@ impl CodeThemePicker {
 
     fn render_trigger(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let bounds = self.trigger_bounds.clone();
+        let trigger_context = format!("{}-trigger", self.id_prefix);
         div()
             .relative()
-            .key_context(TRIGGER_CONTEXT)
+            .key_context(KeyContext::try_from(trigger_context.as_str()).unwrap())
             .on_action(cx.listener(|picker, _: &Open, window, cx| picker.toggle(window, cx)))
             .capture_any_mouse_down(cx.listener(|picker, _, window, _| {
                 // A press on the trigger must not focus it: the list would blur,
@@ -140,8 +167,8 @@ impl CodeThemePicker {
                 }
             }))
             .child(
-                Button::new(self.element_id("trigger"), resolved_label(cx))
-                    .style(ButtonStyle::Outlined)
+                Button::new(self.element_id("trigger"), self.current_label())
+                    .style(ButtonStyle::Filled)
                     .size(ButtonSize::Medium)
                     .end_icon("chevrons_up_down.svg")
                     .track_focus(&self.trigger_focus)
@@ -162,9 +189,11 @@ impl CodeThemePicker {
 
     fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let trigger_bounds = self.trigger_bounds.clone();
+        let list_context = format!("{}-list", self.id_prefix);
+        let palette = theme::software_palette();
         div()
             .id(self.element_id("popover"))
-            .key_context(CONTEXT)
+            .key_context(KeyContext::try_from(list_context.as_str()).unwrap())
             .track_focus(&self.list_focus)
             .occlude()
             .flex()
@@ -172,14 +201,12 @@ impl CodeThemePicker {
             .w(px(WIDTH))
             .overflow_hidden()
             .py_1()
-            .bg(theme::white())
-            .border_1()
-            .border_color(theme::border_variant())
+            .bg(palette.settings.popover)
             .rounded(px(6.))
             .shadow_lg()
             .font_family(appearance::ui_font(cx))
             .ui_text_size(14., cx)
-            .text_color(theme::text())
+            .text_color(palette.text.primary)
             .on_action(cx.listener(|picker, _: &SelectPrev, _, cx| picker.nudge(-1, cx)))
             .on_action(cx.listener(|picker, _: &SelectNext, _, cx| picker.nudge(1, cx)))
             .on_action(cx.listener(|picker, _: &Confirm, window, cx| picker.confirm(window, cx)))
@@ -199,71 +226,25 @@ impl CodeThemePicker {
                     }
                 }),
             )
-            .children(
-                code_theme::builtin_catalog()
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, entry)| {
-                        let selected = ix == self.selected;
-                        let label = entry.label.clone();
-                        div()
-                            .id(ix)
-                            .px_1()
-                            .h(px(ROW_HEIGHT))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .size_full()
-                                    .px_2()
-                                    .rounded(px(4.))
-                                    .cursor_pointer()
-                                    .when(selected, |row| row.bg(theme::element_active()))
-                                    .when(!selected, |row| row.hover(|row| row.bg(theme::hover())))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .whitespace_nowrap()
-                                            .child(label),
-                                    ),
-                            )
-                            .on_click(cx.listener(move |picker, _, window, cx| {
-                                picker.selected = ix;
-                                picker.confirm(window, cx);
-                            }))
-                    }),
-            )
+            .children(self.options.iter().enumerate().map(|(ix, (_, label))| {
+                let selected = ix == self.selected;
+                let label = label.clone();
+                div()
+                    .id(ix)
+                    .px_1()
+                    .h(px(ROW_HEIGHT))
+                    .child(option_row(("option", ix), selected, label))
+                    .on_click(cx.listener(move |picker, _, window, cx| {
+                        picker.selected = ix;
+                        picker.confirm(window, cx);
+                    }))
+            }))
     }
 }
 
-fn resolved_light(cx: &App) -> code_theme::ResolvedCodeTheme {
-    code_theme::resolve(
-        SoftwareThemeMode::Light,
-        &CodeThemePairing {
-            light: cx.global::<Appearance>().code_theme_light.clone(),
-            dark: None,
-        },
-        code_theme::builtin_catalog(),
-    )
-}
+impl EventEmitter<OptionsPickerEvent> for OptionsPicker {}
 
-fn resolved_label(cx: &App) -> SharedString {
-    resolved_light(cx).label.into()
-}
-
-fn selected_index(cx: &App) -> usize {
-    let id = resolved_light(cx).id;
-    code_theme::builtin_catalog()
-        .iter()
-        .position(|theme| theme.id == id)
-        .unwrap_or(0)
-}
-
-impl EventEmitter<CodeThemePickerEvent> for CodeThemePicker {}
-
-impl Render for CodeThemePicker {
+impl Render for OptionsPicker {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let list = self.open.then(|| self.render_list(cx).into_any_element());
         div()
@@ -284,4 +265,43 @@ impl Render for CodeThemePicker {
                 )
             })
     }
+}
+
+/// Options for either Code Theme choice: every built-in theme by label.
+pub fn code_theme_options() -> Vec<(SharedString, SharedString)> {
+    code_theme::builtin_catalog()
+        .iter()
+        .map(|entry| (entry.id.clone().into(), entry.label.clone().into()))
+        .collect()
+}
+
+/// One stored choice resolved to a catalog id (unknown ids fall back by mode).
+pub fn resolved_code_theme_id(cx: &App, mode: SoftwareThemeMode) -> SharedString {
+    code_theme::resolve(
+        mode,
+        &CodeThemePairing {
+            light: cx.global::<Appearance>().code_theme_light.clone(),
+            dark: cx.global::<Appearance>().code_theme_dark.clone(),
+        },
+        code_theme::builtin_catalog(),
+    )
+    .id
+    .into()
+}
+
+/// Options for the Software Theme choice.
+pub fn software_theme_options() -> Vec<(SharedString, SharedString)> {
+    vec![
+        ("light".into(), "Light".into()),
+        ("dark".into(), "Dark".into()),
+    ]
+}
+
+/// The active Software Theme as its stored id.
+pub fn current_software_theme_id(cx: &App) -> SharedString {
+    match cx.global::<Appearance>().software_theme {
+        SoftwareThemeMode::Light => "light",
+        SoftwareThemeMode::Dark => "dark",
+    }
+    .into()
 }

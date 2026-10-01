@@ -4,7 +4,7 @@ use crate::ui::appearance::UiTextSize;
 use crate::ui::theme;
 
 /// One setting (Zed `render_settings_item_layout`): title + description on the
-/// left, control on the right, 1px divider below unless it is the section's last row.
+/// left and control on the right, with generous spacing between rows.
 #[derive(IntoElement)]
 pub struct SettingRow {
     id: ElementId,
@@ -52,7 +52,7 @@ impl SettingRow {
         self
     }
 
-    /// Last row of a section: no divider, 40px bottom padding.
+    /// Last row of a section: 40px bottom padding.
     pub fn last(mut self, last: bool) -> Self {
         self.last = last;
         self
@@ -61,6 +61,7 @@ impl SettingRow {
 
 impl RenderOnce for SettingRow {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let palette = theme::software_palette();
         div()
             .id(self.id)
             .flex()
@@ -76,8 +77,6 @@ impl RenderOnce for SettingRow {
                     row.pb(px(40.))
                 } else {
                     row.pb(px(16.))
-                        .border_b_1()
-                        .border_color(theme::border_variant())
                 }
             })
             .child(
@@ -94,7 +93,7 @@ impl RenderOnce for SettingRow {
                             .items_center()
                             .gap_1()
                             .ui_text_size(14., cx)
-                            .text_color(theme::text())
+                            .text_color(palette.text.primary)
                             .child(self.title)
                             .children(self.title_action),
                     )
@@ -102,7 +101,7 @@ impl RenderOnce for SettingRow {
                         left.child(
                             div()
                                 .ui_text_size(12., cx)
-                                .text_color(theme::muted())
+                                .text_color(palette.text.secondary)
                                 .child(description),
                         )
                     }),

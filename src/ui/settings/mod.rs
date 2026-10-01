@@ -10,6 +10,7 @@ mod font_picker;
 mod nav;
 mod nav_tree;
 mod number_field;
+mod option_row;
 mod section_header;
 mod setting_row;
 mod token_row;

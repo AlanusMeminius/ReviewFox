@@ -12,7 +12,7 @@ use crate::ui::tooltip::Tooltip;
 pub enum ButtonStyle {
     #[default]
     Subtle,
-    Outlined,
+    Filled,
     #[allow(dead_code)] // Part of the component set; no Settings page uses it yet.
     Tinted(TintColor),
 }
@@ -50,43 +50,36 @@ impl ButtonSize {
 
 struct Colors {
     background: Hsla,
-    border: Hsla,
     hover: Hsla,
     active: Hsla,
 }
 
 impl ButtonStyle {
-    fn colors(self) -> Colors {
-        let (background, border, hover, active) = match self {
+    fn colors(self, palette: theme::SoftwarePalette) -> Colors {
+        let (background, hover, active) = match self {
             ButtonStyle::Subtle => (
                 transparent_black(),
-                transparent_black(),
-                theme::hover().into(),
-                theme::element_active().into(),
+                palette.control.hover.into(),
+                palette.control.pressed.into(),
             ),
-            ButtonStyle::Outlined => (
-                transparent_black(),
-                theme::line().into(),
-                theme::hover().into(),
-                theme::element_active().into(),
+            ButtonStyle::Filled => (
+                palette.settings.card.into(),
+                palette.control.hover.into(),
+                palette.control.pressed.into(),
             ),
-            // Zed darkens the tint on hover; the tint's own border color is that step.
             ButtonStyle::Tinted(TintColor::Success) => (
-                theme::success_background().into(),
-                theme::success_border().into(),
-                theme::success_border().into(),
-                theme::success_border().into(),
+                palette.feedback.success.background.into(),
+                palette.control.hover.into(),
+                palette.control.pressed.into(),
             ),
             ButtonStyle::Tinted(TintColor::Error) => (
-                theme::error_background().into(),
-                theme::error_border().into(),
-                theme::error_border().into(),
-                theme::error_border().into(),
+                palette.feedback.error.background.into(),
+                palette.control.hover.into(),
+                palette.control.pressed.into(),
             ),
         };
         Colors {
             background,
-            border,
             hover,
             active,
         }
@@ -190,7 +183,7 @@ impl Button {
         self
     }
 
-    /// Makes the button a Tab stop; keyboard focus shows a `border_focused` border.
+    /// Makes the button a Tab stop; keyboard focus uses a filled state.
     /// While focused, Enter / Space (no modifiers) run [`Self::on_click`]: GPUI's
     /// div turns their key-up into a `ClickEvent::Keyboard` for focused elements.
     pub fn tab_index(mut self, index: isize) -> Self {
@@ -223,15 +216,20 @@ impl Button {
 
 impl RenderOnce for Button {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let colors = self.style.colors();
+        let palette = theme::software_palette();
+        let colors = self.style.colors(palette);
         let height = self.size.height();
         let icon_only = self.label.is_none();
         let (text_color, icon_color): (Hsla, Hsla) = if self.disabled {
-            (theme::faint().into(), theme::faint().into())
+            (
+                palette.settings.text_disabled.into(),
+                palette.settings.text_disabled.into(),
+            )
         } else {
             (
-                theme::text().into(),
-                self.icon_color.unwrap_or_else(|| theme::muted().into()),
+                palette.text.primary.into(),
+                self.icon_color
+                    .unwrap_or_else(|| palette.text.secondary.into()),
             )
         };
         let on_click = self.on_click.filter(|_| !self.disabled);
@@ -265,9 +263,6 @@ impl RenderOnce for Button {
                 }
             })
             .rounded(px(4.))
-            // Always 1px so focus / outline never shifts the layout.
-            .border_1()
-            .border_color(colors.border)
             .bg(colors.background)
             .font_family(appearance::ui_font(cx))
             .ui_text_size(if self.small_label { 12. } else { 14. }, cx)
@@ -278,7 +273,7 @@ impl RenderOnce for Button {
                     .active(|button| button.bg(colors.active))
             })
             .when(focusable, |button| {
-                button.focus(|button| button.border_color(theme::border_focused()))
+                button.focus(|button| button.bg(palette.control.selected))
             })
             .when_some(self.tab_index, |button, index| button.tab_index(index))
             .when_some(self.focus_handle, |button, handle| {
@@ -304,7 +299,7 @@ impl RenderOnce for Button {
                 button.child(
                     div()
                         .ui_text_size(12., cx)
-                        .text_color(theme::muted())
+                        .text_color(palette.control.hint)
                         .child(hint),
                 )
             })

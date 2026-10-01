@@ -13,7 +13,7 @@ use gpui::{
     GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba,
     ScrollWheelEvent, ShapedLine, SharedString, Style, TextRun, Window, fill, font, point, px,
-    relative, rgb, size,
+    relative, size,
 };
 
 use super::layout::{Layout, LineKind, LineRow, Row};
@@ -26,9 +26,9 @@ use super::visual_wrap::WrapSide;
 use super::wrap::{clip_runs_to_display_segment, display_row_segments};
 use crate::domain::Side;
 use crate::syntax::Span;
-use crate::ui::theme;
 use crate::ui::code_theme::{self, ResolvedCodeTheme};
 use crate::ui::scrollbar::{self, ThumbGeom};
+use crate::ui::theme;
 
 pub(super) const LN_FONT_PX: f32 = 10.;
 /// Floor for a line-number digit's width: wider than Menlo/Consolas at 10px
@@ -50,7 +50,6 @@ pub(super) const COMMENT_BAR: f32 = 2.;
 const EDGE_W: f32 = 1.;
 /// How far a culled bridge's tab reaches into the middle gutter; also its corner radius.
 const TAB_W: f32 = 3.;
-const DRAFTING_BG: u32 = 0xdbe4ff;
 
 /// Current Diff find occurrence for paint (side + line + byte range).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -336,6 +335,7 @@ struct RowPaint {
     kind_bg: Rgba,
     bg: Rgba,
     commented: bool,
+    drafting: bool,
     /// Inside the drag selection: the code column takes a translucent wash.
     selected: bool,
     text: Option<ShapedLine>,
@@ -392,7 +392,9 @@ pub(super) struct IconSlot {
 
 struct Thumb {
     rect: Bounds<Pixels>,
+    thickness: f32,
     shown: bool,
+    hovered: bool,
     dragging: bool,
 }
 
@@ -678,11 +680,12 @@ pub(super) fn build_frame(
                 y1: y_of(i + 1),
                 kind_bg,
                 bg: if drafting_here {
-                    rgb(DRAFTING_BG)
+                    code_theme.marks.drafting_band
                 } else {
                     kind_bg
                 },
                 commented,
+                drafting: drafting_here,
                 selected: selected_here,
                 text: shape.text.clone(),
                 text_leading: leading,
@@ -697,15 +700,20 @@ pub(super) fn build_frame(
         let n = rows.rows();
         let thumb = thumb_for(view_h, vp.max_top(side), side_top).map(|g| {
             let track = geom.track(side);
-            let inset = (scrollbar::TRACK_WIDTH - scrollbar::THUMB_WIDTH) / 2.;
+            let hovered = bars.hovered[side_ix(side)];
+            let dragging = bars.drag.is_some_and(|(s, _)| s == side);
+            let thickness = scrollbar::thumb_width(hovered, dragging);
+            let inset = (scrollbar::TRACK_WIDTH - thickness) / 2.;
             let rect = Bounds::new(
                 point(track.left() + px(inset), track.top() + g.thumb_top),
-                size(px(scrollbar::THUMB_WIDTH), g.thumb_height),
+                size(px(thickness), g.thumb_height),
             );
             Thumb {
                 rect,
+                thickness,
                 shown: bars.shown(side),
-                dragging: bars.drag.is_some_and(|(s, _)| s == side),
+                hovered,
+                dragging,
             }
         });
         SideFrame {
@@ -1198,23 +1206,31 @@ fn kind_bg(kind: Option<LineKind>, theme: &ResolvedCodeTheme) -> Rgba {
 
 fn kind_edge(kind: LineKind, theme: &ResolvedCodeTheme) -> Rgba {
     match kind {
-        LineKind::Replace => theme.derived.replaced_edge,
-        LineKind::Insert => theme.derived.added_edge,
-        LineKind::Delete => theme.derived.deleted_edge,
-        LineKind::Equal => theme.derived.unchanged_edge,
+        LineKind::Replace => theme.marks.replaced_edge,
+        LineKind::Insert => theme.marks.added_edge,
+        LineKind::Delete => theme.marks.deleted_edge,
+        LineKind::Equal => theme.marks.unchanged_edge,
     }
 }
 
 /// A seam on the old side is an insertion point, on the new side a deletion point.
 fn seam_color(side: Side, theme: &ResolvedCodeTheme) -> Rgba {
     match side {
-        Side::Preimage => theme.derived.added_edge,
-        Side::Postimage => theme.derived.deleted_edge,
+        Side::Preimage => theme.marks.added_edge,
+        Side::Postimage => theme.marks.deleted_edge,
     }
 }
 
 fn hline(x0: f32, x1: f32, y: f32, h: f32) -> Bounds<Pixels> {
     Bounds::from_corners(point(px(x0), px(y)), point(px(x1.max(x0)), px(y + h)))
+}
+
+fn paint_scrollbar_track(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    colors: theme::ScrollbarColors,
+) {
+    window.paint_quad(fill(bounds, colors.track).corner_radii(px(scrollbar::TRACK_WIDTH / 2.)));
 }
 
 impl Frame {
@@ -1234,15 +1250,20 @@ impl Frame {
         bars: &BarState,
     ) {
         let track = self.geom.h_track(side);
-        let inset = (scrollbar::TRACK_WIDTH - scrollbar::THUMB_WIDTH) / 2.;
+        let hovered = bars.h_hovered[side_ix(side)];
+        let dragging = bars.h_drag.is_some_and(|(s, _)| s == side);
+        let thickness = scrollbar::thumb_width(hovered, dragging);
+        let inset = (scrollbar::TRACK_WIDTH - thickness) / 2.;
         let rect = Bounds::new(
             point(track.left() + px(geom.thumb_left), track.top() + px(inset)),
-            size(px(geom.thumb_width), px(scrollbar::THUMB_WIDTH)),
+            size(px(geom.thumb_width), px(thickness)),
         );
         self.sides[side_ix(side)].h_thumb = Some(Thumb {
             rect,
+            thickness,
             shown: bars.h_shown(side),
-            dragging: bars.h_drag.is_some_and(|(s, _)| s == side),
+            hovered,
+            dragging,
         });
     }
 
@@ -1260,21 +1281,36 @@ impl Frame {
                 self.paint_gutter(window, cx);
             },
         );
-        paint_omit_waves(window, geom, &self.waves);
-        for frame in &self.sides {
+        paint_omit_waves(window, geom, &self.waves, &self.code_theme);
+        let scrollbar_colors = theme::software_palette().scrollbar;
+        for side in [Side::Preimage, Side::Postimage] {
+            let frame = &self.sides[side_ix(side)];
+            if frame
+                .thumb
+                .as_ref()
+                .is_some_and(|t| t.shown && (t.hovered || t.dragging))
+            {
+                paint_scrollbar_track(window, geom.track(side), scrollbar_colors);
+            }
+            if frame
+                .h_thumb
+                .as_ref()
+                .is_some_and(|t| t.shown && (t.hovered || t.dragging))
+            {
+                paint_scrollbar_track(window, geom.h_track(side), scrollbar_colors);
+            }
             for thumb in frame
                 .thumb
                 .iter()
                 .chain(frame.h_thumb.iter())
                 .filter(|t| t.shown)
             {
-                let color = if thumb.dragging {
-                    scrollbar::THUMB_ACTIVE
-                } else {
-                    scrollbar::THUMB_IDLE
-                };
                 window.paint_quad(
-                    fill(thumb.rect, rgb(color)).corner_radii(px(scrollbar::THUMB_WIDTH / 2.)),
+                    fill(
+                        thumb.rect,
+                        scrollbar_colors.thumb(thumb.hovered, thumb.dragging),
+                    )
+                    .corner_radii(px(thumb.thickness / 2.)),
                 );
             }
         }
@@ -1297,6 +1333,12 @@ impl Frame {
                     window.paint_quad(fill(
                         hline(x0, x1, row.y0, row.y1 - row.y0),
                         self.code_theme.slots.selection,
+                    ));
+                }
+                if row.drafting {
+                    window.paint_quad(fill(
+                        hline(x0 + 2., x0 + 4., row.y0, row.y1 - row.y0),
+                        self.code_theme.marks.drafting_edge,
                     ));
                 }
                 let (bar_x0, bar_x1, bar_text_inset) = comment_bar_layout(side, x0, x1);
@@ -1323,21 +1365,19 @@ impl Frame {
                     let y = row.y0 + (self.row_h - mark_h) / 2.;
                     let rect = hline(text_x + a, text_x + b, y, mark_h);
                     if is_cur {
-                        // Pulse: briefly enlarge ring, then settle on hit-cur + 1px ring.
+                        // A larger filled mark distinguishes the current hit;
+                        // navigation briefly expands it further.
                         let pulse = self.search_pulse.unwrap_or(0.);
-                        let ring = 1. + pulse * 2.;
-                        let ring_rect = hline(
-                            text_x + a - ring,
-                            text_x + b + ring,
-                            y - ring,
-                            mark_h + ring * 2.,
+                        let inset = 2. + pulse * 2.;
+                        let current_rect = hline(
+                            text_x + a - inset,
+                            text_x + b + inset,
+                            y - inset,
+                            mark_h + inset * 2.,
                         );
                         window.paint_quad(
-                            fill(ring_rect, self.code_theme.slots.search_ring)
-                                .corner_radii(px(2. + ring)),
-                        );
-                        window.paint_quad(
-                            fill(rect, self.code_theme.slots.search_current).corner_radii(px(2.)),
+                            fill(current_rect, self.code_theme.slots.search_current)
+                                .corner_radii(px(2. + inset)),
                         );
                     } else {
                         window.paint_quad(
@@ -1348,25 +1388,20 @@ impl Frame {
                 for &(a, b) in &row.occurrences {
                     window.paint_quad(fill(
                         hline(text_x + a, text_x + b, row.y0, row.y1 - row.y0),
-                        theme::occurrence_highlight(),
+                        Rgba {
+                            a: 0.22,
+                            ..self.code_theme.slots.selection
+                        },
                     ));
                 }
                 for &(a, b) in &row.chars {
                     window.paint_quad(fill(
                         hline(text_x + a, text_x + b, row.y0, row.y1 - row.y0),
-                        theme::text_selection(),
+                        Rgba {
+                            a: 0.45,
+                            ..self.code_theme.slots.selection
+                        },
                     ));
-                }
-                for &(a, b) in &row.marks {
-                    let rect = hline(
-                        text_x + a,
-                        text_x + b,
-                        row.y0 + (self.row_h - mark_h) / 2.,
-                        mark_h,
-                    );
-                    window.paint_quad(
-                        fill(rect, self.code_theme.slots.word_difference).corner_radii(px(2.)),
-                    );
                 }
                 if let Some(text) = &row.text {
                     text.paint(point(px(text_x), px(row.y0)), row_h, window, cx)
@@ -1482,7 +1517,12 @@ fn paint_comment_icon(window: &mut Window, icon: &IconSlot, theme: &ResolvedCode
         let wy = y0 - (wash - ICON_GLYPH) / 2.;
         let wash_bounds =
             Bounds::from_corners(point(px(wx), px(wy)), point(px(wx + wash), px(wy + wash)));
-        window.paint_quad(fill(wash_bounds, theme.derived.open_comment_pad).corner_radii(px(4.)));
+        window.paint_quad(fill(wash_bounds, theme.slots.comment).corner_radii(px(4.)));
+        let pad_bounds = Bounds::from_corners(
+            point(px(wx + 1.), px(wy + 1.)),
+            point(px(wx + wash - 1.), px(wy + wash - 1.)),
+        );
+        window.paint_quad(fill(pad_bounds, theme.marks.open_comment_pad).corner_radii(px(3.)));
     }
     match icon.mark {
         IconMark::Empty => {
@@ -1534,7 +1574,7 @@ fn paint_comment_icon(window: &mut Window, icon: &IconSlot, theme: &ResolvedCode
                 stroke.move_to(at(5.2, y));
                 stroke.line_to(at(x1, y));
                 if let Ok(path) = stroke.build() {
-                    window.paint_path(path, theme.derived.knockout);
+                    window.paint_path(path, theme.slots.paper);
                 }
             }
         }
@@ -1633,7 +1673,12 @@ fn tab(bridge: &WinBridge, side: Side, flat_w: f32) -> (PathBuilder, PathBuilder
     (fill, edges)
 }
 
-fn paint_omit_waves(window: &mut Window, geom: Geom, folds: &[(f32, f32)]) {
+fn paint_omit_waves(
+    window: &mut Window,
+    geom: Geom,
+    folds: &[(f32, f32)],
+    theme: &ResolvedCodeTheme,
+) {
     if folds.is_empty() {
         return;
     }
@@ -1649,8 +1694,7 @@ fn paint_omit_waves(window: &mut Window, geom: Geom, folds: &[(f32, f32)]) {
             let flat = geom.flat_w();
             let path = joined_wave(x0, x1, y_l, gutter_l + flat, gutter_r - flat, y_r);
             if let Ok(path) = path.build() {
-                // Center omission sine, pinned to today's paint.
-                window.paint_path(path, rgb(0xb5b5b5));
+                window.paint_path(path, theme.marks.omission_wave);
             }
         }
     });
@@ -1712,7 +1756,7 @@ fn paint_gaps(
             continue;
         }
         let rect = hline(f32::from(pane.left()), f32::from(pane.right()), y0, y1 - y0);
-        window.paint_quad(fill(rect, theme.derived.omission_fill));
+        window.paint_quad(fill(rect, theme.marks.omission_fill));
         window.with_content_mask(Some(ContentMask { bounds: rect }), |window| {
             let width = f32::from(rect.size.width);
             let left = f32::from(rect.left());
@@ -1724,7 +1768,7 @@ fn paint_gaps(
                 stroke.move_to(point(px(left), px(y)));
                 stroke.line_to(point(px(left + width), px(y + width)));
                 if let Ok(path) = stroke.build() {
-                    window.paint_path(path, theme.derived.omission_wave);
+                    window.paint_path(path, theme.marks.omission_wave);
                 }
                 y += 7.;
             }
@@ -2014,6 +2058,7 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::rgb;
 
     #[test]
     fn comment_bar_hugs_the_center_gutter() {
@@ -2123,7 +2168,7 @@ mod tests {
         use crate::syntax::CaptureId;
         let kw = rgb(0xaa00aa);
         let str_c = rgb(0x00aa00);
-        let def = theme::text();
+        let def = theme::software_palette().text.primary;
         let palette = [kw, str_c];
         let got = |line: &str, spans: &[(Range<usize>, CaptureId)]| {
             let tabs = TabExpansion::new(line);

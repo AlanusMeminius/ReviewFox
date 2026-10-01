@@ -62,41 +62,49 @@ pub struct SettingsFile {
         skip_serializing_if = "Option::is_none"
     )]
     pub soft_wrap: Option<bool>,
+    /// Software Theme: `dark` selects the dark chrome; missing means light.
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub software_theme: Option<String>,
     /// Code Theme while the Software Theme is light. Missing means One Light.
     /// `one-light` is omitted on save; any other id, including an unknown one,
     /// is kept.
     #[serde(
         default,
         deserialize_with = "lenient",
-        skip_serializing_if = "omit_code_theme_id"
+        skip_serializing_if = "omit_light_code_theme_id"
     )]
     pub code_theme_light: Option<String>,
-    /// Code Theme while the Software Theme is dark. Same storage rules. Ignored
-    /// while the Software Theme stays light.
+    /// Code Theme while the Software Theme is dark. Missing means One Dark;
+    /// explicit `one-light` is stored and remains a valid opposite-light choice.
     #[serde(
         default,
         deserialize_with = "lenient",
-        skip_serializing_if = "omit_code_theme_id"
+        skip_serializing_if = "omit_dark_code_theme_id"
     )]
     pub code_theme_dark: Option<String>,
 }
 
-/// Default Code Theme id (`ui::code_theme`'s fallback). Omitted on save so a
-/// later default still applies.
-const DEFAULT_CODE_THEME_ID: &str = "one-light";
-
-fn is_default_code_theme(id: &str) -> bool {
-    id == DEFAULT_CODE_THEME_ID
+fn omit_light_code_theme_id(id: &Option<String>) -> bool {
+    id.as_deref()
+        .is_none_or(|id| id == crate::theme_defaults::LIGHT_CODE_THEME_ID)
 }
 
-/// `None` and [`DEFAULT_CODE_THEME_ID`] are not written.
-fn omit_code_theme_id(id: &Option<String>) -> bool {
-    id.as_deref().is_none_or(is_default_code_theme)
+fn omit_dark_code_theme_id(id: &Option<String>) -> bool {
+    id.as_deref()
+        .is_none_or(|id| id == crate::theme_defaults::DARK_CODE_THEME_ID)
 }
 
-/// Store `id`, or clear it when it is the default Code Theme.
-pub fn code_theme_choice(id: Option<String>) -> Option<String> {
-    id.filter(|id| !is_default_code_theme(id))
+/// Preserve unknown and opposite-light choices; clear only this mode's default.
+pub fn code_theme_choice_light(id: Option<String>) -> Option<String> {
+    id.filter(|id| id != crate::theme_defaults::LIGHT_CODE_THEME_ID)
+}
+
+pub fn code_theme_choice_dark(id: Option<String>) -> Option<String> {
+    id.filter(|id| id != crate::theme_defaults::DARK_CODE_THEME_ID)
 }
 
 /// Whether horizontal input moves both diff panes together.
@@ -326,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn code_theme_ids_roundtrip_and_one_light_is_omitted() {
+    fn code_theme_ids_roundtrip_with_mode_specific_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = store_path_for_tests(dir.path());
         let file = SettingsFile {
@@ -339,18 +347,32 @@ mod tests {
 
         let defaults = SettingsFile {
             code_theme_light: Some("one-light".into()),
-            code_theme_dark: Some("one-light".into()),
+            code_theme_dark: Some("one-dark".into()),
             ..Default::default()
         };
         save_file_at(&path, &defaults).unwrap();
         let json = fs::read_to_string(&path).unwrap();
         assert!(
-            !json.contains("one-light") && !json.contains("code_theme"),
-            "the default Code Theme id is omitted on save: {json}"
+            !json.contains("code_theme"),
+            "each mode's default Code Theme id is omitted on save: {json}"
         );
         let loaded = load_file_at(&path);
         assert_eq!(loaded.code_theme_light, None);
         assert_eq!(loaded.code_theme_dark, None);
+
+        let opposite = SettingsFile {
+            code_theme_light: Some("one-dark".into()),
+            code_theme_dark: Some("one-light".into()),
+            ..Default::default()
+        };
+        save_file_at(&path, &opposite).unwrap();
+        assert_eq!(load_file_at(&path), opposite);
+        assert_eq!(code_theme_choice_light(Some("one-light".into())), None);
+        assert_eq!(code_theme_choice_dark(Some("one-dark".into())), None);
+        assert_eq!(
+            code_theme_choice_dark(Some("one-light".into())),
+            Some("one-light".into())
+        );
         fs::remove_dir_all(dir.path()).ok();
     }
 
@@ -373,6 +395,22 @@ mod tests {
                 ..Default::default()
             }
         );
+        fs::remove_dir_all(dir.path()).ok();
+    }
+
+    #[test]
+    fn software_theme_roundtrips_and_bad_types_load_as_light() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path_for_tests(dir.path());
+        let file = SettingsFile {
+            software_theme: Some("dark".into()),
+            ..Default::default()
+        };
+        save_file_at(&path, &file).unwrap();
+        assert_eq!(load_file_at(&path).software_theme, Some("dark".into()));
+
+        fs::write(&path, r#"{ "software_theme": 7 }"#).unwrap();
+        assert_eq!(load_file_at(&path).software_theme, None);
         fs::remove_dir_all(dir.path()).ok();
     }
 

@@ -557,7 +557,8 @@ fn render_with_fonts(source: &str, fonts: &MarkdownFonts, sink: Option<&mut Rend
     with_font_family(
         render_blocks(&document.blocks, fonts, &mut link_index, sink)
             .text_size(markdown_text_size(fonts, 1.0))
-            .line_height(markdown_line_height()),
+            .line_height(markdown_line_height())
+            .text_color(theme::software_palette().markdown.body),
         fonts.body.as_deref(),
     )
 }
@@ -584,9 +585,7 @@ fn code_block_chrome(code_block_id: usize, fonts: &MarkdownFonts) -> Stateful<Di
             .overflow_x_scroll()
             .p_3()
             .rounded_md()
-            .bg(theme::hover())
-            .border_1()
-            .border_color(theme::line()),
+            .bg(theme::software_palette().markdown.code_surface),
         fonts.code.as_deref(),
     )
     .text_size(markdown_text_size(fonts, 1.0))
@@ -605,7 +604,7 @@ fn language_label(language: &str, fonts: &MarkdownFonts) -> Div {
             .line_height(markdown_line_height()),
         fonts.body.as_deref(),
     )
-    .text_color(theme::muted())
+    .text_color(theme::software_palette().markdown.secondary)
     .child(language.to_owned())
 }
 
@@ -613,7 +612,11 @@ fn language_label(language: &str, fonts: &MarkdownFonts) -> Div {
 #[cfg(test)]
 fn inline_code_span(code: &str, fonts: &MarkdownFonts) -> Div {
     with_font_family(
-        div().mx_1().px_1().rounded_sm().bg(theme::hover()),
+        div()
+            .mx_1()
+            .px_1()
+            .rounded_sm()
+            .bg(theme::software_palette().markdown.inline_code_surface),
         fonts.code.as_deref(),
     )
     .child(code.to_owned())
@@ -661,7 +664,7 @@ fn render_block(
                 .w_full()
                 .min_w(px(0.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::text())
+                .text_color(theme::software_palette().markdown.body)
                 .line_height(markdown_line_height())
                 .child(render_inlines(content, fonts, sink));
             let ratio = match level {
@@ -680,9 +683,7 @@ fn render_block(
             div()
                 .w_full()
                 .pl_3()
-                .border_l_2()
-                .border_color(theme::faint())
-                .text_color(theme::muted())
+                .text_color(theme::software_palette().markdown.secondary)
                 .child(render_blocks(blocks, fonts, link_index, sink))
                 .into_any_element()
         }
@@ -741,7 +742,7 @@ fn render_block(
                             div()
                                 .w(px(22.))
                                 .flex_none()
-                                .text_color(theme::muted())
+                                .text_color(theme::software_palette().markdown.secondary)
                                 .child(marker),
                         )
                         .child(
@@ -763,8 +764,6 @@ fn render_block(
                 .id(("markdown-table", table_id))
                 .w_full()
                 .overflow_x_scroll()
-                .border_1()
-                .border_color(theme::line())
                 .rounded_md();
             if !head.is_empty() {
                 table = table.child(render_table_row(head, true, fonts, sink.as_deref_mut()));
@@ -774,11 +773,7 @@ fn render_block(
             }
             table.into_any_element()
         }
-        Block::Rule => div()
-            .w_full()
-            .h(px(1.))
-            .bg(theme::line())
-            .into_any_element(),
+        Block::Rule => div().w_full().h(px(8.)).into_any_element(),
     }
 }
 
@@ -788,13 +783,9 @@ fn render_table_row(
     fonts: &MarkdownFonts,
     mut sink: Option<&mut RenderSink>,
 ) -> Div {
-    let mut row = div()
-        .flex()
-        .min_w(px(320.))
-        .border_b_1()
-        .border_color(theme::border_variant());
+    let mut row = div().flex().min_w(px(320.));
     if header {
-        row = row.bg(theme::hover());
+        row = row.bg(theme::software_palette().markdown.table_header);
     }
     for (i, cell) in cells.iter().enumerate() {
         if let Some(sink) = sink.as_mut() {
@@ -804,13 +795,7 @@ fn render_table_row(
                 sink.block_break();
             }
         }
-        let mut cell_element = div()
-            .min_w(px(120.))
-            .flex_1()
-            .px_3()
-            .py_2()
-            .border_r_1()
-            .border_color(theme::border_variant());
+        let mut cell_element = div().min_w(px(120.)).flex_1().px_3().py_2();
         if header {
             cell_element = cell_element.font_weight(FontWeight::SEMIBOLD);
         }
@@ -886,6 +871,7 @@ impl InlineStyle {
             return None;
         }
         let mut style = HighlightStyle::default();
+        let colors = theme::software_palette().markdown;
         if self.strong {
             style.font_weight = Some(FontWeight::SEMIBOLD);
         }
@@ -899,13 +885,13 @@ impl InlineStyle {
             });
         }
         if self.code {
-            style.background_color = Some(theme::hover().into());
+            style.background_color = Some(colors.inline_code_surface.into());
         }
         if self.link {
-            style.color = Some(theme::accent().into());
+            style.color = Some(colors.link.into());
             style.underline = Some(UnderlineStyle {
                 thickness: px(1.),
-                color: Some(theme::accent().into()),
+                color: Some(colors.link.into()),
                 wavy: false,
             });
         }

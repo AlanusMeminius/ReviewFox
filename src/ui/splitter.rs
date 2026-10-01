@@ -303,7 +303,10 @@ pub fn handle(
                 window.paint_quad(
                     fill(
                         capsule_bounds(axis, bounds),
-                        theme::splitter_capsule(capsule_alpha(&paint_state)),
+                        gpui::Rgba {
+                            a: capsule_alpha(&paint_state),
+                            ..theme::software_palette().text.secondary
+                        },
                     )
                     .corner_radii(px(CAPSULE_RADIUS)),
                 );
@@ -376,11 +379,15 @@ pub fn handle(
             };
             el.w(px(w)).h_full().cursor_col_resize()
         }
-        // Without chrome, fill white so a Transparent root doesn't punch through.
+        // Without chrome, use the island surface so the root material does not show through.
         // With chrome, the strip stays clear — only the center stadium paints.
         Axis::Vertical => {
             let el = el.h(px(HANDLE_WIDTH)).w_full().cursor_row_resize();
-            if chrome { el } else { el.bg(theme::white()) }
+            if chrome {
+                el
+            } else {
+                el.bg(theme::software_palette().surface.island)
+            }
         }
         // MR detail ↔ Commit island: clear hit strip doubles as the frost gap.
         Axis::VerticalNorth => el.h(px(theme::CHANGES_INSET)).w_full().cursor_row_resize(),

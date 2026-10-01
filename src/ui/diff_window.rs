@@ -1316,7 +1316,7 @@ impl DiffView {
                             .flex_1()
                             .min_w(px(0.))
                             .overflow_hidden()
-                            .bg(theme::sidebar())
+                            .bg(theme::software_palette().surface.desk)
                             .flex()
                             .flex_col()
                             .pt(px(theme::CHANGES_TOP_INSET))
@@ -1416,9 +1416,9 @@ impl Render for DiffView {
             .relative()
             .size_full()
             .overflow_hidden()
-            // The window's one translucent layer; the tree column and the stage stay
-            // clear so it is never painted twice.
-            .bg(theme::frost())
+            // The window's one full-width tint. The tree adds a bounded
+            // backing for labels; the stage does not compound the material.
+            .bg(theme::software_palette().surface.window_backing)
             .font_family(appearance::ui_font(cx))
             // Unsized UI text inherits gpui's 1rem default (16px), scaled like the rest.
             .ui_text_size(16., cx)
@@ -1486,7 +1486,7 @@ fn file_status(view: &DiffView, cx: &mut Context<DiffView>) -> (String, String) 
     }
 }
 
-/// Rides on the stage under the island: the file being read and where in it.
+/// Rides transparently on the stage under the island: the file being read and where in it.
 fn render_status_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     let (path, subtitle) = file_status(view, cx);
     div()
@@ -1499,7 +1499,7 @@ fn render_status_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
         .items_center()
         .gap_2()
         .text_xs()
-        .text_color(theme::muted())
+        .text_color(theme::software_palette().text.secondary)
         .child(
             div()
                 .flex_1()
@@ -1513,7 +1513,7 @@ fn render_status_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
         .child(div().flex_none().whitespace_nowrap().child(subtitle))
 }
 
-/// The status bar's band below the island. It replaces the stage's bottom inset,
+/// The status bar's space below the island. It replaces the stage's bottom inset,
 /// so the text sits centred between the island and the window edge.
 const STATUS_BAR_HEIGHT: f32 = 28.;
 
@@ -1533,6 +1533,7 @@ fn render_titlebar(
         .id("diff-titlebar")
         .map(|bar| super::titlebar::app_owned(bar, window))
         .h(theme::TITLEBAR_HEIGHT)
+        .bg(theme::software_palette().surface.titlebar_backing)
         .flex_none()
         .flex()
         .items_center()
@@ -1671,7 +1672,7 @@ fn render_titlebar(
                     div()
                         .flex_none()
                         .ui_text_size(12., cx)
-                        .text_color(theme::accent())
+                        .text_color(theme::software_palette().text.titlebar_link)
                         .child(status.clone())
                 }))
                 .child(
@@ -1740,10 +1741,9 @@ fn render_tree_pane(
         .flex()
         .flex_col()
         .overflow_hidden()
-        // A clear column straight on the frosted desk, not an island - same role as
-        // the main window's workspace sidebar. Filter and fold sit at the top;
-        // the titlebar still owns the tree toggle.
-        .bg(theme::sidebar())
+        // Light appearance exposes the native frosted material; dark appearance
+        // adds a bounded tint behind ChangedPath labels.
+        .bg(theme::software_palette().tree.desk.backing)
         .child(
             div()
                 .flex_none()
@@ -1761,19 +1761,18 @@ fn render_tree_pane(
                         .items_center()
                         .rounded(px(6.))
                         .border_1()
-                        .border_color(if filter_focused {
-                            theme::border_focused()
-                        } else {
-                            theme::line()
+                        .border_color(gpui::Rgba {
+                            a: if filter_focused { 1. } else { 0. },
+                            ..theme::software_palette().field.focused_border
                         })
-                        .bg(theme::sidebar_row_selected())
+                        .bg(theme::software_palette().field.surface)
                         .child(
                             svg()
                                 .ml_2()
                                 .size(theme::ICON_SIZE_SM)
                                 .flex_none()
                                 .path("search.svg")
-                                .text_color(theme::faint()),
+                                .text_color(theme::software_palette().text.secondary),
                         )
                         .child(
                             div()
@@ -1794,7 +1793,7 @@ fn render_tree_pane(
                                     .justify_center()
                                     .rounded(px(4.))
                                     .cursor_pointer()
-                                    .hover(|d| d.bg(theme::hover()))
+                                    .hover(|d| d.bg(theme::software_palette().control.hover))
                                     .tooltip(Tooltip::text("Clear", None))
                                     .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
                                         window.prevent_default();
@@ -1811,7 +1810,7 @@ fn render_tree_pane(
                                             .size(px(12.))
                                             .flex_none()
                                             .path("close.svg")
-                                            .text_color(theme::faint()),
+                                            .text_color(theme::software_palette().text.secondary),
                                     ),
                             )
                         }),
@@ -1931,7 +1930,7 @@ fn render_dual_pane(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEle
         .min_h(px(0.))
         .flex()
         .flex_col()
-        .bg(theme::white())
+        .bg(theme::software_palette().surface.island)
         .rounded(px(theme::CHANGES_RADIUS))
         .overflow_hidden()
         // The pane paints at the window root (see `pane::slot`) and gpui clips
@@ -1969,6 +1968,7 @@ fn render_search_bar(
     window: &Window,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
+    let palette = theme::software_palette();
     let matches = view.current_matches();
     let total = matches.len();
     let current = view
@@ -1994,7 +1994,7 @@ fn render_search_bar(
         .gap_1()
         .p(px(theme::FIND_BAR_PAD))
         .rounded(px(theme::FIND_BAR_RADIUS))
-        .bg(theme::find_bar_bg())
+        .bg(theme::software_palette().surface.floating_overlay)
         .shadow(theme::find_bar_shadow())
         .child(
             div()
@@ -2004,11 +2004,11 @@ fn render_search_bar(
                 .flex()
                 .items_center()
                 .rounded(px(theme::FIND_FIELD_RADIUS))
+                .bg(palette.field.surface)
                 .border_1()
-                .border_color(if focused {
-                    theme::border_focused()
-                } else {
-                    theme::line()
+                .border_color(gpui::Rgba {
+                    a: if focused { 1. } else { 0. },
+                    ..palette.field.focused_border
                 })
                 .child(view.search_field.clone()),
         )
@@ -2024,11 +2024,7 @@ fn render_search_bar(
             div()
                 .flex_none()
                 .ui_text_size(12., cx)
-                .text_color(if total == 0 {
-                    theme::faint()
-                } else {
-                    theme::muted()
-                })
+                .text_color(palette.text.secondary)
                 .child(count),
         )
         .child(
@@ -2051,18 +2047,17 @@ fn render_search_bar(
         .into_any_element()
 }
 
-/// Find Side/Files track: same height / inset / radius / border as [`capsule`].
+/// Find Side/Files track: same height and rounded inset as [`capsule`].
 fn search_seg_track() -> Div {
+    let palette = theme::software_palette();
     div()
         .flex_none()
         .h(theme::TOGGLE_SIZE)
         .flex()
         .items_center()
         .p(px(NAV_INSET))
-        .rounded(px(NAV_BUTTON_RADIUS + NAV_INSET + 1.))
-        .border_1()
-        .border_color(theme::line())
-        .bg(theme::white())
+        .rounded(px(NAV_BUTTON_RADIUS + NAV_INSET))
+        .bg(palette.field.surface)
 }
 
 fn search_seg_btn(
@@ -2072,6 +2067,7 @@ fn search_seg_btn(
     cx: &mut Context<DiffView>,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let palette = theme::software_palette();
     div()
         .id(id)
         .h_full()
@@ -2080,8 +2076,12 @@ fn search_seg_btn(
         .flex()
         .items_center()
         .cursor_pointer()
-        .when(selected, |d| d.bg(theme::range()))
-        .when(!selected, |d| d.hover(|d| d.bg(theme::hover())))
+        .when(selected, |d| {
+            d.bg(theme::software_palette().control.selected)
+        })
+        .when(!selected, |d| {
+            d.hover(|d| d.bg(theme::software_palette().control.hover))
+        })
         .on_click(on_click)
         .child(
             div()
@@ -2092,9 +2092,9 @@ fn search_seg_btn(
                     gpui::FontWeight::NORMAL
                 })
                 .text_color(if selected {
-                    theme::accent()
+                    theme::software_palette().text.link
                 } else {
-                    theme::muted()
+                    palette.text.secondary
                 })
                 .child(label),
         )
@@ -2282,7 +2282,7 @@ fn render_comment_island(
         .min_h(px(0.))
         .flex()
         .flex_col()
-        .bg(theme::white())
+        .bg(theme::software_palette().surface.island)
         .rounded(px(theme::CHANGES_RADIUS))
         .overflow_hidden()
         .child(
@@ -2298,14 +2298,14 @@ fn render_comment_island(
                     div()
                         .ui_text_size(11., cx)
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::faint())
+                        .text_color(theme::software_palette().text.section)
                         .child("COMMENTS"),
                 )
                 .when(n > 0, |header| {
                     header.child(
                         div()
                             .ui_text_size(11., cx)
-                            .text_color(theme::muted())
+                            .text_color(theme::software_palette().text.secondary)
                             .child(format!("{n}")),
                     )
                 }),
@@ -2335,6 +2335,7 @@ fn render_comment_island(
                             }
                             Anchor::File { .. } => false,
                         };
+                        let palette = theme::software_palette();
                         div()
                             .id(("cmt", c.id as usize))
                             .mx_1()
@@ -2343,13 +2344,20 @@ fn render_comment_island(
                             .py_2()
                             .rounded_lg()
                             .cursor_pointer()
-                            .when(selected, |row| row.bg(theme::range()))
+                            .when(selected, |row| row.bg(palette.control.selected))
                             .hover(move |row| {
-                                if selected {
-                                    row.bg(theme::range())
+                                row.bg(if selected {
+                                    palette.control.selected_hover
                                 } else {
-                                    row.bg(theme::hover())
-                                }
+                                    palette.control.hover
+                                })
+                            })
+                            .active(move |row| {
+                                row.bg(if selected {
+                                    palette.control.selected_pressed
+                                } else {
+                                    palette.control.pressed
+                                })
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.select_comment(id, window, cx)
@@ -2367,7 +2375,7 @@ fn render_comment_island(
                                             .font_family(mono.clone())
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(theme::accent())
+                                            .text_color(theme::software_palette().text.primary)
                                             .overflow_hidden()
                                             .text_ellipsis()
                                             .whitespace_nowrap()
@@ -2404,7 +2412,7 @@ fn render_comment_island(
                                 div()
                                     .mt(px(4.))
                                     .ui_text_size(12., cx)
-                                    .text_color(theme::text())
+                                    .text_color(theme::software_palette().text.primary)
                                     .child(c.body),
                             )
                     })),
@@ -2422,7 +2430,7 @@ fn render_no_comments(cx: &App) -> impl IntoElement {
         .flex()
         .flex_col()
         .gap_1()
-        .text_color(theme::muted())
+        .text_color(theme::software_palette().text.secondary)
         .child(div().ui_text_size(12., cx).child("No comments"))
         .child(
             div()
@@ -2456,6 +2464,7 @@ fn render_draft_dock(
     window: &Window,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
+    let palette = theme::software_palette();
     let Some(draft) = view.open_review.dock() else {
         return div().into_any_element();
     };
@@ -2477,7 +2486,7 @@ fn render_draft_dock(
         .gap(px(theme::DRAFT_DOCK_GAP))
         .p(px(theme::FIND_BAR_PAD))
         .rounded(px(theme::FIND_BAR_RADIUS))
-        .bg(theme::find_bar_bg())
+        .bg(theme::software_palette().surface.floating_overlay)
         .shadow(theme::find_bar_shadow())
         .occlude()
         .child(
@@ -2491,7 +2500,7 @@ fn render_draft_dock(
                 .child(
                     div()
                         .ui_text_size(11., cx)
-                        .text_color(theme::muted())
+                        .text_color(palette.text.secondary)
                         .child(if draft.editing.is_some() {
                             "Edit DraftComment ·"
                         } else {
@@ -2502,7 +2511,7 @@ fn render_draft_dock(
                     div()
                         .font_family(mono)
                         .text_xs()
-                        .text_color(theme::text())
+                        .text_color(palette.text.primary)
                         .child(label),
                 )
                 .child(
@@ -2510,7 +2519,7 @@ fn render_draft_dock(
                         .flex_1()
                         .min_w(px(0.))
                         .ui_text_size(11., cx)
-                        .text_color(theme::faint())
+                        .text_color(palette.text.secondary)
                         .child("Enter to save · Shift-Enter for a newline · Esc to cancel"),
                 )
                 .child(
@@ -2526,18 +2535,18 @@ fn render_draft_dock(
                 .flex()
                 .items_start()
                 .rounded(px(theme::FIND_FIELD_RADIUS))
+                .bg(palette.field.surface)
                 .border_1()
-                .border_color(if focused {
-                    theme::border_focused()
-                } else {
-                    theme::line()
+                .border_color(gpui::Rgba {
+                    a: if focused { 1. } else { 0. },
+                    ..palette.field.focused_border
                 })
                 .child(view.draft_field.clone()),
         )
         .into_any_element()
 }
 
-/// Inset between the nav capsule's border and its buttons.
+/// Inset between the nav capsule's edge and its buttons.
 const NAV_INSET: f32 = 2.;
 const NAV_BUTTON_RADIUS: f32 = 5.;
 
@@ -2576,7 +2585,7 @@ fn nav_counter(text: String, total: usize, window: &Window, cx: &App) -> Div {
         .w(px(f32::from(width).ceil()))
         .whitespace_nowrap()
         .text_right()
-        .text_color(theme::text())
+        .text_color(theme::software_palette().text.primary)
         .child(text)
 }
 
@@ -2635,10 +2644,22 @@ fn render_nav_capsule(
                 .items_center()
                 .gap_1()
                 .ui_label_size(12., cx)
-                .child(div().text_color(theme::faint()).child("File"))
+                .child(
+                    div()
+                        .text_color(theme::software_palette().text.secondary)
+                        .child("File"),
+                )
                 .child(nav_counter(file, total, window, cx))
-                .child(div().text_color(theme::faint()).child("·"))
-                .child(div().text_color(theme::faint()).child("Hunk"))
+                .child(
+                    div()
+                        .text_color(theme::software_palette().text.secondary)
+                        .child("·"),
+                )
+                .child(
+                    div()
+                        .text_color(theme::software_palette().text.secondary)
+                        .child("Hunk"),
+                )
                 .child(nav_counter(hunk, hunk_count, window, cx)),
         )
         .child(nav_button(
@@ -2673,7 +2694,7 @@ fn capsule() -> Div {
         .gap(px(NAV_INSET))
         // Concentric with the buttons' hover: button radius + inset.
         .rounded(px(NAV_BUTTON_RADIUS + NAV_INSET))
-        .bg(theme::white())
+        .bg(theme::software_palette().surface.island)
 }
 
 /// Fills the capsule's height: `TOGGLE_SIZE` less inset on both sides.
@@ -2688,11 +2709,11 @@ fn nav_button(
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let color = if !enabled {
-        theme::faint()
+        theme::software_palette().text.disabled
     } else if pressed {
-        theme::accent()
+        theme::software_palette().text.link
     } else {
-        theme::muted()
+        theme::software_palette().text.secondary
     };
     div()
         .id(id)
@@ -2703,13 +2724,15 @@ fn nav_button(
         .items_center()
         .justify_center()
         .rounded(px(NAV_BUTTON_RADIUS))
-        .when(pressed, |button| button.bg(theme::range()))
+        .when(pressed, |button| {
+            button.bg(theme::software_palette().control.selected)
+        })
         .tooltip(Tooltip::text(tooltip, shortcut))
         .when(enabled, |button| {
             button
                 .cursor_pointer()
-                .hover(|button| button.bg(theme::hover()))
-                .active(|button| button.bg(theme::element_active()))
+                .hover(|button| button.bg(theme::software_palette().control.hover))
+                .active(|button| button.bg(theme::software_palette().control.pressed))
                 .on_click(on_click)
         })
         .child(
@@ -2746,13 +2769,13 @@ fn font_size_group(font_px: u32, cx: &mut Context<DiffView>) -> impl IntoElement
                 .rounded(px(NAV_BUTTON_RADIUS))
                 .cursor_pointer()
                 .text_color(if font_px == DiffFontSize::DEFAULT {
-                    theme::muted()
+                    theme::software_palette().text.secondary
                 } else {
-                    theme::accent()
+                    theme::software_palette().text.link
                 })
                 .tooltip(Tooltip::text("Reset Text Size", Some(tooltip::cmd("0"))))
-                .hover(|button| button.bg(theme::hover()))
-                .active(|button| button.bg(theme::element_active()))
+                .hover(|button| button.bg(theme::software_palette().control.hover))
+                .active(|button| button.bg(theme::software_palette().control.pressed))
                 .on_click(cx.listener(|this, _, _, cx| this.font_size(FontOp::Reset, cx)))
                 .child(div().ui_label_size(12., cx).child(font_px.to_string())),
         )

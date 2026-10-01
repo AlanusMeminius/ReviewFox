@@ -432,9 +432,7 @@ impl Model {
                 } else {
                     click_result(press.side, press.origin, press.prior, line)
                 };
-                self.selection = if press.clicks >= 2
-                    && same_identifier(press.prior, next, line)
-                {
+                self.selection = if press.clicks >= 2 && same_identifier(press.prior, next, line) {
                     press.prior
                 } else {
                     next
@@ -751,12 +749,10 @@ fn same_identifier<'a>(
     };
     let text = |selection: TextSelection| {
         (selection.start_line == selection.end_line).then(|| {
-            line(selection.side, selection.start_line)
-                .get(selection.start_byte..selection.end_byte)
+            line(selection.side, selection.start_line).get(selection.start_byte..selection.end_byte)
         })
     };
-    let (Some(prior_text), Some(next_text)) = (text(prior).flatten(), text(next).flatten())
-    else {
+    let (Some(prior_text), Some(next_text)) = (text(prior).flatten(), text(next).flatten()) else {
         return false;
     };
     exact_identifier(prior, prior_text) == Some(prior_text)
@@ -1797,7 +1793,13 @@ mod tests {
             &mut model,
             &pre,
             &[],
-            &[multi(Phase::Press, Side::Preimage, RowClass::Text { ln: 1 }, 4, 2)],
+            &[multi(
+                Phase::Press,
+                Side::Preimage,
+                RowClass::Text { ln: 1 },
+                4,
+                2,
+            )],
         );
         assert_eq!(highlights(&model, &pre, &[], no_fold), old);
 
@@ -1805,10 +1807,17 @@ mod tests {
             &mut model,
             &pre,
             &[],
-            &[sample(Phase::Release, Side::Preimage, RowClass::Text { ln: 1 }, 4)],
+            &[sample(
+                Phase::Release,
+                Side::Preimage,
+                RowClass::Text { ln: 1 },
+                4,
+            )],
         );
         assert_eq!(
-            model.selection().map(|selection| (selection.start_byte, selection.end_byte)),
+            model
+                .selection()
+                .map(|selection| (selection.start_byte, selection.end_byte)),
             Some((4, 7))
         );
         assert!(highlights(&model, &pre, &[], no_fold).is_empty());
