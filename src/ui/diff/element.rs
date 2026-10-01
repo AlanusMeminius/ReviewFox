@@ -1680,12 +1680,12 @@ fn paint_omit_waves(
 
 const WAVE_PERIOD: f32 = 16.;
 const WAVE_AMP: f32 = 3.5;
-const WAVE_STEP: f32 = 2.;
+const WAVE_STEP: f32 = WAVE_PERIOD / 4.;
 
 /// One stroke. Code and line-number columns stay on a horizontal centerline;
-/// only the gap between the columns eases height (smoothstep, zero slope at
-/// both ends). A sine rides that centerline with phase from x alone, so the
-/// wave never stops oscillating through the height change.
+/// only the gap between the columns changes height. Nearby waves ease their
+/// phase to meet the smooth connector at opposite extrema, with horizontal
+/// tangents on both ends. Away from the join, phase still comes from x alone.
 fn joined_wave(x0: f32, x1: f32, y_l: f32, gap_l: f32, gap_r: f32, y_r: f32) -> PathBuilder {
     let mut path = PathBuilder::stroke(px(1.25));
     if x1 - x0 < 2. {
@@ -1693,34 +1693,80 @@ fn joined_wave(x0: f32, x1: f32, y_l: f32, gap_l: f32, gap_r: f32, y_r: f32) -> 
     }
     let gap_l = gap_l.clamp(x0, x1);
     let gap_r = (gap_l + 8.).max(gap_r).min(x1);
-    let flat = (y_r - y_l).abs() < 0.5;
-    let mut x = x0;
-    let mut first = true;
-    loop {
-        let xx = x.min(x1);
-        let base = if flat || xx <= gap_l {
-            y_l
-        } else if xx >= gap_r {
-            y_r
-        } else {
-            let t = (xx - gap_l) / (gap_r - gap_l);
-            let s = t * t * t * (t * (t * 6. - 15.) + 10.);
-            y_l + (y_r - y_l) * s
-        };
-        let y = base + (xx / WAVE_PERIOD * std::f32::consts::TAU).sin() * WAVE_AMP;
-        let p = point(px(xx), px(y));
-        if first {
-            path.move_to(p);
-            first = false;
-        } else {
-            path.line_to(p);
-        }
-        if xx >= x1 - 0.01 {
-            break;
-        }
-        x += WAVE_STEP;
+    if (y_r - y_l).abs() < 0.5 || gap_r <= gap_l {
+        let (y, _) = wave_at(x0, y_l, None);
+        path.move_to(point(px(x0), px(y)));
+        append_wave(&mut path, x0, x1, y_l, None);
+        return path;
     }
+
+    let direction = (y_r - y_l).signum();
+    let left_anchor = Some((gap_l, -direction));
+    let right_anchor = Some((gap_r, direction));
+    let (start_y, _) = wave_at(x0, y_l, left_anchor);
+    path.move_to(point(px(x0), px(start_y)));
+    append_wave(&mut path, x0, gap_l, y_l, left_anchor);
+
+    // Enter at the crest and leave at the trough (reversed for an upward
+    // connector). Keeping the handles horizontal removes shoulders and hooks.
+    let mid = (gap_l + gap_r) / 2.;
+    let left_y = y_l - direction * WAVE_AMP;
+    let right_y = y_r + direction * WAVE_AMP;
+    path.cubic_bezier_to(
+        point(px(gap_r), px(right_y)),
+        point(px(mid), px(left_y)),
+        point(px(mid), px(right_y)),
+    );
+    append_wave(&mut path, gap_r, x1, y_r, right_anchor);
     path
+}
+
+/// Height and tangent of the sine. Within two periods of a join, smoothly
+/// adjust its phase to land at the requested extremum (+1 trough, -1 crest).
+fn wave_at(x: f32, center_y: f32, anchor: Option<(f32, f32)>) -> (f32, f32) {
+    let frequency = std::f32::consts::TAU / WAVE_PERIOD;
+    let mut phase = x * frequency;
+    let mut phase_slope = frequency;
+    if let Some((anchor_x, extremum)) = anchor {
+        let span = WAVE_PERIOD * 2.;
+        let t = (1. - (x - anchor_x).abs() / span).clamp(0., 1.);
+        let target = extremum * std::f32::consts::FRAC_PI_2;
+        let shift = (target - anchor_x * frequency + std::f32::consts::PI)
+            .rem_euclid(std::f32::consts::TAU)
+            - std::f32::consts::PI;
+        phase += shift * t * t * (3. - 2. * t);
+        phase_slope += shift * 6. * t * (1. - t) * (anchor_x - x).signum() / span;
+    }
+    (
+        center_y + phase.sin() * WAVE_AMP,
+        phase.cos() * WAVE_AMP * phase_slope,
+    )
+}
+
+/// Cubic Hermite segments follow the sine's height and tangent, including the
+/// phase easing. Unlike a polyline, neighboring segments share a tangent.
+fn append_wave(
+    path: &mut PathBuilder,
+    x0: f32,
+    x1: f32,
+    center_y: f32,
+    anchor: Option<(f32, f32)>,
+) {
+    let mut x = x0;
+    let (mut y, mut slope) = wave_at(x, center_y, anchor);
+    while x < x1 {
+        let next_x = (x + WAVE_STEP).min(x1);
+        let (next_y, next_slope) = wave_at(next_x, center_y, anchor);
+        let handle_w = (next_x - x) / 3.;
+        path.cubic_bezier_to(
+            point(px(next_x), px(next_y)),
+            point(px(x + handle_w), px(y + slope * handle_w)),
+            point(px(next_x - handle_w), px(next_y - next_slope * handle_w)),
+        );
+        x = next_x;
+        y = next_y;
+        slope = next_slope;
+    }
 }
 
 fn paint_gaps(
