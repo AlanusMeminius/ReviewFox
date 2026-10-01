@@ -78,10 +78,18 @@ impl ReviewStore {
             contexts: contexts.clone(),
         };
         let bytes = serde_json::to_vec(&saved)?;
-        let temporary = path.with_extension("json.tmp");
-        std::fs::write(&temporary, bytes)?;
-        std::fs::rename(&temporary, &path)
-            .with_context(|| format!("Cannot save Review to {}", path.display()))?;
-        Ok(())
+        atomic_save(&path, &bytes)
     }
+}
+
+/// Replace a snapshot only after its complete content is flushed.
+pub fn atomic_save(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let temporary = path.with_extension("json.tmp");
+    let mut file = std::fs::File::create(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, path)
+        .with_context(|| format!("Cannot save local work to {}", path.display()))?;
+    Ok(())
 }

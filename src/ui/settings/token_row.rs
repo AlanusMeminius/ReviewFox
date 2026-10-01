@@ -7,7 +7,8 @@ use crate::ui::gitlab_connection::GitLabConnection;
 pub const TITLE: &str = "Personal Access Token";
 pub const PLACEHOLDER: &str = "glpat-xxxxxxxxxxxxxxxxxxxx";
 /// Description, split around the "GitLab access tokens" link.
-pub const DESCRIPTION_BEFORE_LINK: &str = "Create one with the read_api scope in ";
+pub const DESCRIPTION_BEFORE_LINK: &str =
+    "Create one with the api scope to publish, or read_api to browse, in ";
 pub const DESCRIPTION_LINK: &str = "GitLab access tokens";
 pub const DESCRIPTION_AFTER_LINK: &str = ".";
 pub const RETRY: &str = "Retry";

@@ -3,7 +3,7 @@ mod app_icon;
 mod app_view;
 mod appearance;
 mod code_theme;
-mod diff;
+pub(crate) mod diff;
 mod diff_window;
 mod entry_chrome;
 mod file_icons;

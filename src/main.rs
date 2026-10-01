@@ -4,6 +4,7 @@ mod domain;
 mod export;
 mod git;
 mod gitlab;
+mod gitlab_publication;
 mod loaded_browser;
 mod mr_entry;
 mod publication;

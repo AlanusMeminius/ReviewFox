@@ -1,3 +1,7 @@
+use crate::publication::{
+    Connection, PublicationRecord, PublicationService, PublicationState, PublicationStore,
+    ReviewOrigin,
+};
 use gpui::{
     Animation, AnimationExt, AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity,
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent,
@@ -5,7 +9,7 @@ use gpui::{
     Subscription, Task, Timer, WeakEntity, Window, WindowControlArea, actions, canvas, div,
     ease_out_quint, prelude::*, px, svg,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -105,6 +109,10 @@ pub struct DiffView {
     pub snapshot: Option<DiffSnapshot>,
     /// Review for the Comparison on screen, and the unsaved line dock.
     open_review: OpenReview,
+    publication_store: Option<PublicationStore>,
+    publication_records: HashMap<u64, PublicationRecord>,
+    publication_error: Option<String>,
+    publishing: HashSet<(Comparison, ReviewOrigin, u64)>,
     export_status: Option<String>,
     /// Ephemeral; paths in set are collapsed. Default empty = all expanded.
     collapsed_dirs: HashSet<String>,
@@ -282,6 +290,10 @@ impl DiffView {
             comment_resize_state: Rc::new(ResizeState::with_drag_latch()),
             snapshot: Some(snapshot),
             open_review,
+            publication_store: PublicationStore::application().ok(),
+            publication_records: HashMap::new(),
+            publication_error: None,
+            publishing: HashSet::new(),
             export_status: None,
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
@@ -321,8 +333,110 @@ impl DiffView {
             pane.set_sync_horizontal(this.sync_horizontal_scroll, cx);
             pane.set_soft_wrap(this.soft_wrap, cx);
         });
+        this.reload_publications();
         this.open_in_pane(cx);
         this
+    }
+
+    fn reload_publications(&mut self) {
+        self.publication_records.clear();
+        self.publication_error = None;
+        let Some(store) = &self.publication_store else {
+            self.publication_error = Some("Publication storage unavailable".into());
+            return;
+        };
+        for comment in &self.open_review.review().comments {
+            match store.load(
+                &self.open_review.review().comparison,
+                self.open_review.origin(),
+                comment.id,
+            ) {
+                Ok(Some(record)) => {
+                    self.publication_records.insert(comment.id, record);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.publication_error = Some(format!("{error:#}"));
+                }
+            }
+        }
+    }
+
+    fn publication_in_progress(&self, id: u64) -> bool {
+        self.publishing.contains(&(
+            self.open_review.review().comparison.clone(),
+            self.open_review.origin().clone(),
+            id,
+        ))
+    }
+
+    fn can_publish(&self, id: u64) -> bool {
+        self.publication_error.is_none()
+            && self.open_review.storage_error().is_none()
+            && self
+                .open_review
+                .origin()
+                .preparation_eligibility(&self.open_review.review().comparison)
+                .is_ok()
+            && !self.publication_in_progress(id)
+            && self.open_review.review().comments.iter().any(|c| {
+                c.id == id && matches!(&c.anchor, Anchor::Line { span, .. } if span.count==1)
+            })
+            && self
+                .publication_records
+                .get(&id)
+                .is_none_or(|record| matches!(record.state, PublicationState::Failed(_)))
+    }
+
+    fn publish_comment(&mut self, id: u64, cx: &mut Context<Self>) {
+        if !self.can_publish(id) {
+            return;
+        }
+        let Some(store) = self.publication_store.clone() else {
+            return;
+        };
+        let review = self.open_review.review().clone();
+        let contexts = self.open_review.contexts().clone();
+        let origin = self.open_review.origin().clone();
+        let key = (review.comparison.clone(), origin.clone(), id);
+        self.publishing.insert(key.clone());
+        let service = PublicationService::new(cx.http_client(), store);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let base_url = crate::settings_store::effective_base_url(
+                        &crate::settings_store::load_file(),
+                    );
+                    let connection = Connection::new(
+                        base_url,
+                        crate::settings_store::load_pat().unwrap_or_default(),
+                    );
+                    service
+                        .publish(&review, &contexts, &origin, id, &connection)
+                        .await
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.publishing.remove(&key);
+                if this.open_review.review().comparison == key.0
+                    && this.open_review.origin().same_target(&key.1)
+                {
+                    this.reload_publications();
+                    match result {
+                        Ok(record) => {
+                            this.publication_records.insert(id, record);
+                        }
+                        Err(error) => {
+                            this.publication_error = Some(format!("{error:#}"));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn with_pane<R>(
@@ -992,6 +1106,7 @@ impl DiffView {
         if had_dock && shown.dock.is_none() {
             self.clear_draft_field(cx);
         }
+        self.reload_publications();
         self.invalidate_all_search_texts();
         self.recompute_alignment();
         self.open_in_pane(cx);
@@ -1145,6 +1260,14 @@ impl DiffView {
     /// Immediate delete. Closes the dock if it was editing this id; clears the
     /// wash if it pointed at this comment's span.
     fn delete_comment(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.publication_in_progress(id)
+            || self
+                .publication_records
+                .get(&id)
+                .is_some_and(|record| !matches!(record.state, PublicationState::Failed(_)))
+        {
+            return;
+        }
         let clear_wash = self.comment_target(id).is_some_and(|(side, span)| {
             selection_matches_span(self.pane.read(cx).selection(), side, span)
         });
@@ -1506,6 +1629,16 @@ fn file_status(view: &DiffView, cx: &mut Context<DiffView>) -> (String, String) 
             };
             let publication = match view.open_review.publication_eligibility() {
                 Ok(()) => "GitLab MR · publication available",
+                Err(_)
+                    if view.open_review.storage_error().is_none()
+                        && view
+                            .open_review
+                            .origin()
+                            .preparation_eligibility(&view.open_review.review().comparison)
+                            .is_ok() =>
+                {
+                    "GitLab MR · version details checked on publish"
+                }
                 Err(reason) => reason,
             };
             sub = format!("{sub} · {publication}");
@@ -2447,6 +2580,17 @@ fn render_comment_island(
                                             .child(label),
                                     )
                                     .child(
+                                        div()
+                                            .id(("cmt-publish", id as usize))
+                                            .ui_text_size(11., cx)
+                                            .child(if view.publication_records.get(&id).is_some_and(|r| matches!(r.state, PublicationState::Failed(_))) { "Retry publish" } else { "Publish" })
+                                            .when(view.can_publish(id), |button| button.cursor_pointer().text_color(palette.text.link).on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.publish_comment(id, cx);
+                                            })))
+                                            .when(!view.can_publish(id), |button| button.text_color(palette.text.disabled)),
+                                    )
+                                    .child(
                                         IconButton::new(
                                             ("cmt-edit", id as usize),
                                             "pencil.svg",
@@ -2465,6 +2609,7 @@ fn render_comment_island(
                                             "trash.svg",
                                             "Delete DraftComment",
                                         )
+                                        .disabled(view.publication_in_progress(id) || view.publication_records.get(&id).is_some_and(|r| !matches!(r.state, PublicationState::Failed(_))))
                                         .on_click(
                                             cx.listener(move |this, _, window, cx| {
                                                 cx.stop_propagation();
@@ -2480,6 +2625,14 @@ fn render_comment_island(
                                     .text_color(theme::software_palette().text.primary)
                                     .child(c.body),
                             )
+                            .child(div().mt(px(4.)).ui_text_size(11., cx).text_color(palette.text.secondary).child(
+                                if view.publication_in_progress(id) { "Publishing to GitLab…".into() }
+                                else if let Some(error) = &view.publication_error { error.clone() }
+                                else if let Some(record) = view.publication_records.get(&id) { record.state.label() }
+                                else if let Err(reason) = view.open_review.origin().preparation_eligibility(&view.open_review.review().comparison) { reason.into() }
+                                else if !matches!(&c.anchor, Anchor::Line { span, .. } if span.count==1) { "Multiline publication unavailable".into() }
+                                else { "Local draft · publish explicitly".into() }
+                            ))
                     })),
                 sb,
             )

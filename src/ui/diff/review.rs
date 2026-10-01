@@ -92,7 +92,6 @@ impl OpenReview {
         open
     }
 
-    #[cfg(test)]
     pub fn origin(&self) -> &ReviewOrigin {
         &self.origin
     }

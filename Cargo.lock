@@ -4739,6 +4739,7 @@ dependencies = [
  "tree-sitter-rust",
  "unicode-segmentation",
  "url",
+ "uuid",
  "winres",
  "zed-reqwest",
 ]
