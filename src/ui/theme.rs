@@ -376,7 +376,7 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             },
             scrollbar: ScrollbarColors {
                 track: rgb(0xffffff),
-                idle: rgb(0x9299a4),
+                idle: rgb(0x858c98),
                 hover: rgb(0x647b9e),
                 drag: rgb(0x3f78bc),
             },
