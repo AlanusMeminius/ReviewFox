@@ -1,12 +1,13 @@
 //! Git-free review domain types. See CONTEXT.md.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 /// Raw Git object id (SHA-1, 20 bytes).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Oid([u8; 20]);
 
 impl Oid {
@@ -58,7 +59,7 @@ impl FromStr for Oid {
 }
 
 /// Canonical absolute worktree path (symlinks resolved).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Repository {
     path: PathBuf,
 }
@@ -86,7 +87,7 @@ impl Repository {
 /// Commit comparisons use two commit OIDs. An Uncommitted comparison sets
 /// `uncommitted` and stores the checkout's HEAD commit in both OID fields;
 /// head is the on-disk tree, not that commit (ADR-0014).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Comparison {
     pub repository: Repository,
     /// Base commit; `None` = the empty tree (base of a root commit).
@@ -163,7 +164,7 @@ impl ChangedPath {
 }
 
 /// 1-based line span within one side of a file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LineSpan {
     pub start: u32,
     pub count: u32,
@@ -197,7 +198,7 @@ pub struct Alignment {
 }
 
 /// Contiguous algorithm-produced change block (non-equal ops).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hunk {
     pub preimage: LineSpan,
     pub postimage: LineSpan,
@@ -604,7 +605,7 @@ impl Default for DiffFontSize {
 }
 
 /// Which side of a Comparison a line Anchor refers to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Side {
     Preimage,
     Postimage,
@@ -620,7 +621,7 @@ impl Side {
 }
 
 /// Attachment of a DraftComment to a place in a Comparison.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)] // File anchors are in the domain model; UI starts with Line only.
 pub enum Anchor {
     File {
@@ -654,16 +655,16 @@ impl Anchor {
     }
 }
 
-/// Locally stored comment; not published remotely.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Locally authored comment with a stable identity within its Review.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftComment {
     pub id: u64,
     pub body: String,
     pub anchor: Anchor,
 }
 
-/// Ongoing work against one Comparison (in-memory for now).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Ongoing work against one Comparison.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Review {
     pub comparison: Comparison,
     pub comments: Vec<DraftComment>,
@@ -671,6 +672,23 @@ pub struct Review {
 }
 
 impl Review {
+    /// Persisted comment identities must remain unique and never be reused.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let mut ids = HashSet::new();
+        if self.next_id == 0
+            || self
+                .comments
+                .iter()
+                .any(|c| c.id == 0 || c.id >= self.next_id || !ids.insert(c.id))
+        {
+            return Err("Invalid stable comment identities");
+        }
+        if self.comments.iter().any(|c| matches!(&c.anchor, Anchor::Line { span, .. } if span.start == 0 || span.count == 0 || span.start.checked_add(span.count).is_none())) {
+            return Err("Invalid comment line range");
+        }
+        Ok(())
+    }
+
     pub fn new(comparison: Comparison) -> Self {
         Self {
             comparison,

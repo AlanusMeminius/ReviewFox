@@ -55,6 +55,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 /// Own snapshot for the Diff window — not a live shared model with main.
 #[derive(Clone, Debug)]
 pub struct DiffSnapshot {
+    pub origin: crate::publication::ReviewOrigin,
     pub comparison: Comparison,
     pub changed_paths: Vec<ChangedPath>,
     pub selected_path: String,
@@ -182,8 +183,20 @@ impl DiffView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let open_review =
-            OpenReview::new(snapshot.comparison.clone(), snapshot.selected_path.clone());
+        let open_review = match crate::review_store::ReviewStore::application() {
+            Ok(store) => OpenReview::reopen(
+                snapshot.comparison.clone(),
+                snapshot.selected_path.clone(),
+                snapshot.origin.clone(),
+                store,
+            ),
+            Err(error) => OpenReview::unavailable(
+                snapshot.comparison.clone(),
+                snapshot.selected_path.clone(),
+                snapshot.origin.clone(),
+                error.to_string(),
+            ),
+        };
         let pane = cx.new(DualPane::new);
         let pane_events =
             cx.subscribe_in(&pane, window, |this, _, event, window, cx| match event {
@@ -957,11 +970,16 @@ impl DiffView {
     /// If Comparison matches, retarget path (+ file content); else replace snapshot.
     pub fn apply_snapshot(&mut self, incoming: DiffSnapshot, cx: &mut Context<Self>) {
         let had_dock = self.open_review.dock().is_some();
-        let shown = self
-            .open_review
-            .show(incoming.comparison.clone(), incoming.selected_path.clone());
+        let shown = self.open_review.show_origin(
+            incoming.comparison.clone(),
+            incoming.selected_path.clone(),
+            incoming.origin.clone(),
+        );
         match &mut self.snapshot {
-            Some(current) if current.comparison == incoming.comparison => {
+            Some(current)
+                if current.comparison == incoming.comparison
+                    && current.origin == incoming.origin =>
+            {
                 current.selected_path = incoming.selected_path;
                 current.changed_paths = incoming.changed_paths;
                 current.file = incoming.file;
@@ -1486,6 +1504,14 @@ fn file_status(view: &DiffView, cx: &mut Context<DiffView>) -> (String, String) 
                 FileDiff::Binary => "binary file".into(),
                 FileDiff::Error(e) => e.clone(),
             };
+            let publication = match view.open_review.publication_eligibility() {
+                Ok(()) => "GitLab MR · publication available",
+                Err(reason) => reason,
+            };
+            sub = format!("{sub} · {publication}");
+            if let Some(error) = view.open_review.storage_error() {
+                sub = format!("{sub} · {error}");
+            }
             if let Some(copy) = &view.hover_copy {
                 sub = format!("{sub} · {copy}");
             }
@@ -2936,6 +2962,7 @@ mod tests {
             let view = cx.new(|cx| {
                 super::DiffView::with_snapshot(
                     super::DiffSnapshot {
+                        origin: crate::publication::ReviewOrigin::Local,
                         comparison: Comparison {
                             repository: Repository::new("/tmp/diff-draft-test".into()),
                             base_oid: None,

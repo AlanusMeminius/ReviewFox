@@ -21,6 +21,8 @@ pub struct StoredBounds {
 /// Diff auto-reopen binds Comparison identity + last selected path (ADR-0005 / ADR-0007).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffReopen {
+    #[serde(default)]
+    pub origin: crate::publication::ReviewOrigin,
     pub repository: PathBuf,
     /// Base commit OID; `None` (JSON `null`) = empty tree (root-commit Comparison).
     /// Older files always carry a string, which loads as `Some`.
@@ -251,6 +253,7 @@ mod tests {
             }),
             diff_open: true,
             diff_reopen: Some(DiffReopen {
+                origin: crate::publication::ReviewOrigin::Local,
                 repository: PathBuf::from("/repo"),
                 base_oid: Some("a".repeat(40)),
                 head_oid: "b".repeat(40),
@@ -273,6 +276,7 @@ mod tests {
         let file = WindowGeometryFile {
             diff_open: true,
             diff_reopen: Some(DiffReopen {
+                origin: crate::publication::ReviewOrigin::Local,
                 repository: PathBuf::from("/repo"),
                 base_oid: None,
                 head_oid: "b".repeat(40),
@@ -314,6 +318,7 @@ mod tests {
 
         let file = WindowGeometryFile {
             diff_reopen: Some(DiffReopen {
+                origin: crate::publication::ReviewOrigin::Local,
                 repository: PathBuf::from("/repo"),
                 base_oid: Some("a".repeat(40)),
                 head_oid: "b".repeat(40),
@@ -351,6 +356,7 @@ mod tests {
             }),
             diff_open: true,
             diff_reopen: Some(DiffReopen {
+                origin: crate::publication::ReviewOrigin::Local,
                 repository: PathBuf::from("/repo"),
                 base_oid: Some("a".repeat(40)),
                 head_oid: "b".repeat(40),
@@ -400,6 +406,7 @@ mod tests {
             }),
             diff_open: true,
             diff_reopen: Some(DiffReopen {
+                origin: crate::publication::ReviewOrigin::Local,
                 repository: PathBuf::from("/repo"),
                 base_oid: Some("c".repeat(40)),
                 head_oid: "d".repeat(40),

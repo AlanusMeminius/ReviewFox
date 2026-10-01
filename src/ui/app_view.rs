@@ -377,6 +377,7 @@ impl AppView {
         self.empty_mr = false;
         self.pending_kind_restore = from_kind_switch;
         self.mr_entry = Some(MrEntry {
+            base_url: settings_store::effective_base_url(&settings_store::load_file()),
             summary: MergeRequestSummary {
                 iid,
                 title: format!("!{iid}"),
@@ -721,6 +722,7 @@ impl AppView {
         self.empty_mr = false;
         self.pending_kind_restore = false;
         self.mr_entry = Some(MrEntry {
+            base_url: settings_store::effective_base_url(&settings_store::load_file()),
             summary: mr,
             detail: MrDetailState::Loading,
             project: None,
@@ -738,6 +740,9 @@ impl AppView {
 
         let base = settings_store::effective_base_url(&settings_store::load_file());
         let pat = settings_store::load_pat().unwrap_or_default();
+        if let Some(entry) = self.mr_entry.as_mut() {
+            entry.base_url = base.clone();
+        }
 
         cx.spawn(async move |this, cx| {
             let http = match cx.update(|app| app.http_client()) {
@@ -1011,7 +1016,24 @@ impl AppView {
             .map(|p| p.status)
             .unwrap_or(PathStatus::Modify);
         let file = git::file_diff(&comparison, &path, status, &Default::default());
+        let origin = match &self.mr_entry {
+            Some(entry) => match (&entry.detail, &entry.project) {
+                (MrDetailState::Ready(detail), Some(project)) => {
+                    crate::publication::ReviewOrigin::GitLab {
+                        base_url: entry.base_url.clone(),
+                        project: project.clone(),
+                        iid: detail.iid,
+                        base_sha: detail.diff_refs.base_sha.clone(),
+                        start_sha: detail.diff_refs.start_sha.clone(),
+                        head_sha: detail.diff_refs.head_sha.clone(),
+                    }
+                }
+                _ => crate::publication::ReviewOrigin::Local,
+            },
+            None => crate::publication::ReviewOrigin::Local,
+        };
         let snapshot = DiffSnapshot {
+            origin,
             comparison,
             changed_paths: paths,
             selected_path: path,
@@ -1149,6 +1171,7 @@ fn open_or_update_diff(
 
 fn remember_diff_reopen_from_snapshot(snapshot: &DiffSnapshot) {
     window_geometry_store::note_diff_opened(DiffReopen {
+        origin: snapshot.origin.clone(),
         repository: snapshot.comparison.repository.path().to_path_buf(),
         base_oid: snapshot.comparison.base_oid.map(|o| o.to_string()),
         head_oid: snapshot.comparison.head_oid.to_string(),
@@ -1185,6 +1208,7 @@ fn rebuild_diff_snapshot(reopen: &DiffReopen) -> Option<DiffSnapshot> {
         .unwrap_or(PathStatus::Modify);
     let file = git::file_diff(&comparison, &path, status, &Default::default());
     Some(DiffSnapshot {
+        origin: reopen.origin.clone(),
         comparison,
         changed_paths,
         selected_path: path,
@@ -2192,6 +2216,7 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
 }
 
 struct MrEntry {
+    base_url: String,
     summary: MergeRequestSummary,
     detail: MrDetailState,
     /// GitLab `path_with_namespace` once known (for Workspace label).

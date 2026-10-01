@@ -3,6 +3,7 @@
 
 use crate::domain::{Anchor, Comparison, DraftComment, LineSpan, Review, Side};
 use crate::export::{CommentContext, ReviewContexts};
+use crate::{publication::ReviewOrigin, review_store::ReviewStore};
 use std::sync::Arc;
 
 /// What one operation left on the current path.
@@ -33,6 +34,10 @@ pub struct OpenReview {
     dock: Option<LineDock>,
     contexts: ReviewContexts,
     draft_context: Option<Arc<CommentContext>>,
+    origin: ReviewOrigin,
+    store: Option<ReviewStore>,
+    storage_error: Option<String>,
+    load_failed: bool,
 }
 
 impl OpenReview {
@@ -43,7 +48,100 @@ impl OpenReview {
             dock: None,
             contexts: ReviewContexts::new(),
             draft_context: None,
+            origin: ReviewOrigin::Local,
+            store: None,
+            storage_error: None,
+            load_failed: false,
         }
+    }
+
+    pub fn unavailable(
+        comparison: Comparison,
+        path: impl Into<String>,
+        origin: ReviewOrigin,
+        error: String,
+    ) -> Self {
+        let mut open = Self::new(comparison, path);
+        open.origin = origin;
+        open.storage_error = Some(error);
+        open.load_failed = true;
+        open
+    }
+
+    pub fn reopen(
+        comparison: Comparison,
+        path: impl Into<String>,
+        origin: ReviewOrigin,
+        store: ReviewStore,
+    ) -> Self {
+        let loaded = store.load(&comparison, &origin);
+        let mut open = Self::new(comparison, path);
+        open.origin = origin;
+        open.store = Some(store);
+        match loaded {
+            Ok(Some(saved)) => {
+                open.review = saved.review;
+                open.contexts = saved.contexts;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                open.storage_error = Some(format!("{e:#}"));
+                open.load_failed = true;
+            }
+        }
+        open
+    }
+
+    #[cfg(test)]
+    pub fn origin(&self) -> &ReviewOrigin {
+        &self.origin
+    }
+    pub fn storage_error(&self) -> Option<&str> {
+        self.storage_error.as_deref()
+    }
+    pub fn publication_eligibility(&self) -> Result<(), &str> {
+        if self.storage_error.is_some() {
+            return Err("Review storage failed · publication unavailable");
+        }
+        self.origin.eligibility(&self.review.comparison)
+    }
+    fn persist(&mut self) {
+        if self.load_failed {
+            return;
+        }
+        if let Some(store) = &self.store {
+            self.storage_error = store
+                .save(&self.review, &self.origin, &self.contexts)
+                .err()
+                .map(|e| format!("{e:#}"));
+        }
+    }
+
+    pub fn show_origin(
+        &mut self,
+        comparison: Comparison,
+        path: impl Into<String>,
+        origin: ReviewOrigin,
+    ) -> PathView {
+        let path = path.into();
+        if self.review.comparison != comparison || self.origin != origin {
+            if let Some(store) = self.store.clone() {
+                *self = Self::reopen(comparison, path, origin, store);
+            } else {
+                let error = self.storage_error.clone();
+                *self = match error {
+                    Some(error) => Self::unavailable(comparison, path, origin, error),
+                    None => {
+                        let mut open = Self::new(comparison, path);
+                        open.origin = origin;
+                        open
+                    }
+                };
+            }
+        } else {
+            self.set_path(path);
+        }
+        self.snapshot(None)
     }
 
     pub fn review(&self) -> &Review {
@@ -84,18 +182,9 @@ impl OpenReview {
 
     /// Same Comparison keeps this Review. Same path keeps the dock.
     /// A different Comparison replaces the Review and clears the dock.
+    #[cfg(test)]
     pub fn show(&mut self, comparison: Comparison, path: impl Into<String>) -> PathView {
-        let path = path.into();
-        if self.review.comparison != comparison {
-            self.review = Review::new(comparison);
-            self.path = path;
-            self.dock = None;
-            self.contexts.clear();
-            self.draft_context = None;
-        } else {
-            self.set_path(path);
-        }
-        self.snapshot(None)
+        self.show_origin(comparison, path, ReviewOrigin::Local)
     }
 
     /// Tree click inside this Diff. Same path rule as [`Self::show`].
@@ -167,6 +256,7 @@ impl OpenReview {
                 }
             }
         }
+        self.persist();
         self.snapshot(None)
     }
 
@@ -185,6 +275,7 @@ impl OpenReview {
             self.dock = None;
             self.draft_context = None;
         }
+        self.persist();
         self.snapshot(None)
     }
 
@@ -258,6 +349,156 @@ mod tests {
                 hunk: None,
             },
         }
+    }
+
+    fn mr(iid: u64) -> ReviewOrigin {
+        ReviewOrigin::GitLab {
+            base_url: "https://gitlab.example.com".into(),
+            project: "team/repo".into(),
+            iid,
+            base_sha: Oid::from_bytes([1; 20]).to_string(),
+            start_sha: Some(Oid::from_bytes([3; 20]).to_string()),
+            head_sha: Oid::from_bytes([2; 20]).to_string(),
+        }
+    }
+
+    #[test]
+    fn same_comparison_keeps_each_originating_mr_review_separate() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ReviewStore::new(directory.path().into());
+        let mut open = OpenReview::reopen(cmp(2), "a.rs", mr(10), store);
+        assert_eq!(open.publication_eligibility(), Ok(()));
+        open.begin_draft(Side::Postimage, 1, 1);
+        open.commit("for MR ten");
+        assert_eq!(open.origin(), &mr(10));
+        assert!(open.show_origin(cmp(2), "a.rs", mr(11)).comments.is_empty());
+        open.begin_draft(Side::Postimage, 1, 1);
+        open.commit("for MR eleven");
+        assert_eq!(
+            open.show_origin(cmp(2), "a.rs", mr(10)).comments[0].body,
+            "for MR ten"
+        );
+        assert!(
+            open.show_origin(cmp(2), "a.rs", ReviewOrigin::Local)
+                .comments
+                .is_empty()
+        );
+        assert!(open.publication_eligibility().is_err());
+    }
+
+    #[test]
+    fn only_complete_mr_versions_have_publication_eligibility() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ReviewStore::new(directory.path().into());
+        let mut open = OpenReview::reopen(cmp(2), "a.rs", mr(10), store);
+        assert_eq!(open.publication_eligibility(), Ok(()));
+        open.show_origin(cmp(4), "a.rs", mr(10));
+        assert!(
+            open.publication_eligibility()
+                .unwrap_err()
+                .contains("subset")
+        );
+        open.show_origin(uncommitted(2), "a.rs", ReviewOrigin::Local);
+        assert!(open.publication_eligibility().is_err());
+        let mut incomplete = mr(10);
+        if let ReviewOrigin::GitLab { start_sha, .. } = &mut incomplete {
+            *start_sha = None;
+        }
+        open.show_origin(cmp(2), "a.rs", incomplete);
+        assert!(
+            open.publication_eligibility()
+                .unwrap_err()
+                .contains("incomplete")
+        );
+    }
+
+    #[test]
+    fn unreadable_and_future_review_storage_is_reported_and_preserved() {
+        for replacement in [b"broken JSON".as_slice(), br#"{"version":42}"#.as_slice()] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = ReviewStore::new(directory.path().into());
+            let mut open = OpenReview::reopen(cmp(2), "a.rs", mr(10), store.clone());
+            open.begin_draft(Side::Postimage, 1, 1);
+            open.commit("existing work");
+            let path = std::fs::read_dir(directory.path())
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            std::fs::write(&path, replacement).unwrap();
+            let mut reopened = OpenReview::reopen(cmp(2), "a.rs", mr(10), store);
+            assert!(reopened.storage_error().unwrap().contains("preserved"));
+            assert!(reopened.publication_eligibility().is_err());
+            reopened.begin_draft(Side::Postimage, 1, 1);
+            reopened.commit("new in-memory work");
+            assert_eq!(std::fs::read(path).unwrap(), replacement);
+        }
+    }
+
+    #[test]
+    fn malformed_stable_comment_identity_is_reported_instead_of_reused() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ReviewStore::new(directory.path().into());
+        let mut open = OpenReview::reopen(cmp(2), "a.rs", mr(10), store.clone());
+        open.begin_draft(Side::Postimage, 1, 1);
+        open.commit("existing work");
+        let path = std::fs::read_dir(directory.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut data: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        data["review"]["next_id"] = 1.into();
+        std::fs::write(&path, serde_json::to_vec(&data).unwrap()).unwrap();
+        let reopened = OpenReview::reopen(cmp(2), "a.rs", mr(10), store);
+        assert!(reopened.storage_error().is_some());
+    }
+
+    #[test]
+    fn saved_review_reopens_with_identity_anchor_and_creation_context() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::review_store::ReviewStore::new(directory.path().into());
+        let mut open = OpenReview::reopen(
+            cmp(2),
+            "a.rs",
+            crate::publication::ReviewOrigin::Local,
+            store.clone(),
+        );
+        open.begin_draft(Side::Postimage, 3, 2);
+        open.capture_draft_context("old\n".into(), "selected\n".into());
+        open.commit("draft");
+        open.begin_edit(1);
+        open.commit("edited");
+        let export = crate::export::export_review(open.review(), open.contexts());
+        drop(open);
+        let mut reopened = OpenReview::reopen(
+            cmp(2),
+            "a.rs",
+            crate::publication::ReviewOrigin::Local,
+            store.clone(),
+        );
+        assert_eq!(
+            reopened.current().comments,
+            vec![line(1, "a.rs", Side::Postimage, 3, 2, "edited")]
+        );
+        assert_eq!(
+            crate::export::export_review(reopened.review(), reopened.contexts()),
+            export
+        );
+        reopened.delete(1);
+        drop(reopened);
+        let mut reopened = OpenReview::reopen(
+            cmp(2),
+            "a.rs",
+            crate::publication::ReviewOrigin::Local,
+            store,
+        );
+        assert!(reopened.current().comments.is_empty());
+        reopened.begin_draft(Side::Preimage, 1, 1);
+        assert_eq!(reopened.commit("next").comments[0].id, 2);
     }
 
     #[test]

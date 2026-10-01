@@ -10,7 +10,7 @@ use crate::git;
 const CONTEXT_RADIUS: usize = 2;
 
 /// Original text visible when a comment was created, independent of ViewOptions.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommentContext {
     pub preimage: Arc<str>,
     pub postimage: Arc<str>,
