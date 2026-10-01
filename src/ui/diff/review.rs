@@ -74,7 +74,7 @@ impl OpenReview {
         origin: ReviewOrigin,
         store: ReviewStore,
     ) -> Self {
-        let loaded = store.load(&comparison, &origin);
+        let loaded = store.load(&comparison);
         let mut open = Self::new(comparison, path);
         open.origin = origin;
         open.store = Some(store);
@@ -111,7 +111,7 @@ impl OpenReview {
         }
         if let Some(store) = &self.store {
             self.storage_error = store
-                .save(&self.review, &self.origin, &self.contexts)
+                .save(&self.review, &self.contexts)
                 .err()
                 .map(|e| format!("{e:#}"));
         }
@@ -124,7 +124,7 @@ impl OpenReview {
         origin: ReviewOrigin,
     ) -> PathView {
         let path = path.into();
-        if self.review.comparison != comparison || self.origin != origin {
+        if self.review.comparison != comparison {
             if let Some(store) = self.store.clone() {
                 *self = Self::reopen(comparison, path, origin, store);
             } else {
@@ -139,6 +139,7 @@ impl OpenReview {
                 };
             }
         } else {
+            self.origin = origin;
             self.set_path(path);
         }
         self.snapshot(None)
@@ -363,27 +364,44 @@ mod tests {
     }
 
     #[test]
-    fn same_comparison_keeps_each_originating_mr_review_separate() {
+    fn same_comparison_shares_local_work_with_independent_originating_targets() {
         let directory = tempfile::tempdir().unwrap();
         let store = ReviewStore::new(directory.path().into());
         let mut open = OpenReview::reopen(cmp(2), "a.rs", mr(10), store);
         assert_eq!(open.publication_eligibility(), Ok(()));
         open.begin_draft(Side::Postimage, 1, 1);
-        open.commit("for MR ten");
+        open.capture_draft_context("before\n".into(), "after\n".into());
+        open.commit("shared local work");
+        let exported = crate::export::export_review(open.review(), open.contexts());
         assert_eq!(open.origin(), &mr(10));
-        assert!(open.show_origin(cmp(2), "a.rs", mr(11)).comments.is_empty());
-        open.begin_draft(Side::Postimage, 1, 1);
-        open.commit("for MR eleven");
+        assert_eq!(
+            open.show_origin(cmp(2), "a.rs", mr(11)).comments[0].body,
+            "shared local work"
+        );
+        assert_eq!(open.origin(), &mr(11));
+        assert_eq!(
+            crate::export::export_review(open.review(), open.contexts()),
+            exported
+        );
+        open.begin_edit(1);
+        open.commit("edited locally");
         assert_eq!(
             open.show_origin(cmp(2), "a.rs", mr(10)).comments[0].body,
-            "for MR ten"
+            "edited locally"
         );
-        assert!(
+        assert_eq!(open.origin(), &mr(10));
+        assert_eq!(
             open.show_origin(cmp(2), "a.rs", ReviewOrigin::Local)
-                .comments
-                .is_empty()
+                .comments[0]
+                .body,
+            "edited locally"
         );
         assert!(open.publication_eligibility().is_err());
+        let store = open.store.clone().unwrap();
+        drop(open);
+        let reopened = OpenReview::reopen(cmp(2), "a.rs", mr(12), store);
+        assert_eq!(reopened.current().comments[0].body, "edited locally");
+        assert_eq!(reopened.origin(), &mr(12));
     }
 
     #[test]

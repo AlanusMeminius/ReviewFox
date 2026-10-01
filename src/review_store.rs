@@ -2,7 +2,6 @@
 use crate::{
     domain::{Comparison, Review},
     export::ReviewContexts,
-    publication::ReviewOrigin,
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -17,7 +16,6 @@ pub struct ReviewStore {
 pub struct SavedReview {
     pub version: u32,
     pub review: Review,
-    pub origin: ReviewOrigin,
     pub contexts: ReviewContexts,
 }
 
@@ -33,17 +31,13 @@ impl ReviewStore {
                 .join("reviews"),
         ))
     }
-    fn path(&self, comparison: &Comparison, origin: &ReviewOrigin) -> Result<PathBuf> {
-        let identity = serde_json::to_vec(&(comparison, origin))?;
+    fn path(&self, comparison: &Comparison) -> Result<PathBuf> {
+        let identity = serde_json::to_vec(comparison)?;
         let hash = git2::Oid::hash_object(git2::ObjectType::Blob, &identity)?;
         Ok(self.directory.join(format!("{hash}.json")))
     }
-    pub fn load(
-        &self,
-        comparison: &Comparison,
-        origin: &ReviewOrigin,
-    ) -> Result<Option<SavedReview>> {
-        let path = self.path(comparison, origin)?;
+    pub fn load(&self, comparison: &Comparison) -> Result<Option<SavedReview>> {
+        let path = self.path(comparison)?;
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -51,7 +45,7 @@ impl ReviewStore {
         };
         let saved: SavedReview = serde_json::from_slice(&bytes)
             .with_context(|| format!("Unreadable Review preserved at {}", path.display()))?;
-        if saved.version != 1 || &saved.review.comparison != comparison || &saved.origin != origin {
+        if saved.version != 1 || &saved.review.comparison != comparison {
             bail!(
                 "Unsupported or mismatched Review preserved at {}",
                 path.display()
@@ -72,21 +66,15 @@ impl ReviewStore {
         }
         Ok(Some(saved))
     }
-    pub fn save(
-        &self,
-        review: &Review,
-        origin: &ReviewOrigin,
-        contexts: &ReviewContexts,
-    ) -> Result<()> {
+    pub fn save(&self, review: &Review, contexts: &ReviewContexts) -> Result<()> {
         review.validate().map_err(anyhow::Error::msg)?;
         // Validate an existing snapshot before replacing it, including future versions.
-        self.load(&review.comparison, origin)?;
+        self.load(&review.comparison)?;
         std::fs::create_dir_all(&self.directory)?;
-        let path = self.path(&review.comparison, origin)?;
+        let path = self.path(&review.comparison)?;
         let saved = SavedReview {
             version: 1,
             review: review.clone(),
-            origin: origin.clone(),
             contexts: contexts.clone(),
         };
         let bytes = serde_json::to_vec(&saved)?;
