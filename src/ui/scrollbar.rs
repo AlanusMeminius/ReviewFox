@@ -17,21 +17,13 @@ use gpui::{
 use super::theme;
 
 pub(crate) const THUMB_WIDTH: f32 = 6.;
-pub(crate) const THUMB_HOVER_WIDTH: f32 = 8.;
-pub(crate) const THUMB_DRAG_WIDTH: f32 = 10.;
 pub(crate) const TRACK_WIDTH: f32 = 14.;
 const MIN_THUMB: f32 = 24.;
 pub(crate) const PAD: f32 = 4.;
 pub(crate) const HIDE_DELAY: Duration = Duration::from_secs(1);
 
-pub(crate) fn thumb_width(hovered: bool, dragging: bool) -> f32 {
-    if dragging {
-        THUMB_DRAG_WIDTH
-    } else if hovered {
-        THUMB_HOVER_WIDTH
-    } else {
-        THUMB_WIDTH
-    }
+pub(crate) fn thumb_width(_hovered: bool, _dragging: bool) -> f32 {
+    THUMB_WIDTH
 }
 
 struct Handle(ScrollHandle);
@@ -246,14 +238,6 @@ impl Render for VerticalScrollbar {
             .h(geom.track_height)
             .rounded_full()
             .opacity(if show_thumb { 1. } else { 0. })
-            .bg(if self.hovered || dragging {
-                colors.track
-            } else {
-                gpui::Rgba {
-                    a: 0.,
-                    ..colors.track
-                }
-            })
             .cursor(CursorStyle::Arrow);
 
         let thumb = div()
@@ -401,11 +385,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thumb_thickens_on_hover_and_drag_within_the_track() {
+    fn thumb_stays_thin_on_hover_and_drag_within_the_track() {
         assert_eq!(thumb_width(false, false), 6.);
-        assert_eq!(thumb_width(true, false), 8.);
-        assert_eq!(thumb_width(false, true), 10.);
-        assert_eq!(thumb_width(true, true), 10.);
+        assert_eq!(thumb_width(true, false), 6.);
+        assert_eq!(thumb_width(false, true), 6.);
+        assert_eq!(thumb_width(true, true), 6.);
         assert!(TRACK_WIDTH > thumb_width(true, true));
     }
 

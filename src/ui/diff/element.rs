@@ -1225,14 +1225,6 @@ fn hline(x0: f32, x1: f32, y: f32, h: f32) -> Bounds<Pixels> {
     Bounds::from_corners(point(px(x0), px(y)), point(px(x1.max(x0)), px(y + h)))
 }
 
-fn paint_scrollbar_track(
-    window: &mut Window,
-    bounds: Bounds<Pixels>,
-    colors: theme::ScrollbarColors,
-) {
-    window.paint_quad(fill(bounds, colors.track).corner_radii(px(scrollbar::TRACK_WIDTH / 2.)));
-}
-
 impl Frame {
     pub(super) fn widest(&self, side: Side) -> f32 {
         self.sides[side_ix(side)].widest
@@ -1285,20 +1277,6 @@ impl Frame {
         let scrollbar_colors = theme::software_palette().scrollbar;
         for side in [Side::Preimage, Side::Postimage] {
             let frame = &self.sides[side_ix(side)];
-            if frame
-                .thumb
-                .as_ref()
-                .is_some_and(|t| t.shown && (t.hovered || t.dragging))
-            {
-                paint_scrollbar_track(window, geom.track(side), scrollbar_colors);
-            }
-            if frame
-                .h_thumb
-                .as_ref()
-                .is_some_and(|t| t.shown && (t.hovered || t.dragging))
-            {
-                paint_scrollbar_track(window, geom.h_track(side), scrollbar_colors);
-            }
             for thumb in frame
                 .thumb
                 .iter()

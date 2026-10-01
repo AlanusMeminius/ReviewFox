@@ -12,6 +12,7 @@ pub struct SoftwarePalette {
     pub surface: SurfaceColors,
     pub text: TextColors,
     pub field: FieldColors,
+    pub search: SearchColors,
     pub scrollbar: ScrollbarColors,
     pub sidebar_row: SidebarRowColors,
     pub tree: TreeColors,
@@ -130,8 +131,7 @@ pub struct SurfaceColors {
     pub popover: Rgba,
     /// Continuous material behind titlebar controls and labels.
     pub titlebar_backing: Rgba,
-    /// Sidebar layer over the window material. Light appearance leaves the
-    /// native frosted material visible; dark appearance adds a translucent tint.
+    /// Clear sidebar layer: the window material supplies the background in both modes.
     pub sidebar_backing: Rgba,
     pub floating_overlay: Rgba,
     pub shadow_ink: Hsla,
@@ -161,8 +161,15 @@ pub struct FieldColors {
 }
 
 #[derive(Clone, Copy)]
+pub struct SearchColors {
+    pub tree_filter_surface: Rgba,
+    pub idle_border: Rgba,
+    /// Optional resting fill for floating search controls; chrome stays unfilled.
+    pub control_surface: Option<Rgba>,
+}
+
+#[derive(Clone, Copy)]
 pub struct ScrollbarColors {
-    pub track: Rgba,
     pub idle: Rgba,
     pub hover: Rgba,
     pub drag: Rgba,
@@ -339,11 +346,18 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 caret: rgb(0x2457d6),
                 selection: gpui::rgba(0x2457d633),
             },
+            search: SearchColors {
+                tree_filter_surface: Rgba {
+                    a: 0.07,
+                    ..rgb(0x000000)
+                },
+                idle_border: rgb(0xdfe3ea),
+                control_surface: Some(rgb(0xf1f2f5)),
+            },
             scrollbar: ScrollbarColors {
-                track: rgb(0xffffff),
-                idle: rgb(0x858c98),
-                hover: rgb(0x647b9e),
-                drag: rgb(0x3f78bc),
+                idle: rgb(0xd8dde6),
+                hover: rgb(0xd8dde6),
+                drag: rgb(0xb8c0cc),
             },
             sidebar_row: SidebarRowColors {
                 section_text: rgb(0x1f2d40),
@@ -485,7 +499,7 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 close_icon: rgb(0xffffff),
             },
             settings: SettingsColors {
-                nav_backing: gpui::rgba(0x1d2027e6),
+                nav_backing: CLEAR,
                 island: rgb(0x30343d),
                 card: rgb(0x343b47),
                 popover: rgb(0x30343d),
@@ -510,8 +524,8 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 desk: CLEAR,
                 island: rgb(0x30343d),
                 popover: rgb(0x30343d),
-                titlebar_backing: gpui::rgba(0x1d2027b3),
-                sidebar_backing: gpui::rgba(0x1d202780),
+                titlebar_backing: CLEAR,
+                sidebar_backing: CLEAR,
                 floating_overlay: gpui::rgba(0x272b33f5),
                 shadow_ink: hsla(220. / 360., 0.38, 0.03, 1.),
             },
@@ -532,8 +546,12 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 caret: rgb(0x89c7f7),
                 selection: gpui::rgba(0x89c7f72a),
             },
+            search: SearchColors {
+                tree_filter_surface: rgb(0x30343d),
+                idle_border: CLEAR,
+                control_surface: None,
+            },
             scrollbar: ScrollbarColors {
-                track: rgb(0x1d2027),
                 idle: rgb(0x9299a4),
                 hover: rgb(0x6d85a5),
                 drag: rgb(0x4c80bb),
@@ -559,7 +577,7 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                     selected_text: rgb(0xffffff),
                 },
                 desk: TreeRowColors {
-                    backing: gpui::rgba(0x1d202780),
+                    backing: CLEAR,
                     hover: rgb(0x343b47),
                     pressed: rgb(0x414a59),
                     selected: rgb(0x344a65),
@@ -581,12 +599,10 @@ pub fn software_palette() -> SoftwarePalette {
 
 #[cfg(target_os = "macos")]
 fn window_backing(mode: SoftwareThemeMode) -> Rgba {
-    // NSVisualEffectView sits under Metal. Light needs no extra root tint;
-    // dark tint controls the otherwise system-light material.
-    match mode {
-        SoftwareThemeMode::Light => CLEAR,
-        SoftwareThemeMode::Dark => gpui::rgba(0x14161db3),
-    }
+    // NSVisualEffectView supplies Aqua / Dark Aqua for the selected software
+    // theme underneath Metal. An extra tint would obscure the native frost.
+    let _ = mode;
+    CLEAR
 }
 
 #[cfg(target_os = "windows")]
@@ -819,17 +835,43 @@ mod software_palette_tests {
     }
 
     fn material_reference(mode: SoftwareThemeMode, wallpaper: Rgba, root: Rgba) -> Rgba {
-        // On macOS light appearance, NSVisualEffectMaterial::Sidebar replaces the
-        // raw wallpaper below the clear GPUI stage. These are representative
-        // light-material samples, not bounds guaranteed by the compositor.
-        if cfg!(target_os = "macos") && mode == SoftwareThemeMode::Light {
-            if wallpaper == rgb(0x000000) {
-                rgb(0xd4d7db)
-            } else {
-                rgb(0xf4f5f7)
+        // Representative native material samples, not compositor guarantees.
+        // Both modes now use an explicitly themed NSVisualEffectView; testing
+        // dark chrome against raw white wallpaper would bypass that material.
+        if cfg!(target_os = "macos") {
+            match (mode, wallpaper == rgb(0x000000)) {
+                (SoftwareThemeMode::Light, true) => rgb(0xd4d7db),
+                (SoftwareThemeMode::Light, false) => rgb(0xf4f5f7),
+                (SoftwareThemeMode::Dark, true) => rgb(0x1c1e24),
+                (SoftwareThemeMode::Dark, false) => rgb(0x292d35),
             }
         } else {
             root
+        }
+    }
+
+    #[test]
+    fn dark_window_chrome_shares_one_frosted_background() {
+        let palette = resolve_software_palette(SoftwareThemeMode::Dark);
+        // Representative dark native material on different desktops. No chrome
+        // region should add another wash over the shared window material.
+        for material in [rgb(0x1c1e24), rgb(0x292d35)] {
+            let root = composite(palette.surface.window_backing, material);
+            for (name, fill) in [
+                ("desk", palette.surface.desk),
+                ("titlebar", palette.surface.titlebar_backing),
+                ("sidebar", palette.surface.sidebar_backing),
+                ("diff tree", palette.tree.desk.backing),
+                ("settings navigation", palette.settings.nav_backing),
+            ] {
+                assert_eq!(
+                    composite(fill, root),
+                    root,
+                    "{name} adds a second background"
+                );
+            }
+            #[cfg(target_os = "macos")]
+            assert_eq!(root, material, "native material must remain visible");
         }
     }
 
@@ -930,38 +972,45 @@ mod software_palette_tests {
     }
 
     #[test]
-    fn scrollbar_track_and_thumb_stay_visible_on_every_builtin_diff_band() {
+    fn scrollbar_states_follow_the_software_theme_without_a_track() {
         for mode in [SoftwareThemeMode::Light, SoftwareThemeMode::Dark] {
-            let colors = resolve_software_palette(mode).scrollbar;
+            let palette = resolve_software_palette(mode);
+            let colors = palette.scrollbar;
             assert_eq!(colors.thumb(false, false), colors.idle);
             assert_eq!(colors.thumb(true, false), colors.hover);
             assert_eq!(colors.thumb(true, true), colors.drag);
             assert_eq!(colors.thumb(false, true), colors.drag);
-            for (name, thumb) in [
-                ("idle", colors.idle),
-                ("hover", colors.hover),
-                ("drag", colors.drag),
-            ] {
-                let target = if name == "idle" { 2. } else { 3. };
-                assert!(
-                    contrast(thumb, colors.track) >= target,
-                    "{mode:?} {name} thumb on track: {}",
-                    contrast(thumb, colors.track)
-                );
-            }
-            for code_theme in crate::ui::code_theme::builtin_catalog() {
-                for band in [
-                    code_theme.slots.paper,
-                    code_theme.slots.added_band,
-                    code_theme.slots.deleted_band,
-                    code_theme.slots.replaced_band,
+            if mode == SoftwareThemeMode::Light {
+                // The restored light design intentionally uses subtle neutral fills.
+                assert_eq!(colors.idle, rgb(0xd8dde6));
+                assert_eq!(colors.hover, colors.idle);
+                assert_eq!(colors.drag, rgb(0xb8c0cc));
+                assert!(luminance(colors.drag) < luminance(colors.idle));
+            } else {
+                for (name, thumb) in [
+                    ("idle", colors.idle),
+                    ("hover", colors.hover),
+                    ("drag", colors.drag),
                 ] {
+                    let target = if name == "idle" { 2. } else { 3. };
                     assert!(
-                        contrast(colors.idle, band) >= 2.,
-                        "{mode:?} idle thumb on {} band {band:?}: {}",
-                        code_theme.id,
-                        contrast(colors.idle, band)
+                        contrast(thumb, palette.surface.island) >= target,
+                        "{mode:?} {name} thumb on content surface"
                     );
+                }
+                for code_theme in crate::ui::code_theme::builtin_catalog() {
+                    for band in [
+                        code_theme.slots.paper,
+                        code_theme.slots.added_band,
+                        code_theme.slots.deleted_band,
+                        code_theme.slots.replaced_band,
+                    ] {
+                        assert!(
+                            contrast(colors.idle, band) >= 2.,
+                            "{mode:?} idle thumb on {} band {band:?}",
+                            code_theme.id
+                        );
+                    }
                 }
             }
         }
@@ -1249,8 +1298,6 @@ mod software_palette_tests {
                 assert_eq!(resolved.slots.search_hit, code.slots.search_hit);
                 assert_eq!(resolved.marks.drafting_band, code.marks.drafting_band);
                 assert!(contrast(software.text.placeholder, software.field.surface) >= 4.5);
-                assert!(contrast(software.scrollbar.idle, software.scrollbar.track) >= 2.);
-                assert!(contrast(software.scrollbar.drag, software.scrollbar.track) >= 3.);
             }
         }
     }

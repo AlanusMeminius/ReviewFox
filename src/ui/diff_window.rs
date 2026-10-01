@@ -1765,7 +1765,7 @@ fn render_tree_pane(
                             a: if filter_focused { 1. } else { 0. },
                             ..theme::software_palette().field.focused_border
                         })
-                        .bg(theme::software_palette().field.surface)
+                        .bg(theme::software_palette().search.tree_filter_surface)
                         .child(
                             svg()
                                 .ml_2()
@@ -2006,9 +2006,10 @@ fn render_search_bar(
                 .rounded(px(theme::FIND_FIELD_RADIUS))
                 .bg(palette.field.surface)
                 .border_1()
-                .border_color(gpui::Rgba {
-                    a: if focused { 1. } else { 0. },
-                    ..palette.field.focused_border
+                .border_color(if focused {
+                    palette.field.focused_border
+                } else {
+                    palette.search.idle_border
                 })
                 .child(view.search_field.clone()),
         )
@@ -2016,6 +2017,9 @@ fn render_search_bar(
         .child(render_files_segment(files, cx))
         .child(
             IconButton::new("search-run", "search.svg", "Find")
+                .when_some(palette.search.control_surface, |button, color| {
+                    button.background(color)
+                })
                 .shortcut("Enter")
                 .disabled(total == 0)
                 .on_click(cx.listener(|this, _, _, cx| this.jump_search(1, cx))),
@@ -2029,18 +2033,27 @@ fn render_search_bar(
         )
         .child(
             IconButton::new("search-prev", "chevron_up.svg", "Previous Match")
+                .when_some(palette.search.control_surface, |button, color| {
+                    button.background(color)
+                })
                 .shortcut("Shift-Enter")
                 .disabled(total == 0)
                 .on_click(cx.listener(|this, _, _, cx| this.jump_search(-1, cx))),
         )
         .child(
             IconButton::new("search-next", "chevron_down.svg", "Next Match")
+                .when_some(palette.search.control_surface, |button, color| {
+                    button.background(color)
+                })
                 .shortcut("Enter")
                 .disabled(total == 0)
                 .on_click(cx.listener(|this, _, _, cx| this.jump_search(1, cx))),
         )
         .child(
             IconButton::new("search-close", "close.svg", "Close Find")
+                .when_some(palette.search.control_surface, |button, color| {
+                    button.background(color)
+                })
                 .shortcut("Esc")
                 .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx))),
         )
@@ -2056,8 +2069,12 @@ fn search_seg_track() -> Div {
         .flex()
         .items_center()
         .p(px(NAV_INSET))
+        .gap(px(NAV_INSET))
         .rounded(px(NAV_BUTTON_RADIUS + NAV_INSET))
-        .bg(palette.field.surface)
+        .bg(palette
+            .search
+            .control_surface
+            .unwrap_or(palette.field.surface))
 }
 
 fn search_seg_btn(
@@ -2076,11 +2093,24 @@ fn search_seg_btn(
         .flex()
         .items_center()
         .cursor_pointer()
-        .when(selected, |d| {
-            d.bg(theme::software_palette().control.selected)
+        .when(selected, |d| d.bg(palette.control.selected))
+        .when(!selected || palette.search.control_surface.is_some(), |d| {
+            d.hover(move |d| {
+                d.bg(if selected {
+                    palette.control.selected_hover
+                } else {
+                    palette.control.hover
+                })
+            })
         })
-        .when(!selected, |d| {
-            d.hover(|d| d.bg(theme::software_palette().control.hover))
+        .when(palette.search.control_surface.is_some(), |d| {
+            d.active(move |d| {
+                d.bg(if selected {
+                    palette.control.selected_pressed
+                } else {
+                    palette.control.pressed
+                })
+            })
         })
         .on_click(on_click)
         .child(

@@ -1,7 +1,7 @@
 //! Square icon-only chrome button: the titlebar toolbars' one control shape.
 
 use gpui::{
-    App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
+    App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce, Rgba,
     SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, svg,
 };
 
@@ -18,6 +18,7 @@ pub struct IconButton {
     shortcut: Option<SharedString>,
     pressed: bool,
     disabled: bool,
+    background: Option<Rgba>,
     on_click: Option<ClickHandler>,
 }
 
@@ -36,6 +37,7 @@ impl IconButton {
             shortcut: None,
             pressed: false,
             disabled: false,
+            background: None,
             on_click: None,
         }
     }
@@ -54,6 +56,12 @@ impl IconButton {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// A resting fill for controls on a floating surface, faded when disabled.
+    pub fn background(mut self, background: Rgba) -> Self {
+        self.background = Some(background);
         self
     }
 
@@ -88,6 +96,16 @@ impl RenderOnce for IconButton {
             .items_center()
             .justify_center()
             .rounded_md()
+            .when_some(self.background, |button, color| {
+                button.bg(if enabled {
+                    color
+                } else {
+                    Rgba {
+                        a: color.a * 0.45,
+                        ..color
+                    }
+                })
+            })
             .when(pressed && enabled, |button| {
                 button.bg(palette.control.selected)
             })
