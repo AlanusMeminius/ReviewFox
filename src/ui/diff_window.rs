@@ -1415,14 +1415,13 @@ fn file_status(view: &DiffView, cx: &mut Context<DiffView>) -> (String, String) 
     }
 }
 
-/// Rides on the stage under the island: the file being read and where in it.
+/// Rides transparently on the stage under the island: the file being read and where in it.
 fn render_status_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
     let (path, subtitle) = file_status(view, cx);
     div()
         .id("diff-status-bar")
         .flex_none()
         .h(px(STATUS_BAR_HEIGHT))
-        .bg(theme::software_palette().surface.chrome_backing)
         // Text starts where the island's content does, one radius in.
         .px(px(theme::CHANGES_RADIUS))
         .flex()
@@ -1443,7 +1442,7 @@ fn render_status_bar(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoEl
         .child(div().flex_none().whitespace_nowrap().child(subtitle))
 }
 
-/// The status bar's band below the island. It replaces the stage's bottom inset,
+/// The status bar's space below the island. It replaces the stage's bottom inset,
 /// so the text sits centred between the island and the window edge.
 const STATUS_BAR_HEIGHT: f32 = 28.;
 

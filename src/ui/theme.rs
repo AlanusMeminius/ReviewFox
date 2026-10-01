@@ -130,8 +130,6 @@ pub struct SurfaceColors {
     pub popover: Rgba,
     /// Continuous material behind titlebar controls and labels.
     pub titlebar_backing: Rgba,
-    /// Stable backing for text that otherwise sits directly on window material.
-    pub chrome_backing: Rgba,
     /// Sidebar layer over the window material. Light appearance leaves the
     /// native frosted material visible; dark appearance adds a translucent tint.
     pub sidebar_backing: Rgba,
@@ -320,7 +318,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 island: rgb(0xffffff),
                 popover: rgb(0xffffff),
                 titlebar_backing: CLEAR,
-                chrome_backing: gpui::rgba(0xf4f5f7f5),
                 sidebar_backing: CLEAR,
                 floating_overlay: gpui::rgba(0xfffffff5),
                 shadow_ink: hsla(220. / 360., 0.38, 0.14, 1.),
@@ -514,7 +511,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 island: rgb(0x30343d),
                 popover: rgb(0x30343d),
                 titlebar_backing: gpui::rgba(0x1d2027b3),
-                chrome_backing: gpui::rgba(0x1d2027e6),
                 sidebar_backing: gpui::rgba(0x1d202780),
                 floating_overlay: gpui::rgba(0x272b33f5),
                 shadow_ink: hsla(220. / 360., 0.38, 0.03, 1.),
@@ -1168,24 +1164,13 @@ mod software_palette_tests {
     }
 
     #[test]
-    fn chrome_roles_remain_readable_over_material_and_controls() {
+    fn titlebar_and_control_roles_remain_readable_over_material() {
         for mode in [SoftwareThemeMode::Light, SoftwareThemeMode::Dark] {
             let palette = resolve_software_palette(mode);
             for wallpaper in [rgb(0x000000), rgb(0xffffff)] {
                 let root = composite(palette.surface.window_backing, wallpaper);
                 let desk = composite(palette.surface.desk, root);
                 assert_eq!(desk, root, "{mode:?} desk must not compound window tint");
-                let chrome = composite(palette.surface.chrome_backing, desk);
-                for (name, fg) in [
-                    ("status secondary", palette.text.secondary),
-                    ("status feedback", palette.text.link),
-                ] {
-                    assert!(
-                        contrast(fg, chrome) >= 4.5,
-                        "{mode:?} {name} over composed material: {}",
-                        contrast(fg, chrome)
-                    );
-                }
                 let titlebar = composite(
                     palette.surface.titlebar_backing,
                     material_reference(mode, wallpaper, desk),
