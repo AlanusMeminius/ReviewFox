@@ -1,6 +1,8 @@
 # ReviewFox
 
-Local clipboard-oriented code review over a Git two-tree comparison: browse structured diffs, attach draft comments to positions, export plain text for pasting elsewhere.
+Local code review over a Git two-tree comparison: browse structured diffs, attach local comments through Anchors, export plain text for pasting elsewhere, and manage their Publications on supported forge MR Entries.
+
+GitLab Publication scope is agreed in ADR-0018; implementation is pending. Product direction and deferred capabilities are tracked in [docs/product-direction.md](docs/product-direction.md). Review persistence is part of the agreed design; the current implementation still holds comments in memory.
 
 ## Language
 
@@ -37,12 +39,16 @@ A user's ongoing work against one Comparison, holding draft comments and survivi
 _Avoid_: session (unless talking implementation), review result, review content (use Export), live-linked review
 
 **DraftComment**:
-A locally stored comment attached through an Anchor to a file or a selected line range within one Comparison, rather than to an entire change block. It is not published to any remote (MR path stays read-only toward the forge).
+A locally authored, editable comment attached through an Anchor to a file or a selected line range within one Comparison, rather than to an entire change block. May have a Publication on its Review's originating forge MR; its local Anchor continues to describe the Comparison the author reviewed. The local comment and its remote counterpart have distinct lifecycles: deleting an unpublished DraftComment is local, while deleting one with a Publication must also account for the remote deletion.
 _Avoid_: note, annotation, discussion, published comment
 
 **Export**:
 A plain-text projection of a Review for the clipboard, primarily for a coding agent to read. Each DraftComment's target (side and selected line range) and body are distinct from its related change context: unified diff excerpts may include both sides without extending the Anchor, and comments on the same block share one excerpt rather than repeating it. Context reflects the file versions the author saw when creating the comment, including actual whitespace changes, rather than later on-disk edits. It is not the full patch.
 _Avoid_: review content, review result, report, full patch (as the default Export)
+
+**Publication**:
+The remote counterpart of a DraftComment on the forge MR from which its Review originated. First publication is explicit; saving a published comment's body or deleting it synchronizes that change with its remote counterpart. Only full GitLab MR diff versions, including historical versions, have a Publication target in the first release. Branch Browser and Uncommitted Reviews cannot be manually bound to an MR. The comment refers to the version actually reviewed: GitLab may track its remote attachment into a newer version or retain it as outdated, without changing the local Review's Comparison or Anchor. Outdated does not mean resolved. The first release reads only counterparts ReviewFox created; it does not import other remote comments or threads.
+_Avoid_: Export, publishing to the currently selected MR, manual MR binding, outdated as a synonym for resolved
 
 **SuggestedAnchor**:
 A candidate re-binding offered for an UnresolvedAnchor when exactly one fuzzy match exists; never applied until the user confirms.
