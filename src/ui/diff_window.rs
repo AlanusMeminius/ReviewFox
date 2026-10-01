@@ -1813,7 +1813,11 @@ fn render_search_bar(
                 .items_center()
                 .rounded(px(theme::FIND_FIELD_RADIUS))
                 .bg(palette.field.surface)
-                .when(focused, |field| field.bg(palette.control.selected))
+                .border_1()
+                .border_color(gpui::Rgba {
+                    a: if focused { 1. } else { 0. },
+                    ..palette.field.focused_border
+                })
                 .child(view.search_field.clone()),
         )
         .child(render_side_segment(side, cx))
@@ -2340,7 +2344,11 @@ fn render_draft_dock(
                 .items_start()
                 .rounded(px(theme::FIND_FIELD_RADIUS))
                 .bg(palette.field.surface)
-                .when(focused, |field| field.bg(palette.control.selected))
+                .border_1()
+                .border_color(gpui::Rgba {
+                    a: if focused { 1. } else { 0. },
+                    ..palette.field.focused_border
+                })
                 .child(view.draft_field.clone()),
         )
         .into_any_element()

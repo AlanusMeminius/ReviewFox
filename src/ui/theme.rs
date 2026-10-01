@@ -157,6 +157,7 @@ pub struct TextColors {
 #[derive(Clone, Copy)]
 pub struct FieldColors {
     pub surface: Rgba,
+    pub focused_border: Rgba,
     pub caret: Rgba,
     pub selection: Rgba,
 }
@@ -337,6 +338,7 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             },
             field: FieldColors {
                 surface: rgb(0xffffff),
+                focused_border: rgb(0x2457d6),
                 caret: rgb(0x2457d6),
                 selection: gpui::rgba(0x2457d633),
             },
@@ -530,6 +532,7 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             },
             field: FieldColors {
                 surface: rgb(0x30343d),
+                focused_border: rgb(0x89c7f7),
                 caret: rgb(0x89c7f7),
                 selection: gpui::rgba(0x89c7f72a),
             },
@@ -921,6 +924,7 @@ mod software_palette_tests {
                 );
             }
             assert!(contrast(field.caret, field.surface) >= 3.);
+            assert!(contrast(field.focused_border, field.surface) >= 3.);
             for code_paper in [rgb(0x000000), rgb(0xffffff)] {
                 let overlay = composite(palette.surface.floating_overlay, code_paper);
                 assert!(contrast(palette.text.primary, overlay) >= 4.5);

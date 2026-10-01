@@ -154,10 +154,11 @@ impl Render for NumberField {
             .gap(px(2.))
             .h(px(28.))
             .p(px(2.))
-            .bg(if focused {
-                palette.control.selected
-            } else {
-                palette.field.surface
+            .bg(palette.field.surface)
+            .border_1()
+            .border_color(gpui::Rgba {
+                a: if focused { 1. } else { 0. },
+                ..palette.field.focused_border
             })
             .rounded(px(6.))
             .on_action(cx.listener(|field, _: &StepUp, _, cx| field.step(true, cx)))
