@@ -208,6 +208,34 @@ impl GitLabPublication {
         }
         Ok(author.id)
     }
+    async fn historical_blob(
+        &self,
+        origin: &ReviewOrigin,
+        path: &str,
+        sha: &str,
+        connection: &Connection,
+    ) -> Result<Arc<str>, String> {
+        let ReviewOrigin::GitLab {
+            base_url, project, ..
+        } = origin
+        else {
+            return Err("No GitLab target".into());
+        };
+        let path = url::form_urlencoded::byte_serialize(path.as_bytes()).collect::<String>();
+        let mut url = url::Url::parse(&format!(
+            "{}/repository/files/{path}/raw",
+            crate::gitlab::project_api_url(base_url, project)
+        ))
+        .map_err(|_| "Invalid historical file URL")?;
+        url.query_pairs_mut().append_pair("ref", sha);
+        let (bytes, _) = self
+            .get(url.to_string(), connection)
+            .await
+            .map_err(|error| format!("Cannot read reviewed rename verification blob: {error}"))?;
+        String::from_utf8(bytes)
+            .map(Arc::from)
+            .map_err(|_| "Reviewed rename blob is not UTF-8 text; local work retained".into())
+    }
     pub async fn prepare(
         &self,
         origin: &ReviewOrigin,
@@ -366,8 +394,24 @@ impl GitLabPublication {
         } else {
             &file.new_path
         };
+        // Rename detection can show this as an Add or Delete locally. Recover
+        // only the missing verification side from the reviewed commits; never
+        // change the authored context used by the editor or Export.
+        let mut verification = context.clone();
+        if file.renamed_file {
+            if verification.preimage.is_empty() {
+                verification.preimage = self
+                    .historical_blob(origin, &file.old_path, base_sha, connection)
+                    .await?;
+            }
+            if verification.postimage.is_empty() {
+                verification.postimage = self
+                    .historical_blob(origin, &file.new_path, head_sha, connection)
+                    .await?;
+            }
+        }
         let (old_line, new_line, line_range) =
-            selected_positions(&file.diff, *side, span.start, end, file_path, context)?;
+            selected_positions(&file.diff, *side, span.start, end, file_path, &verification)?;
         Ok(GitLabDiffPosition {
             position_type: "text".into(),
             base_sha: base_sha.clone(),
@@ -647,9 +691,15 @@ struct RawSection {
 struct RawLine {
     old: u32,
     new: u32,
-    kind: Option<&'static str>,
+    kind: RawLineKind,
     text: Option<String>,
     section: Section,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RawLineKind {
+    Added,
+    Removed,
+    Context,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -658,10 +708,10 @@ enum Section {
 }
 impl RawLine {
     fn old_line(&self) -> Option<u32> {
-        (self.kind != Some("new")).then_some(self.old)
+        (self.kind != RawLineKind::Added).then_some(self.old)
     }
     fn new_line(&self) -> Option<u32> {
-        (self.kind != Some("old")).then_some(self.new)
+        (self.kind != RawLineKind::Removed).then_some(self.new)
     }
     fn endpoint(&self, path: &str) -> GitLabRangeEndpoint {
         GitLabRangeEndpoint {
@@ -671,29 +721,32 @@ impl RawLine {
                 old = self.old,
                 new = self.new
             ),
-            kind: self.kind.map(str::to_owned),
+            kind: match self.kind {
+                RawLineKind::Added => Some("new".into()),
+                RawLineKind::Removed => Some("old".into()),
+                RawLineKind::Context => None,
+            },
             old_line: self.old_line(),
             new_line: self.new_line(),
         }
     }
-    fn validate(&self, context: &CommentContext) -> Result<(), String> {
+    fn validate(&self, preimage: &[&str], postimage: &[&str]) -> Result<(), String> {
         let old = self
             .old_line()
             .and_then(|n| n.checked_sub(1))
-            .and_then(|n| context.preimage.lines().nth(n as usize));
+            .and_then(|n| preimage.get(n as usize).copied());
         let new = self
             .new_line()
             .and_then(|n| n.checked_sub(1))
-            .and_then(|n| context.postimage.lines().nth(n as usize));
+            .and_then(|n| postimage.get(n as usize).copied());
         let valid = match self.kind {
-            Some("old") => old.is_some() && self.text.as_deref() == old,
-            Some("new") => new.is_some() && self.text.as_deref() == new,
-            None => {
+            RawLineKind::Removed => old.is_some() && self.text.as_deref() == old,
+            RawLineKind::Added => new.is_some() && self.text.as_deref() == new,
+            RawLineKind::Context => {
                 old.is_some()
                     && old == new
                     && self.text.as_deref().is_none_or(|text| Some(text) == old)
             }
-            _ => false,
         };
         if valid {
             Ok(())
@@ -755,9 +808,9 @@ fn raw_sections(patch: &str) -> Result<Vec<RawSection>, String> {
             continue;
         }
         let kind = match line.as_bytes().first() {
-            Some(b'+') => Some("new"),
-            Some(b'-') => Some("old"),
-            Some(b' ') => None,
+            Some(b'+') => RawLineKind::Added,
+            Some(b'-') => RawLineKind::Removed,
+            Some(b' ') => RawLineKind::Context,
             _ => return Err("Unrecognized GitLab diff data".into()),
         };
         let index = sections.len() - 1;
@@ -768,10 +821,10 @@ fn raw_sections(patch: &str) -> Result<Vec<RawSection>, String> {
             text: Some(line[1..].to_owned()),
             section: Section::Raw(index),
         });
-        if kind != Some("new") {
+        if kind != RawLineKind::Added {
             old = old.checked_add(1).ok_or("Invalid GitLab old line")?;
         }
-        if kind != Some("old") {
+        if kind != RawLineKind::Removed {
             new = new.checked_add(1).ok_or("Invalid GitLab new line")?;
         }
     }
@@ -786,9 +839,14 @@ fn raw_sections(patch: &str) -> Result<Vec<RawSection>, String> {
     }
     Ok(sections)
 }
-fn locate(sections: &[RawSection], side: Side, selected: u32) -> Result<RawLine, String> {
-    for section in sections {
-        if let Some(line)=section.lines.iter().find(|line|match side {Side::Preimage=>line.old_line(),Side::Postimage=>line.new_line()}==Some(selected)) {return Ok(line.clone());}
+fn locate(
+    sections: &[RawSection],
+    raw_index: &std::collections::HashMap<u32, &RawLine>,
+    side: Side,
+    selected: u32,
+) -> Result<RawLine, String> {
+    if let Some(line) = raw_index.get(&selected) {
+        return Ok((*line).clone());
     }
     // Each omitted gap has its own offset. The adjacent headers must agree.
     for gap in 0..=sections.len() {
@@ -820,7 +878,7 @@ fn locate(sections: &[RawSection], side: Side, selected: u32) -> Result<RawLine,
         return Ok(RawLine {
             old,
             new,
-            kind: None,
+            kind: RawLineKind::Context,
             text: None,
             section: Section::Gap(gap),
         });
@@ -836,11 +894,24 @@ fn selected_positions(
     context: &CommentContext,
 ) -> Result<(Option<u32>, Option<u32>, Option<GitLabLineRange>), String> {
     let sections = raw_sections(patch)?;
+    let raw_index = sections
+        .iter()
+        .flat_map(|section| section.lines.iter())
+        .filter_map(|line| {
+            match side {
+                Side::Preimage => line.old_line(),
+                Side::Postimage => line.new_line(),
+            }
+            .map(|number| (number, line))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let selected = (start..=end)
-        .map(|number| locate(&sections, side, number))
+        .map(|number| locate(&sections, &raw_index, side, number))
         .collect::<Result<Vec<_>, _>>()?;
+    let preimage = context.preimage.lines().collect::<Vec<_>>();
+    let postimage = context.postimage.lines().collect::<Vec<_>>();
     for line in &selected {
-        line.validate(context)?;
+        line.validate(&preimage, &postimage)?;
     }
     let first = selected.first().ok_or("Selected range is empty")?;
     let last = selected.last().unwrap();

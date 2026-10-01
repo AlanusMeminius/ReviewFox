@@ -1467,6 +1467,122 @@ mod tests {
     }
 
     #[test]
+    fn rename_disabled_add_delete_contexts_fetch_only_missing_historical_verification_blobs() {
+        for (side, deny) in [
+            (Side::Postimage, false),
+            (Side::Preimage, false),
+            (Side::Postimage, true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = match side {
+                Side::Preimage => "old.rs",
+                Side::Postimage => "new.rs",
+            };
+            let mut open = OpenReview::reopen(
+                comparison(),
+                path,
+                origin(),
+                ReviewStore::new(directory.path().join("local")),
+            );
+            open.begin_draft(side, 1, 2);
+            let (pre, post) = match side {
+                Side::Preimage => ("same\nold\ntail\n", ""),
+                Side::Postimage => ("", "same\nnew\ntail\n"),
+            };
+            open.capture_draft_context(pre.into(), post.into());
+            open.commit("rename mixed range");
+            let before = open.contexts().clone();
+            let exported = crate::export::export_review(open.review(), open.contexts());
+            let mut fixture = version();
+            fixture["diffs"][0] = serde_json::json!({"old_path":"old.rs","new_path":"new.rs","renamed_file":true,"diff":"@@ -1,3 +1,3 @@\n same\n-old\n+new\n tail\n"});
+            let client = FakeHttpClient::create(move |mut request| {
+                let fixture = fixture.clone();
+                async move {
+                    if request.uri().path().ends_with("/user") {
+                        return Ok(response(serde_json::json!({"id":42})));
+                    }
+                    if request.uri().path().ends_with("/versions") {
+                        return Ok(response(serde_json::json!([fixture])));
+                    }
+                    if request.uri().path().ends_with("/versions/7") {
+                        return Ok(response(fixture));
+                    }
+                    if request.uri().path().contains("/repository/files/") {
+                        assert_eq!(request.method(), http::Method::GET);
+                        let (path, sha, text) = match side {
+                            Side::Postimage => (
+                                "old.rs",
+                                Oid::from_bytes([1; 20]).to_string(),
+                                "same\nold\ntail\n",
+                            ),
+                            Side::Preimage => (
+                                "new.rs",
+                                Oid::from_bytes([2; 20]).to_string(),
+                                "same\nnew\ntail\n",
+                            ),
+                        };
+                        assert_eq!(
+                            request.uri().path(),
+                            format!("/api/v4/projects/team%2Frepo/repository/files/{path}/raw")
+                        );
+                        assert_eq!(request.uri().query(), Some(format!("ref={sha}").as_str()));
+                        return Ok(http::Response::builder()
+                            .status(if deny { 403 } else { 200 })
+                            .body(AsyncBody::from(text))
+                            .unwrap());
+                    }
+                    assert!(
+                        !deny,
+                        "Do not publish without the historical verification blob"
+                    );
+                    assert_eq!(request.method(), http::Method::POST);
+                    let mut bytes = Vec::new();
+                    request.body_mut().read_to_end(&mut bytes).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(
+                        payload["position"]["line_range"]["start"]["type"],
+                        serde_json::Value::Null
+                    );
+                    assert_eq!(
+                        payload["position"]["line_range"]["end"]["type"],
+                        match side {
+                            Side::Preimage => "old",
+                            Side::Postimage => "new",
+                        }
+                    );
+                    Ok(response(
+                        serde_json::json!({"id":"rename-thread","notes":[{"id":51,"body":payload["body"],"author":{"id":42},"position":payload["position"]}]}),
+                    ))
+                }
+            });
+            let record = futures::executor::block_on(
+                PublicationService::new(
+                    client,
+                    PublicationStore::new(directory.path().join("remote")),
+                )
+                .publish(
+                    open.review(),
+                    open.contexts(),
+                    &origin(),
+                    1,
+                    &Connection::new("https://gitlab.example.com".into(), "secret".into()),
+                ),
+            )
+            .unwrap();
+            if deny {
+                assert!(record.status_label().contains("403"));
+            } else {
+                assert!(record.receipt().is_some(), "{}", record.status_label());
+            }
+            assert_eq!(open.contexts(), &before);
+            assert_eq!(
+                crate::export::export_review(open.review(), open.contexts()),
+                exported
+            );
+        }
+    }
+
+    #[test]
     fn collapsed_version_retrieval_stays_pinned_and_reports_distinct_file_limits() {
         for (case, reason) in [
             ("collapsed_success", None),
