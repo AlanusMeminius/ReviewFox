@@ -1,12 +1,12 @@
 # GitLab Publication acceptance
 
-**Status: controlled checks passed; real-instance acceptance not verified.** Report date: 2026-10-02. Application code baseline: `8748319cbd63e1e6b2d7c6584e7bc4546ed920f6` (tickets 01–07). This report does not complete ticket 08's live criteria.
+**Status: controlled checks passed; real-instance acceptance not verified.** Report date: 2026-10-02. Application code baseline: `350ff93` (tickets 01–07 and whole-integration review corrections). This report does not complete ticket 08's live criteria.
 
 The intended primary baseline is the configured self-managed host `gitlab.lan.alanusmeninius.com`. Its actual GitLab version, edition, reachable test MR, test account and permitted cleanup scope have not been established. The test-MR question has no answer yet. No private-instance requests, keychain/credential inspection, app launch or live writes were performed for this report. No minimum GitLab version or GitLab.com live compatibility is claimed.
 
 ## Completed controlled verification
 
-At the application baseline above, `cargo check`, `git diff --check`, the two-axis implementation reviews and `cargo test -- --test-threads=1` passed. The full suite reported **500 passed, 0 failed, 4 ignored**; the focused Publication suite reported **39 passed**. The four ignored cases are existing manual syntax/diff timing benchmarks, not skipped Publication checks.
+At the application baseline above, `cargo check`, `git diff --check`, the two-axis implementation and whole-integration reviews and `cargo test -- --test-threads=1` passed. The full suite reported **500 passed, 0 failed, 4 ignored**; the focused Publication suite reported **39 passed**. The four ignored cases are existing manual syntax/diff timing benchmarks, not skipped Publication checks.
 
 The tests use fake HTTP credentials/responses and isolated temporary Review/Publication stores. They exercise public Publication operations and OpenReview persistence, including delayed requests and cancellation. The native UI is implemented and compiles; these checks do not prove actual macOS interaction, GitLab website rendering or a particular server's API behavior.
 
@@ -16,7 +16,7 @@ The tests use fake HTTP credentials/responses and isolated temporary Review/Publ
 | Added/deleted/context ranges, offsets, historical refs, rename/whitespace, collapsed and limited data | `publish_preserves_added_deleted_and_context_range_endpoints_in_gitlab_raw_section`; `expanded_context_ranges_use_each_gap_offset_and_validate_both_captured_blobs`; `renamed_whitespace_only_historical_ranges_use_original_refs_and_server_tracked_placement`; `collapsed_version_retrieval_stays_pinned_and_reports_distinct_file_limits` |
 | Same-native-ID edits/deletes, website conflicts, active input and newer local work | `conflicting_saved_bodies_require_explicit_adoption_and_refresh_preserves_active_editor`; `deletion_queued_during_create_preserves_receipt_and_never_removes_newer_shared_work` |
 | Mixed success/failure/unknown/unsupported batch, explicit retry and close/cancel | `batch_mixed_outcomes_retry_only_definite_failure_and_preserve_each_draft`; `batch_cancellation_preserves_inflight_receipt_latest_edit_and_queued_delete`; `cancelling_during_position_read_never_starts_a_create_after_window_close` |
-| Exact author/marker pagination, zero/unique/multiple matches, explicit duplicate-risk confirmation | `checking_lost_create_pages_exact_marker_author_and_restores_b_without_syncing_c`; `zero_and_multiple_matches_require_duplicate_confirmation_and_retain_old_attempts` |
+| Exact author/marker pagination, zero/unique/multiple matches, withdrawal of unsent deletion intent, explicit duplicate-risk confirmation | `checking_lost_create_pages_exact_marker_author_and_restores_b_without_syncing_c`; `zero_and_multiple_matches_require_duplicate_confirmation_and_retain_old_attempts` |
 | Read-only uncertain update/delete checks, B versus newer C, verified absence and late reads | `checking_unknown_update_confirms_sent_b_preserves_c_or_exposes_website_conflict`; `checking_unknown_delete_requires_verified_absence_and_keeps_reads_readonly`; `verified_absence_after_lost_update_keeps_sent_evidence_and_requires_explicit_recreate`; `a_late_check_for_the_old_native_comment_cannot_modify_a_recreated_counterpart` |
 
 The remaining local Review, Anchor and Export regression tests passed as part of the full suite. This is controlled evidence, not a substitute for the live observations below.
@@ -42,7 +42,7 @@ Publication targets only captured full GitLab MR Reviews; local branches, Uncomm
 
 Ranges stay on one side and within one verified GitLab raw section. Cross-section selections are rejected without splitting, shortening or relocating. Expanded context requires verification against both captured blobs and the adapter's bounded unfolding window. Version-pinned unified retrieval is attempted for omitted collapsed data; missing, truncated or limited historical text retains the draft and Export with an explanation. File-level publication is deferred. These are implemented safeguards, not measured server-version support claims.
 
-Unknown outcomes never imply failure or automatic replay. Markers can be edited/copied and are not a server uniqueness constraint; republishing can duplicate an earlier create. Known-note checks observe current state, not proof of which request caused it. The pre-read before PUT/DELETE is not an atomic conditional write. Remote placement, outdated availability, resolution and body synchronization are independent. A missing outdated field is shown as unavailable, not inferred from resolution.
+Unknown outcomes never imply failure or automatic replay. When an uncertain create also has an unsent deletion intent, Keep comment explicitly withdraws that intent while preserving uncertainty and recovery evidence; it restores the separate duplicate-risk confirmation before Republish. Sent or uncertain deletions cannot be withdrawn this way. Markers can be edited/copied and are not a server uniqueness constraint; republishing can duplicate an earlier create. Known-note checks observe current state, not proof of which request caused it. The pre-read before PUT/DELETE is not an atomic conditional write. Remote placement, outdated availability, resolution and body synchronization are independent. A missing outdated field is shown as unavailable, not inferred from resolution.
 
 ## Isolated live procedure
 

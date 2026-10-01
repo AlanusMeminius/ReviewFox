@@ -24,6 +24,8 @@ For an uncertain result, **Check again** only reads GitLab. An uncertain create 
 
 Checking an uncertain update confirms the sent body without declaring a newer local body synchronized; a different website body enters the conflict choices. Checking an uncertain delete requires verified absence. Permission and read errors preserve uncertainty. Verified absence after an uncertain update retains the sent body and old correspondence, allowing a new explicit Publish. Checking never automatically sends a pending update or deletion, including a deletion queued during a recovered create.
 
+If deletion was queued during an uncertain create, **Keep comment** explicitly withdraws the unsent deletion intent while retaining the unknown attempt and candidates. Republish still requires duplicate-risk confirmation. This action cannot cancel a deletion that was already sent.
+
 The read before an update or delete detects ordinary conflicts but is not an atomic conditional write: a website edit can still arrive between reading and writing. Remote placement and resolution are separate from synchronization; outdated status is shown only if the server supplies it.
 
 ## Requirements
