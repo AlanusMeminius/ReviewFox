@@ -168,6 +168,7 @@ impl PublicationReceipt {
 pub enum PublicationState {
     Published(PublicationReceipt),
     Failed(String),
+    Unsupported(String),
     Unknown(String),
 }
 impl PublicationState {
@@ -175,6 +176,7 @@ impl PublicationState {
         match self {
             Self::Published(_) => "Published on GitLab".into(),
             Self::Failed(message) => format!("Publish failed: {message}"),
+            Self::Unsupported(message) => format!("Publication unavailable: {message}"),
             Self::Unknown(message) => format!("Publication result unknown: {message}"),
         }
     }
@@ -234,6 +236,13 @@ pub struct PublicationRecord {
     pub deletion_body: Option<String>,
 }
 impl PublicationRecord {
+    /// Shared eligibility for the toolbar count and durable batch reservation.
+    pub fn batch_eligible(record: Option<&Self>) -> bool {
+        record.is_none_or(|record| {
+            matches!(record.state, PublicationState::Failed(_))
+                && record.deletion != Some(DeleteStatus::Confirmed)
+        })
+    }
     pub fn receipt(&self) -> Option<&PublicationReceipt> {
         match &self.state {
             PublicationState::Published(receipt) => Some(receipt),
@@ -278,6 +287,9 @@ impl PublicationRecord {
         }
         if self.website_deleted {
             return "Website deleted · local comment retained".into();
+        }
+        if self.receipt().is_none() {
+            return self.state.label();
         }
         match self.edit.as_ref().map(|edit| &edit.status) {
             Some(EditStatus::Pending) => "Local changes pending".into(),
@@ -400,8 +412,10 @@ impl PublicationStore {
             let record = self
                 .load(comparison, &saved.origin, saved.comment_id)?
                 .context("Publication disappeared while reading")?;
-            if !matches!(record.state, PublicationState::Failed(_))
-                && record.deletion != Some(DeleteStatus::Confirmed)
+            if !matches!(
+                record.state,
+                PublicationState::Failed(_) | PublicationState::Unsupported(_)
+            ) && record.deletion != Some(DeleteStatus::Confirmed)
             {
                 protected.insert(saved.comment_id);
             }
@@ -430,6 +444,87 @@ impl PublicationStore {
     }
 }
 
+/// An explicitly reserved batch advances only one item per UI callback.
+/// Dropping it makes every unsent reservation manually retryable without any HTTP write.
+pub struct PublicationBatch {
+    review: Review,
+    contexts: ReviewContexts,
+    origin: ReviewOrigin,
+    store: PublicationStore,
+    pending: std::collections::VecDeque<(u64, String)>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+#[derive(Clone)]
+pub struct BatchCancellation(Arc<std::sync::atomic::AtomicBool>);
+impl BatchCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+impl PublicationBatch {
+    pub fn cancellation(&self) -> BatchCancellation {
+        BatchCancellation(self.cancelled.clone())
+    }
+    pub fn remaining(&self) -> usize {
+        self.pending.len()
+    }
+    pub fn ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.pending.iter().map(|item| item.0)
+    }
+    pub async fn publish_next(
+        &mut self,
+        service: &PublicationService,
+        connection: &Connection,
+    ) -> Result<Option<(u64, PublicationRecord)>> {
+        if self.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let Some((id, _)) = self.pending.pop_front() else {
+            return Ok(None);
+        };
+        let record = service
+            .publish_with_cancellation(
+                &self.review,
+                &self.contexts,
+                &self.origin,
+                id,
+                connection,
+                Some(&self.cancelled),
+            )
+            .await?;
+        Ok(Some((id, record)))
+    }
+}
+impl Drop for PublicationBatch {
+    fn drop(&mut self) {
+        for (id, operation) in &self.pending {
+            let result = (|| -> Result<()> {
+                let Some(mut record) =
+                    self.store
+                        .load(&self.review.comparison, &self.origin, *id)?
+                else {
+                    return Ok(());
+                };
+                if record.operation_id == *operation && record.create_queued {
+                    record.create_queued = false;
+                    record.state = PublicationState::Failed(
+                        "Batch stopped before sending; retry explicitly".into(),
+                    );
+                    if record.deletion == Some(DeleteStatus::Pending) {
+                        record.deletion = Some(DeleteStatus::Confirmed);
+                    }
+                    self.store
+                        .save(&self.review.comparison, &self.origin, *id, &record)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                log::error!("Could not stop queued publication: {error:#}");
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PublicationService {
     adapter: GitLabPublication,
@@ -442,6 +537,40 @@ impl PublicationService {
             store,
         }
     }
+    pub fn draft_ids(&self, review: &Review, origin: &ReviewOrigin) -> Result<Vec<u64>> {
+        origin
+            .preparation_eligibility(&review.comparison)
+            .map_err(anyhow::Error::msg)?;
+        let mut ids = Vec::new();
+        for comment in &review.comments {
+            let record = self.store.load(&review.comparison, origin, comment.id)?;
+            if PublicationRecord::batch_eligible(record.as_ref()) {
+                ids.push(comment.id);
+            }
+        }
+        Ok(ids)
+    }
+    pub fn reserve_all(
+        &self,
+        review: &Review,
+        contexts: &ReviewContexts,
+        origin: &ReviewOrigin,
+    ) -> Result<PublicationBatch> {
+        let ids = self.draft_ids(review, origin)?;
+        let mut batch = PublicationBatch {
+            review: review.clone(),
+            contexts: contexts.clone(),
+            origin: origin.clone(),
+            store: self.store.clone(),
+            pending: Default::default(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        for id in ids {
+            let record = self.queue_create(review, origin, id)?;
+            batch.pending.push_back((id, record.operation_id));
+        }
+        Ok(batch)
+    }
     fn save_create(
         &self,
         comparison: &Comparison,
@@ -453,10 +582,13 @@ impl PublicationService {
             if current.operation_id == record.operation_id {
                 record.deletion = current.deletion;
                 record.deletion_body = current.deletion_body;
+                record.edit = current.edit;
             }
         }
-        if matches!(record.state, PublicationState::Failed(_))
-            && record.deletion == Some(DeleteStatus::Pending)
+        if matches!(
+            record.state,
+            PublicationState::Failed(_) | PublicationState::Unsupported(_)
+        ) && record.deletion == Some(DeleteStatus::Pending)
         {
             record.deletion = Some(DeleteStatus::Confirmed);
         }
@@ -536,11 +668,16 @@ impl PublicationService {
             .load(comparison, origin, id)?
             .context("Publication no longer exists")?;
         if record.deletion.is_none() || matches!(record.deletion, Some(DeleteStatus::Failed(_))) {
-            record.deletion = Some(if matches!(record.state, PublicationState::Failed(_)) {
-                DeleteStatus::Confirmed
-            } else {
-                DeleteStatus::Pending
-            });
+            record.deletion = Some(
+                if matches!(
+                    record.state,
+                    PublicationState::Failed(_) | PublicationState::Unsupported(_)
+                ) {
+                    DeleteStatus::Confirmed
+                } else {
+                    DeleteStatus::Pending
+                },
+            );
             record.deletion_body = Some(local_body.into());
         }
         self.store.save(comparison, origin, id, &record)?;
@@ -736,7 +873,10 @@ impl PublicationService {
         id: u64,
         body: &str,
     ) -> Result<PublicationRecord> {
-        let mut record = self.known(comparison, origin, id)?;
+        let mut record = self
+            .store
+            .load(comparison, origin, id)?
+            .context("No publication intent is available")?;
         let status = record
             .edit
             .as_ref()
@@ -750,7 +890,12 @@ impl PublicationService {
                 )
             })
             .unwrap_or(EditStatus::Pending);
-        if body == record.receipt().unwrap().confirmed_body && matches!(status, EditStatus::Pending)
+        if body
+            == record
+                .receipt()
+                .map(|receipt| receipt.confirmed_body.as_str())
+                .unwrap_or(&record.body)
+            && matches!(status, EditStatus::Pending)
         {
             record.edit = None;
         } else {
@@ -929,6 +1074,18 @@ impl PublicationService {
         comment_id: u64,
         connection: &Connection,
     ) -> Result<PublicationRecord> {
+        self.publish_with_cancellation(review, contexts, origin, comment_id, connection, None)
+            .await
+    }
+    async fn publish_with_cancellation(
+        &self,
+        review: &Review,
+        contexts: &ReviewContexts,
+        origin: &ReviewOrigin,
+        comment_id: u64,
+        connection: &Connection,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<PublicationRecord> {
         let previous = self.store.load(&review.comparison, origin, comment_id)?;
         let recreate = previous.as_ref().is_some_and(|record| {
             record.website_deleted || record.deletion == Some(DeleteStatus::Confirmed)
@@ -962,7 +1119,7 @@ impl PublicationService {
                     bail!("Result unknown; check GitLab before another create")
                 }
                 PublicationState::Unknown(_) => {}
-                PublicationState::Failed(_) => {}
+                PublicationState::Failed(_) | PublicationState::Unsupported(_) => {}
             }
         }
         origin
@@ -1033,7 +1190,14 @@ impl PublicationService {
         {
             Ok(position) => record.position = Some(position),
             Err(message) => {
-                record.state = PublicationState::Failed(message);
+                record.state = match message {
+                    crate::gitlab_publication::PreparationError::Failed(message) => {
+                        PublicationState::Failed(message)
+                    }
+                    crate::gitlab_publication::PreparationError::Unsupported(message) => {
+                        PublicationState::Unsupported(message)
+                    }
+                };
                 self.save_create(&review.comparison, origin, comment_id, &mut record)?;
                 return Ok(record);
             }
@@ -1041,6 +1205,12 @@ impl PublicationService {
         self.save_create(&review.comparison, origin, comment_id, &mut record)?;
         if record.deletion == Some(DeleteStatus::Pending) {
             record.state = PublicationState::Failed("Create cancelled before sending".into());
+            self.save_create(&review.comparison, origin, comment_id, &mut record)?;
+            return Ok(record);
+        }
+        if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst)) {
+            record.state =
+                PublicationState::Failed("Batch stopped before sending; retry explicitly".into());
             self.save_create(&review.comparison, origin, comment_id, &mut record)?;
             return Ok(record);
         }
@@ -1157,6 +1327,295 @@ mod tests {
             }
         })
     }
+    #[test]
+    fn cancelling_during_position_read_never_starts_a_create_after_window_close() {
+        use futures::FutureExt;
+        let directory = tempfile::tempdir().unwrap();
+        let open = drafted(directory.path(), Side::Postimage, 2);
+        let store = PublicationStore::new(directory.path().join("remote"));
+        let (release, waiting) = futures::channel::oneshot::channel::<()>();
+        let waiting = Arc::new(std::sync::Mutex::new(Some(waiting)));
+        let client = FakeHttpClient::create(move |request| {
+            let waiting = waiting.clone();
+            async move {
+                assert_eq!(
+                    request.method(),
+                    http::Method::GET,
+                    "A closed batch must never start POST"
+                );
+                if request.uri().path().ends_with("/versions/7") {
+                    let wait = waiting.lock().unwrap().take().unwrap();
+                    wait.await.unwrap();
+                }
+                Ok(response(preflight(request.uri().path()).unwrap()))
+            }
+        });
+        let service = PublicationService::new(client, store.clone());
+        let mut batch = service
+            .reserve_all(open.review(), open.contexts(), &origin())
+            .unwrap();
+        let cancel = batch.cancellation();
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        let mut preparing = Box::pin(batch.publish_next(&service, &connection));
+        assert!(preparing.as_mut().now_or_never().is_none());
+        cancel.cancel();
+        release.send(()).unwrap();
+        let (_, record) = futures::executor::block_on(preparing).unwrap().unwrap();
+        assert!(matches!(record.state, PublicationState::Failed(_)));
+        assert_eq!(
+            service.draft_ids(open.review(), &origin()).unwrap(),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn batch_cancellation_preserves_inflight_receipt_latest_edit_and_queued_delete() {
+        use futures::FutureExt;
+        let directory = tempfile::tempdir().unwrap();
+        let mut open = drafted(directory.path(), Side::Postimage, 2);
+        open.begin_draft(Side::Postimage, 1, 1);
+        open.capture_draft_context(
+            "unchanged\ntail\n".into(),
+            "unchanged\nadded\ntail\n".into(),
+        );
+        open.commit("delete me");
+        let store = PublicationStore::new(directory.path().join("remote"));
+        let (release, waiting) = futures::channel::oneshot::channel::<()>();
+        let waiting = Arc::new(std::sync::Mutex::new(Some(waiting)));
+        let client = FakeHttpClient::create(move |mut request| {
+            let waiting = waiting.clone();
+            async move {
+                if let Some(value) = preflight(request.uri().path()) {
+                    return Ok(response(value));
+                }
+                let mut bytes = Vec::new();
+                request.body_mut().read_to_end(&mut bytes).await.unwrap();
+                let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert!(
+                    payload["body"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("please explain")
+                );
+                let wait = waiting.lock().unwrap().take().unwrap();
+                wait.await.unwrap();
+                Ok(response(
+                    serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":payload["body"],"author":{"id":42},"position":payload["position"]}]}),
+                ))
+            }
+        });
+        let service = PublicationService::new(client, store.clone());
+        let mut batch = service
+            .reserve_all(open.review(), open.contexts(), &origin())
+            .unwrap();
+        let cancel = batch.cancellation();
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        let mut sending = Box::pin(batch.publish_next(&service, &connection));
+        assert!(sending.as_mut().now_or_never().is_none());
+        open.begin_edit(1);
+        open.commit("newer C");
+        service
+            .queue_edit(&comparison(), &origin(), 1, "newer C")
+            .unwrap();
+        service
+            .queue_delete(&comparison(), &origin(), 2, "delete me")
+            .unwrap();
+        cancel.cancel();
+        release.send(()).unwrap();
+        let (_, created) = futures::executor::block_on(sending).unwrap().unwrap();
+        assert_eq!(created.receipt().unwrap().confirmed_body, "please explain");
+        assert_eq!(created.edit.unwrap().body, "newer C");
+        assert!(
+            futures::executor::block_on(batch.publish_next(&service, &connection))
+                .unwrap()
+                .is_none()
+        );
+        drop(batch);
+        let deleted = store.load(&comparison(), &origin(), 2).unwrap().unwrap();
+        assert_eq!(deleted.deletion, Some(DeleteStatus::Confirmed));
+        assert!(deleted.receipt().is_none());
+        let reopened = OpenReview::reopen(
+            comparison(),
+            "a.rs",
+            origin(),
+            ReviewStore::new(directory.path().join("local")),
+        )
+        .with_publication_store(store.clone());
+        assert_eq!(reopened.review().comments[0].body, "newer C");
+        assert_eq!(
+            store
+                .load(&comparison(), &origin(), 1)
+                .unwrap()
+                .unwrap()
+                .edit
+                .unwrap()
+                .body,
+            "newer C"
+        );
+    }
+
+    #[test]
+    fn batch_mixed_outcomes_retry_only_definite_failure_and_preserve_each_draft() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut open = drafted(directory.path(), Side::Postimage, 2);
+        for (line, body) in [(1, "denied"), (3, "uncertain"), (4, "unsupported")] {
+            open.begin_draft(Side::Postimage, line, 1);
+            open.capture_draft_context(
+                "unchanged\ntail\n".into(),
+                "unchanged\nadded\ntail\nextra\n".into(),
+            );
+            open.commit(body);
+        }
+        let store = PublicationStore::new(directory.path().join("remote"));
+        let client = FakeHttpClient::create(|mut request| async move {
+            if let Some(value) = preflight(request.uri().path()) {
+                return Ok(response(value));
+            }
+            let mut bytes = Vec::new();
+            request.body_mut().read_to_end(&mut bytes).await.unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let body = payload["body"].as_str().unwrap();
+            assert!(!body.starts_with("unsupported"));
+            if body.starts_with("denied") || body.starts_with("uncertain") {
+                return Ok(http::Response::builder()
+                    .status(if body.starts_with("denied") { 403 } else { 500 })
+                    .body(AsyncBody::from("rejected"))
+                    .unwrap());
+            }
+            Ok(response(
+                serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":payload["body"],"author":{"id":42},"position":payload["position"]}]}),
+            ))
+        });
+        let service = PublicationService::new(client, store.clone());
+        let mut batch = service
+            .reserve_all(open.review(), open.contexts(), &origin())
+            .unwrap();
+        assert_eq!(batch.remaining(), 4);
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        let mut outcomes = Vec::new();
+        while let Some((_, record)) =
+            futures::executor::block_on(batch.publish_next(&service, &connection)).unwrap()
+        {
+            outcomes.push(record);
+        }
+        assert!(outcomes[0].receipt().is_some());
+        assert!(matches!(outcomes[1].state, PublicationState::Failed(_)));
+        assert!(matches!(outcomes[2].state, PublicationState::Unknown(_)));
+        assert!(matches!(
+            outcomes[3].state,
+            PublicationState::Unsupported(_)
+        ));
+        assert!(outcomes[3].status_label().contains("unavailable"));
+        let reopened = OpenReview::reopen(
+            comparison(),
+            "a.rs",
+            origin(),
+            ReviewStore::new(directory.path().join("local")),
+        )
+        .with_publication_store(store.clone());
+        assert_eq!(reopened.review().comments.len(), 4);
+        assert_eq!(
+            service.draft_ids(reopened.review(), &origin()).unwrap(),
+            vec![2]
+        );
+        let retry_http = FakeHttpClient::create(|mut request| async move {
+            if let Some(value) = preflight(request.uri().path()) {
+                return Ok(response(value));
+            }
+            let mut bytes = Vec::new();
+            request.body_mut().read_to_end(&mut bytes).await.unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(payload["body"].as_str().unwrap().starts_with("denied"));
+            Ok(response(
+                serde_json::json!({"id":"discussion-2","notes":[{"id":52,"body":payload["body"],"author":{"id":42},"position":payload["position"]}]}),
+            ))
+        });
+        let retry_service = PublicationService::new(retry_http, store.clone());
+        let mut retry = retry_service
+            .reserve_all(reopened.review(), reopened.contexts(), &origin())
+            .unwrap();
+        let (id, record) =
+            futures::executor::block_on(retry.publish_next(&retry_service, &connection))
+                .unwrap()
+                .unwrap();
+        assert_eq!(id, 2);
+        assert_eq!(record.receipt().unwrap().note_id, 52);
+        assert!(
+            futures::executor::block_on(retry.publish_next(&retry_service, &connection))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .load(&comparison(), &origin(), 1)
+                .unwrap()
+                .unwrap()
+                .receipt()
+                .unwrap()
+                .note_id,
+            51
+        );
+    }
+
+    #[test]
+    fn closing_batch_preserves_success_and_leaves_unsent_drafts_for_manual_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut open = drafted(directory.path(), Side::Postimage, 2);
+        open.begin_draft(Side::Postimage, 1, 1);
+        open.capture_draft_context(
+            "unchanged\ntail\n".into(),
+            "unchanged\nadded\ntail\n".into(),
+        );
+        open.commit("second draft");
+        let store = PublicationStore::new(directory.path().join("remote"));
+        let client = FakeHttpClient::create(|mut request| async move {
+            if let Some(value) = preflight(request.uri().path()) {
+                return Ok(response(value));
+            }
+            let mut bytes = Vec::new();
+            request.body_mut().read_to_end(&mut bytes).await.unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            Ok(response(
+                serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":payload["body"],"author":{"id":42},"position":payload["position"]}]}),
+            ))
+        });
+        let service = PublicationService::new(client, store.clone());
+        let mut batch = service
+            .reserve_all(open.review(), open.contexts(), &origin())
+            .unwrap();
+        assert_eq!(batch.remaining(), 2);
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        let (id, record) = futures::executor::block_on(batch.publish_next(&service, &connection))
+            .unwrap()
+            .unwrap();
+        assert_eq!(id, 1);
+        assert!(record.receipt().is_some());
+        drop(batch);
+        let reopened = OpenReview::reopen(
+            comparison(),
+            "a.rs",
+            origin(),
+            ReviewStore::new(directory.path().join("local")),
+        )
+        .with_publication_store(store.clone());
+        assert_eq!(reopened.review().comments.len(), 2);
+        assert!(
+            store
+                .load(&comparison(), &origin(), 1)
+                .unwrap()
+                .unwrap()
+                .receipt()
+                .is_some()
+        );
+        let unsent = store.load(&comparison(), &origin(), 2).unwrap().unwrap();
+        assert!(matches!(unsent.state, PublicationState::Failed(_)));
+        assert!(!unsent.create_queued);
+        assert_eq!(
+            service.draft_ids(reopened.review(), &origin()).unwrap(),
+            vec![2]
+        );
+    }
+
     #[test]
     fn conflicting_saved_bodies_require_explicit_adoption_and_refresh_preserves_active_editor() {
         let directory = tempfile::tempdir().unwrap();
@@ -3031,7 +3490,7 @@ mod tests {
             &connection,
         ))
         .unwrap();
-        assert!(matches!(record.state, PublicationState::Failed(_)));
+        assert!(matches!(record.state, PublicationState::Unsupported(_)));
     }
 
     #[test]

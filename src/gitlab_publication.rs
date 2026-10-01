@@ -11,6 +11,21 @@ use gpui_http_client::{AsyncBody, HttpClient, RedirectPolicy, http};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 
+pub enum PreparationError {
+    Failed(String),
+    Unsupported(String),
+}
+impl From<String> for PreparationError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+impl From<&str> for PreparationError {
+    fn from(message: &str) -> Self {
+        Self::Failed(message.into())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitLabDiffPosition {
     pub position_type: String,
@@ -242,7 +257,7 @@ impl GitLabPublication {
         comment: &DraftComment,
         context: Option<&CommentContext>,
         connection: &Connection,
-    ) -> Result<GitLabDiffPosition, String> {
+    ) -> Result<GitLabDiffPosition, PreparationError> {
         let ReviewOrigin::GitLab {
             base_sha,
             head_sha,
@@ -256,7 +271,9 @@ impl GitLabPublication {
             path, side, span, ..
         } = &comment.anchor
         else {
-            return Err("File comments are not yet supported for publication".into());
+            return Err(PreparationError::Unsupported(
+                "File comments are not yet supported for publication".into(),
+            ));
         };
         if span.count == 0 || span.start == 0 {
             return Err("Selected range is empty or invalid".into());
@@ -411,7 +428,8 @@ impl GitLabPublication {
             }
         }
         let (old_line, new_line, line_range) =
-            selected_positions(&file.diff, *side, span.start, end, file_path, &verification)?;
+            selected_positions(&file.diff, *side, span.start, end, file_path, &verification)
+                .map_err(PreparationError::Unsupported)?;
         Ok(GitLabDiffPosition {
             position_type: "text".into(),
             base_sha: base_sha.clone(),

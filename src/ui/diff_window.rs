@@ -1,6 +1,6 @@
 use crate::publication::{
-    Connection, DeleteStatus, EditStatus, PublicationRecord, PublicationService, PublicationState,
-    PublicationStore, ReviewOrigin,
+    BatchCancellation, Connection, DeleteStatus, EditStatus, PublicationBatch, PublicationRecord,
+    PublicationService, PublicationState, PublicationStore, ReviewOrigin,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity,
@@ -83,6 +83,16 @@ fn selection_matches_span(selection: Option<(Side, u32, u32)>, side: Side, span:
     })
 }
 
+struct ActiveBatch {
+    cancellation: BatchCancellation,
+    keys: Vec<(Comparison, ReviewOrigin, u64)>,
+}
+impl Drop for ActiveBatch {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+
 /// The Diff window shell: tree, chrome, search bar, comments, draft dock and
 /// Review. The dual pane is its own Entity (`DualPane`), driven by methods
 /// and heard through `PaneEvent`s, so scrolling notifies only the pane.
@@ -119,6 +129,8 @@ pub struct DiffView {
     queued_deletes: HashSet<(Comparison, ReviewOrigin, u64)>,
     queued_updates: HashSet<(Comparison, ReviewOrigin, u64)>,
     refreshing: HashSet<(Comparison, ReviewOrigin)>,
+    active_batch: Option<ActiveBatch>,
+    batch_status: Option<String>,
     export_status: Option<String>,
     /// Ephemeral; paths in set are collapsed. Default empty = all expanded.
     collapsed_dirs: HashSet<String>,
@@ -311,6 +323,8 @@ impl DiffView {
             queued_deletes: HashSet::new(),
             queued_updates: HashSet::new(),
             refreshing: HashSet::new(),
+            active_batch: None,
+            batch_status: None,
             export_status: None,
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
@@ -404,8 +418,10 @@ impl DiffView {
                     !matches!(
                         record.deletion,
                         Some(DeleteStatus::Sending | DeleteStatus::Unknown(_))
-                    ) && (!matches!(record.state, PublicationState::Failed(_))
-                        || !self.publication_in_progress(id))
+                    ) && (!matches!(
+                        record.state,
+                        PublicationState::Failed(_) | PublicationState::Unsupported(_)
+                    ) || !self.publication_in_progress(id))
                 }
                 None => {
                     !self.publication_in_progress(id) && !self.publication_protected.contains(&id)
@@ -426,8 +442,10 @@ impl DiffView {
                 c.id == id && matches!(&c.anchor, Anchor::Line { span, .. } if span.count>0)
             })
             && self.publication_records.get(&id).is_none_or(|record| {
-                (matches!(record.state, PublicationState::Failed(_))
-                    || record.website_deleted
+                (matches!(
+                    record.state,
+                    PublicationState::Failed(_) | PublicationState::Unsupported(_)
+                ) || record.website_deleted
                     || record.deletion == Some(DeleteStatus::Confirmed))
                     && !matches!(
                         record.deletion,
@@ -442,6 +460,152 @@ impl DiffView {
             })
     }
 
+    fn batch_draft_ids(&self) -> Vec<u64> {
+        if self.publication_error.is_some()
+            || self.open_review.storage_error().is_some()
+            || self
+                .open_review
+                .origin()
+                .preparation_eligibility(&self.open_review.review().comparison)
+                .is_err()
+        {
+            return Vec::new();
+        }
+        self.open_review
+            .review()
+            .comments
+            .iter()
+            .filter(|comment| {
+                PublicationRecord::batch_eligible(self.publication_records.get(&comment.id))
+            })
+            .map(|comment| comment.id)
+            .collect()
+    }
+    fn can_publish_batch(&self) -> bool {
+        let ids = self.batch_draft_ids();
+        self.active_batch.is_none()
+            && !ids.is_empty()
+            && ids.iter().all(|id| !self.publication_in_progress(*id))
+    }
+    fn publish_all(&mut self, cx: &mut Context<Self>) {
+        if !self.can_publish_batch() {
+            return;
+        }
+        let Some(service) = self.publication_service(cx) else {
+            return;
+        };
+        let origin = self.open_review.origin().clone();
+        let comparison = self.open_review.review().comparison.clone();
+        match service.reserve_all(
+            self.open_review.review(),
+            self.open_review.contexts(),
+            &origin,
+        ) {
+            Ok(batch) => {
+                let keys: Vec<_> = batch
+                    .ids()
+                    .map(|id| (comparison.clone(), origin.clone(), id))
+                    .collect();
+                self.publishing.extend(keys.iter().cloned());
+                self.active_batch = Some(ActiveBatch {
+                    cancellation: batch.cancellation(),
+                    keys,
+                });
+                self.batch_status = Some(format!(
+                    "Publishing {} drafts to GitLab…",
+                    batch.remaining()
+                ));
+                self.reload_publications();
+                self.publish_batch_step(batch, service, cx);
+            }
+            Err(error) => {
+                self.publication_error = Some(format!("{error:#}"));
+            }
+        }
+        cx.notify();
+    }
+    fn cancel_batch(&mut self, cx: &mut Context<Self>) {
+        if let Some(active) = &self.active_batch {
+            active.cancellation.cancel();
+        }
+        self.batch_status = Some("Stopping batch; unsent items require manual retry".into());
+        cx.notify();
+    }
+    fn publish_batch_step(
+        &mut self,
+        mut batch: PublicationBatch,
+        service: PublicationService,
+        cx: &mut Context<Self>,
+    ) {
+        // Each task sends exactly one item. A closed window drops the returned queue,
+        // so no detached loop can continue publishing after the view disappears.
+        let next_id = batch.ids().next();
+        cx.spawn(async move |this, cx| {
+            let (batch, result) = cx
+                .background_executor()
+                .spawn({
+                    let service = service.clone();
+                    async move {
+                        let connection = Connection::new(
+                            crate::settings_store::effective_base_url(
+                                &crate::settings_store::load_file(),
+                            ),
+                            crate::settings_store::load_pat().unwrap_or_default(),
+                        );
+                        let result = batch.publish_next(&service, &connection).await;
+                        (batch, result)
+                    }
+                })
+                .await;
+            let _ = this.update(cx, move |this, cx| {
+                let key = next_id.and_then(|id| {
+                    this.active_batch
+                        .as_ref()?
+                        .keys
+                        .iter()
+                        .find(|key| key.2 == id)
+                        .cloned()
+                });
+                if let Some(key) = &key {
+                    this.publishing.remove(key);
+                }
+                let stopped = !matches!(&result, Ok(Some(_)));
+                if let Err(error) = result {
+                    this.publication_error = Some(format!("{error:#}"));
+                }
+                this.reload_publications();
+                if let Some(key) = &key {
+                    if this.open_review.review().comparison == key.0
+                        && this.open_review.origin().same_target(&key.1)
+                        && this.queued_updates.remove(key)
+                        && this
+                            .publication_records
+                            .get(&key.2)
+                            .is_some_and(|record| record.receipt().is_some())
+                    {
+                        this.queue_comment_update(key.2, cx);
+                    }
+                    this.continue_deletions(key, cx);
+                }
+                if stopped || batch.remaining() == 0 {
+                    drop(batch);
+                    if let Some(active) = this.active_batch.take() {
+                        for key in &active.keys {
+                            this.publishing.remove(key);
+                            this.continue_deletions(key, cx);
+                        }
+                    }
+                    this.reload_publications();
+                    this.batch_status =
+                        Some("Batch finished; each comment shows its result".into());
+                } else {
+                    this.publish_batch_step(batch, service, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     fn publish_comment(&mut self, id: u64, cx: &mut Context<Self>) {
         if !self.can_publish(id) {
             return;
@@ -1685,8 +1849,10 @@ impl DiffView {
             return;
         }
         if self.publication_records.get(&id).is_some_and(|record| {
-            !matches!(record.state, PublicationState::Failed(_))
-                && record.deletion != Some(DeleteStatus::Confirmed)
+            !matches!(
+                record.state,
+                PublicationState::Failed(_) | PublicationState::Unsupported(_)
+            ) && record.deletion != Some(DeleteStatus::Confirmed)
         }) {
             let Some(service) = self.publication_service(cx) else {
                 return;
@@ -1759,12 +1925,10 @@ impl DiffView {
                     .is_some_and(|record| record.receipt().is_some())
                 {
                     self.queue_comment_update(id, cx);
-                } else if self.publication_in_progress(id) {
-                    self.queued_updates.insert((
-                        self.open_review.review().comparison.clone(),
-                        self.open_review.origin().clone(),
-                        id,
-                    ));
+                } else if self.publication_in_progress(id)
+                    && self.publication_records.contains_key(&id)
+                {
+                    self.queue_comment_update(id, cx);
                 }
             }
         }
@@ -1776,6 +1940,9 @@ impl DiffView {
 
     /// Cmd/Ctrl+W: always close the Diff window.
     fn close_diff(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        if let Some(active) = &self.active_batch {
+            active.cancellation.cancel();
+        }
         window.remove_window();
     }
 
@@ -2305,6 +2472,34 @@ fn render_titlebar(
                     false,
                     cx.listener(|this, _, _, cx| this.export_to_clipboard(cx)),
                 )))
+                .child(
+                    div()
+                        .id("publish-all-drafts")
+                        .px_2()
+                        .cursor_pointer()
+                        .opacity(if view.can_publish_batch() || view.active_batch.is_some() {
+                            1.0
+                        } else {
+                            0.4
+                        })
+                        .child(if view.active_batch.is_some() {
+                            "Cancel batch".to_string()
+                        } else {
+                            format!("Publish all drafts ({})", view.batch_draft_ids().len())
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.active_batch.is_some() {
+                                this.cancel_batch(cx);
+                            } else {
+                                this.publish_all(cx);
+                            }
+                        })),
+                )
+                .children(
+                    view.batch_status
+                        .as_ref()
+                        .map(|status| div().text_xs().child(status.clone())),
+                )
                 .children(view.export_status.as_ref().map(|status| {
                     div()
                         .flex_none()

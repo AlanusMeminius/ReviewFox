@@ -6,6 +6,8 @@ Local clipboard-oriented code review over a Git two-tree comparison: browse stru
 
 Publish a local DraftComment explicitly from its complete GitLab MR Review. A PAT with `api` scope and permission to comment on that MR enables writing; `read_api` supports browsing.
 
+The Review toolbar offers **Publish all drafts (N)** for its captured MR. It reserves each draft independently and shows each result on that comment. A new batch retries only definite failures; successful, uncertain and known unsupported items are excluded. Cancel or closing the window stops unsent items for manual retry. A request already sent retains its receipt or uncertain result. Reopening never continues a batch. Editing or deleting while a create is in flight preserves the later intent.
+
 Single-side ranges publish within one GitLab raw diff section, preserving their endpoints and the version actually reviewed. Rename paths and whitespace classification come from that version's server diff. Expanded unchanged context is checked against both captured file versions; short ranges within the server's unfolding window are supported. A longer expanded range that cannot be verified as one section stays local with a concrete explanation. Ranges crossing server sections are never split or shortened.
 
 When local rename detection shows separate Add/Delete files, missing verification text is read using the server's old/new paths and the reviewed commits. This leaves the original Anchor, editor and Export context unchanged.
