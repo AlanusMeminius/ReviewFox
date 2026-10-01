@@ -129,6 +129,9 @@ pub struct DiffView {
     queued_deletes: HashSet<(Comparison, ReviewOrigin, u64)>,
     queued_updates: HashSet<(Comparison, ReviewOrigin, u64)>,
     refreshing: HashSet<(Comparison, ReviewOrigin)>,
+    checking: HashSet<(Comparison, ReviewOrigin, u64)>,
+    check_errors: HashMap<(Comparison, ReviewOrigin, u64), String>,
+    republish_confirmations: HashMap<(Comparison, ReviewOrigin, u64), String>,
     active_batch: Option<ActiveBatch>,
     batch_status: Option<String>,
     export_status: Option<String>,
@@ -323,6 +326,9 @@ impl DiffView {
             queued_deletes: HashSet::new(),
             queued_updates: HashSet::new(),
             refreshing: HashSet::new(),
+            checking: HashSet::new(),
+            check_errors: HashMap::new(),
+            republish_confirmations: HashMap::new(),
             active_batch: None,
             batch_status: None,
             export_status: None,
@@ -406,6 +412,7 @@ impl DiffView {
             .iter()
             .chain(self.updating.iter())
             .chain(self.deleting.iter())
+            .chain(self.checking.iter())
             .any(|(active_comparison, _, comment)| {
                 active_comparison == comparison && *comment == id
             })
@@ -614,9 +621,7 @@ impl DiffView {
             return;
         };
         let review = self.open_review.review().clone();
-        let contexts = self.open_review.contexts().clone();
         let origin = self.open_review.origin().clone();
-        let key = (review.comparison.clone(), origin.clone(), id);
         let service = PublicationService::new(cx.http_client(), store);
         match service.queue_create(&review, &origin, id) {
             Ok(record) => {
@@ -628,6 +633,16 @@ impl DiffView {
                 return;
             }
         }
+        self.send_queued_comment(id, cx);
+    }
+    fn send_queued_comment(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(service) = self.publication_service(cx) else {
+            return;
+        };
+        let review = self.open_review.review().clone();
+        let contexts = self.open_review.contexts().clone();
+        let origin = self.open_review.origin().clone();
+        let key = (review.comparison.clone(), origin.clone(), id);
         self.publishing.insert(key.clone());
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -678,6 +693,151 @@ impl DiffView {
         cx.notify();
     }
 
+    fn can_check_comment(&self, id: u64) -> bool {
+        !self.publication_in_progress(id)
+            && self.open_review.storage_error().is_none()
+            && self.publication_records.get(&id).is_some_and(|record| {
+                record.receipt().is_some() || matches!(record.state, PublicationState::Unknown(_))
+            })
+    }
+    fn can_republish_comment(&self, id: u64) -> bool {
+        self.can_check_comment(id)
+            && self
+                .open_review
+                .origin()
+                .preparation_eligibility(&self.open_review.review().comparison)
+                .is_ok()
+            && self.publication_records.get(&id).is_some_and(|record| {
+                record.receipt().is_none()
+                    && record.deletion.is_none()
+                    && matches!(record.state, PublicationState::Unknown(_))
+            })
+    }
+    fn request_republish(&mut self, id: u64, cx: &mut Context<Self>) {
+        if !self.can_republish_comment(id) {
+            return;
+        }
+        let key = (
+            self.open_review.review().comparison.clone(),
+            self.open_review.origin().clone(),
+            id,
+        );
+        self.republish_confirmations
+            .insert(key, self.publication_records[&id].operation_id.clone());
+        cx.notify();
+    }
+    fn confirm_republish(&mut self, id: u64, cx: &mut Context<Self>) {
+        if !self.can_republish_comment(id) {
+            return;
+        }
+        let key = (
+            self.open_review.review().comparison.clone(),
+            self.open_review.origin().clone(),
+            id,
+        );
+        if self.republish_confirmations.get(&key)
+            != self
+                .publication_records
+                .get(&id)
+                .map(|record| &record.operation_id)
+        {
+            return;
+        }
+        let Some(service) = self.publication_service(cx) else {
+            return;
+        };
+        match service.queue_republish(
+            self.open_review.review(),
+            self.open_review.origin(),
+            id,
+            true,
+        ) {
+            Ok(record) => {
+                self.publication_records.insert(id, record);
+                self.republish_confirmations.remove(&key);
+                self.send_queued_comment(id, cx);
+            }
+            Err(error) => {
+                self.check_errors.insert(key, format!("{error:#}"));
+            }
+        }
+        cx.notify();
+    }
+    fn check_comment(&mut self, id: u64, cx: &mut Context<Self>) {
+        if !self.can_check_comment(id) {
+            return;
+        }
+        let Some(service) = self.publication_service(cx) else {
+            return;
+        };
+        let key = (
+            self.open_review.review().comparison.clone(),
+            self.open_review.origin().clone(),
+            id,
+        );
+        self.check_errors.remove(&key);
+        self.checking.insert(key.clone());
+        cx.spawn(async move |this, cx| {
+            let reader = service.clone();
+            let captured = key.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    reader
+                        .check_again(&captured.0, &captured.1, id, &Self::saved_connection())
+                        .await
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.checking.remove(&key);
+                if this.open_review.review().comparison == key.0
+                    && this.open_review.origin().same_target(&key.1)
+                {
+                    let Some(comment) = this
+                        .open_review
+                        .review()
+                        .comments
+                        .iter()
+                        .find(|comment| comment.id == id)
+                    else {
+                        return;
+                    };
+                    let editing = this
+                        .open_review
+                        .dock()
+                        .is_some_and(|dock| dock.editing == Some(id));
+                    match result.and_then(|checked| {
+                        service.reconcile_check(&key.0, &key.1, id, &comment.body, editing, checked)
+                    }) {
+                        Ok(outcome) => {
+                            if let Some(body) = outcome.adopt_body {
+                                let view = this.open_review.adopt_body(id, &body);
+                                this.apply_review(&view, cx);
+                            }
+                            let deleted = outcome.record.deletion == Some(DeleteStatus::Confirmed);
+                            this.publication_records.insert(id, outcome.record);
+                            if deleted {
+                                let view = this.open_review.complete_delete(id);
+                                this.apply_review(&view, cx);
+                            }
+                        }
+                        Err(error) => {
+                            this.check_errors
+                                .insert(key.clone(), format!("Check failed: {error:#}"));
+                        }
+                    }
+                    // Checking never resumes queued update/delete writes. Their durable intent
+                    // remains available through the explicit retry controls.
+                    this.queued_updates.remove(&key);
+                    this.queued_deletes.remove(&key);
+                    this.reload_publications();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
     fn publication_service(&self, cx: &App) -> Option<PublicationService> {
         self.publication_store
             .clone()
@@ -3299,6 +3459,7 @@ fn render_comment_island(
                                 else if !matches!(&c.anchor, Anchor::Line { span, .. } if span.count>0) { "File comment publication unavailable".into() }
                                 else { "Local draft · publish explicitly".into() }
                             ))
+                            .child(render_publication_recovery(view, id, cx))
                             .when(view.publication_records.get(&id).and_then(|record|record.receipt()).is_some(),|row| {
                                 let receipt=view.publication_records.get(&id).and_then(|record|record.receipt()).unwrap();
                                 let label=receipt.placement_label();
@@ -3331,6 +3492,164 @@ fn render_comment_island(
             .into_any_element()
         })
         .into_any_element()
+}
+
+fn render_publication_recovery(view: &DiffView, id: u64, cx: &mut Context<DiffView>) -> AnyElement {
+    let Some(record) = view.publication_records.get(&id) else {
+        return div().into_any_element();
+    };
+    let uncertain = matches!(record.state, PublicationState::Unknown(_))
+        || matches!(
+            record.deletion,
+            Some(DeleteStatus::Unknown(_) | DeleteStatus::Sending)
+        )
+        || record.edit.as_ref().is_some_and(|edit| {
+            matches!(
+                edit.status,
+                EditStatus::Unknown { .. } | EditStatus::Sending { .. }
+            )
+        });
+    let key = (
+        view.open_review.review().comparison.clone(),
+        view.open_review.origin().clone(),
+        id,
+    );
+    let palette = theme::software_palette();
+    let mut controls = div().flex().flex_col().gap_1().ui_text_size(11., cx);
+    if uncertain {
+        controls = controls
+            .child(
+                div()
+                    .id(("check-publication", id as usize))
+                    .child("Check again")
+                    .text_color(if view.can_check_comment(id) {
+                        palette.text.link
+                    } else {
+                        palette.text.disabled
+                    })
+                    .when(view.can_check_comment(id), |button| {
+                        button
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.check_comment(id, cx);
+                            }))
+                    }),
+            )
+            .child(div().child(
+                "Checking only reads GitLab; any further write requires an explicit action.",
+            ));
+    }
+    if let Some(url) = view
+        .open_review
+        .origin()
+        .web_url(record.receipt().map(|receipt| receipt.note_id))
+    {
+        controls = controls.child(
+            div()
+                .id(("view-publication", id as usize))
+                .cursor_pointer()
+                .text_color(palette.text.link)
+                .child("View on GitLab")
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    cx.open_url(&url);
+                }),
+        );
+    }
+    for (index, candidate) in record
+        .recovery_candidates
+        .iter()
+        .enumerate()
+        .filter(|_| record.receipt().is_none())
+    {
+        if let Some(url) = view.open_review.origin().web_url(Some(candidate.note_id)) {
+            controls = controls.child(
+                div()
+                    .id(gpui::ElementId::Name(
+                        format!("candidate-{id}-{index}").into(),
+                    ))
+                    .cursor_pointer()
+                    .text_color(palette.text.link)
+                    .child(format!("Candidate comment {}", candidate.note_id))
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        cx.open_url(&url);
+                    }),
+            );
+        }
+    }
+    for attempt in &record.prior_attempts {
+        controls = controls.child(div().child(format!(
+            "Earlier uncertain publication attempt ({} candidates)",
+            attempt.candidates.len()
+        )));
+        for candidate in &attempt.candidates {
+            if let Some(url) = view.open_review.origin().web_url(Some(candidate.note_id)) {
+                controls = controls.child(
+                    div()
+                        .cursor_pointer()
+                        .text_color(palette.text.link)
+                        .child(format!("Earlier candidate {}", candidate.note_id))
+                        .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                            cx.stop_propagation();
+                            cx.open_url(&url);
+                        }),
+                );
+            }
+        }
+    }
+    if let Some(error) = view.check_errors.get(&key) {
+        controls = controls.child(div().child(error.clone()));
+    }
+    if view.republish_confirmations.get(&key) == Some(&record.operation_id)
+        && view.can_republish_comment(id)
+    {
+        controls = controls
+            .child(div().child(
+                "The original attempt may already exist. Publishing again can create a duplicate.",
+            ))
+            .child(
+                div()
+                    .id(("confirm-republish", id as usize))
+                    .cursor_pointer()
+                    .text_color(palette.text.link)
+                    .child("Publish again despite duplicate risk")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.confirm_republish(id, cx);
+                    })),
+            )
+            .child(
+                div()
+                    .id(("cancel-republish", id as usize))
+                    .cursor_pointer()
+                    .child("Cancel")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        let key = (
+                            this.open_review.review().comparison.clone(),
+                            this.open_review.origin().clone(),
+                            id,
+                        );
+                        this.republish_confirmations.remove(&key);
+                        cx.notify();
+                    })),
+            );
+    } else if view.can_republish_comment(id) {
+        controls = controls.child(
+            div()
+                .id(("request-republish", id as usize))
+                .cursor_pointer()
+                .text_color(palette.text.link)
+                .child("Republish…")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.request_republish(id, cx);
+                })),
+        );
+    }
+    controls.into_any_element()
 }
 
 fn render_no_comments(cx: &App) -> impl IntoElement {

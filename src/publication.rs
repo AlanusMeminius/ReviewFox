@@ -28,6 +28,32 @@ impl ReviewOrigin {
             } => Some((base_url, project, *iid)),
         }
     }
+    pub fn web_url(&self, note_id: Option<u64>) -> Option<String> {
+        let Self::GitLab {
+            base_url,
+            project,
+            iid,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let project = project
+            .split('/')
+            .map(|segment| {
+                url::form_urlencoded::byte_serialize(segment.as_bytes()).collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        let mut url = format!(
+            "{}/{project}/-/merge_requests/{iid}",
+            base_url.trim_end_matches('/')
+        );
+        if let Some(id) = note_id {
+            url.push_str(&format!("#note_{id}"));
+        }
+        Some(url)
+    }
     pub fn same_target(&self, other: &Self) -> bool {
         self.target_identity() == other.target_identity()
     }
@@ -206,13 +232,38 @@ pub enum DeleteStatus {
 }
 
 pub struct RemoteRead {
+    pub operation_id: String,
     pub note: Option<RemoteNote>,
     pub confirmed_body: String,
+}
+
+pub enum CheckedPublication {
+    Create {
+        operation_id: String,
+        candidates: Vec<PublicationReceipt>,
+    },
+    Known(RemoteRead),
 }
 
 pub struct RefreshOutcome {
     pub record: PublicationRecord,
     pub adopt_body: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UncertainAttempt {
+    pub operation_id: String,
+    pub sent_body: String,
+    pub author_id: Option<u64>,
+    pub position: Option<GitLabDiffPosition>,
+    pub candidates: Vec<PublicationReceipt>,
+}
+
+/// A verified missing counterpart resolves write uncertainty but retains sent evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbsentUpdate {
+    pub receipt: PublicationReceipt,
+    pub sent_body: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +285,12 @@ pub struct PublicationRecord {
     pub create_queued: bool,
     #[serde(default)]
     pub deletion_body: Option<String>,
+    #[serde(default)]
+    pub recovery_candidates: Vec<PublicationReceipt>,
+    #[serde(default)]
+    pub prior_attempts: Vec<UncertainAttempt>,
+    #[serde(default)]
+    pub absent_updates: Vec<AbsentUpdate>,
 }
 impl PublicationRecord {
     /// Shared eligibility for the toolbar count and durable batch reservation.
@@ -310,8 +367,18 @@ impl PublicationRecord {
         }
     }
     pub fn visible_body(&self, raw: &str) -> String {
-        raw.replace(&format!("\n\n{}", self.marker()), "")
-            .replace(&self.marker(), "")
+        let mut body = raw.to_owned();
+        for operation in std::iter::once(&self.operation_id).chain(
+            self.prior_attempts
+                .iter()
+                .map(|attempt| &attempt.operation_id),
+        ) {
+            let marker = format!("<!-- reviewfox:operation={operation} -->");
+            body = body
+                .replace(&format!("\n\n{marker}"), "")
+                .replace(&marker, "");
+        }
+        body
     }
 
     pub fn marker(&self) -> String {
@@ -641,6 +708,14 @@ impl PublicationService {
                 .map(|record| record.operation_id.clone())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             body: comment.body.clone(),
+            absent_updates: previous
+                .as_ref()
+                .map(|record| record.absent_updates.clone())
+                .unwrap_or_default(),
+            prior_attempts: previous
+                .as_ref()
+                .map(|record| record.prior_attempts.clone())
+                .unwrap_or_default(),
             author_id: previous.and_then(|record| record.author_id),
             position: None,
             state: PublicationState::Unknown("Create queued; confirmation unavailable".into()),
@@ -650,9 +725,48 @@ impl PublicationService {
             deletion: None,
             create_queued: true,
             deletion_body: None,
+            recovery_candidates: Vec::new(),
         };
         self.store.save(&review.comparison, origin, id, &record)?;
         Ok(record)
+    }
+
+    /// A new attempt requires explicit acknowledgement that the old one may exist.
+    pub fn queue_republish(
+        &self,
+        review: &Review,
+        origin: &ReviewOrigin,
+        id: u64,
+        duplicate_risk_confirmed: bool,
+    ) -> Result<PublicationRecord> {
+        if !duplicate_risk_confirmed {
+            bail!("Republishing may create a duplicate; explicit confirmation required");
+        }
+        let mut record = self
+            .store
+            .load(&review.comparison, origin, id)?
+            .context("No uncertain attempt is available")?;
+        if record.receipt().is_some() || !matches!(record.state, PublicationState::Unknown(_)) {
+            bail!("This create is not uncertain");
+        }
+        if record.deletion.is_some() {
+            bail!(
+                "Deletion intent remains pending; check the original attempt before republishing"
+            );
+        }
+        record.prior_attempts.push(UncertainAttempt {
+            operation_id: record.operation_id.clone(),
+            sent_body: record.body.clone(),
+            author_id: record.author_id,
+            position: record.position.clone(),
+            candidates: record.recovery_candidates.clone(),
+        });
+        record.operation_id = uuid::Uuid::new_v4().to_string();
+        record.state =
+            PublicationState::Failed("Explicit new attempt approved despite duplicate risk".into());
+        record.create_queued = false;
+        self.store.save(&review.comparison, origin, id, &record)?;
+        self.queue_create(review, origin, id)
     }
 
     /// Preserve the draft and receipt until the remote deletion is confirmed.
@@ -798,9 +912,192 @@ impl PublicationService {
             .await
             .map_err(anyhow::Error::msg)?;
         Ok(RemoteRead {
+            operation_id: record.operation_id.clone(),
             note,
             confirmed_body: record.receipt().unwrap().confirmed_body.clone(),
         })
+    }
+
+    /// This operation only reads; explicit reconciliation never initiates another write.
+    pub async fn check_again(
+        &self,
+        comparison: &Comparison,
+        origin: &ReviewOrigin,
+        id: u64,
+        connection: &Connection,
+    ) -> Result<CheckedPublication> {
+        let record = self
+            .store
+            .load(comparison, origin, id)?
+            .context("No publication intent is available")?;
+        if record.receipt().is_some() {
+            return self
+                .read(comparison, origin, id, connection)
+                .await
+                .map(CheckedPublication::Known);
+        }
+        if !matches!(record.state, PublicationState::Unknown(_)) {
+            bail!("This creation is not awaiting confirmation");
+        }
+        self.authorize(origin, connection, &record).await?;
+        let candidates = self
+            .adapter
+            .find_marked(origin, connection, &record)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        Ok(CheckedPublication::Create {
+            operation_id: record.operation_id,
+            candidates,
+        })
+    }
+    pub fn reconcile_check(
+        &self,
+        comparison: &Comparison,
+        origin: &ReviewOrigin,
+        id: u64,
+        local_body: &str,
+        editing: bool,
+        checked: CheckedPublication,
+    ) -> Result<RefreshOutcome> {
+        match checked {
+            CheckedPublication::Known(remote) => {
+                let mut record = self.known(comparison, origin, id)?;
+                if record.operation_id != remote.operation_id
+                    || record.receipt().unwrap().confirmed_body != remote.confirmed_body
+                {
+                    return Ok(RefreshOutcome {
+                        record,
+                        adopt_body: None,
+                    });
+                }
+                match &remote.note {
+                    None => {
+                        if matches!(
+                            record.deletion,
+                            Some(DeleteStatus::Unknown(_) | DeleteStatus::Sending)
+                        ) {
+                            record.deletion = Some(DeleteStatus::Confirmed);
+                        }
+                        if let Some(sent_body) =
+                            record.edit.as_ref().and_then(|edit| match &edit.status {
+                                EditStatus::Unknown { sent_body, .. }
+                                | EditStatus::Sending { sent_body } => Some(sent_body.clone()),
+                                _ => None,
+                            })
+                        {
+                            record.absent_updates.push(AbsentUpdate {
+                                receipt: record.receipt().unwrap().clone(),
+                                sent_body,
+                            });
+                            record.edit.as_mut().unwrap().status = EditStatus::Failed("Website comment no longer exists; publish explicitly to create another".into());
+                        }
+                        record.website_deleted = true;
+                    }
+                    Some(note) => {
+                        if matches!(
+                            record.deletion,
+                            Some(DeleteStatus::Unknown(_) | DeleteStatus::Sending)
+                        ) {
+                            record.deletion =
+                                Some(if note.body != record.receipt().unwrap().confirmed_body {
+                                    DeleteStatus::Conflict {
+                                        website_body: note.body.clone(),
+                                    }
+                                } else {
+                                    DeleteStatus::Failed(
+                                        "Comment still exists; retry deletion explicitly".into(),
+                                    )
+                                });
+                        }
+                        if let Some(sent_body) =
+                            record.edit.as_ref().and_then(|edit| match &edit.status {
+                                EditStatus::Unknown { sent_body, .. }
+                                | EditStatus::Sending { sent_body } => Some(sent_body.clone()),
+                                _ => None,
+                            })
+                        {
+                            if note.body == sent_body {
+                                if let PublicationState::Published(receipt) = &mut record.state {
+                                    receipt.confirmed_body = sent_body.clone();
+                                }
+                                record.edit = (local_body != sent_body).then(|| PendingEdit {
+                                    body: local_body.into(),
+                                    status: EditStatus::Pending,
+                                });
+                            } else {
+                                record.edit = Some(PendingEdit {
+                                    body: local_body.into(),
+                                    status: EditStatus::Conflict {
+                                        website_body: note.body.clone(),
+                                    },
+                                });
+                            }
+                        }
+                    }
+                }
+                self.store.save(comparison, origin, id, &record)?;
+                let remote = RemoteRead {
+                    confirmed_body: record.receipt().unwrap().confirmed_body.clone(),
+                    ..remote
+                };
+                self.reconcile(comparison, origin, id, local_body, editing, remote)
+            }
+            CheckedPublication::Create {
+                operation_id,
+                candidates,
+            } => {
+                let mut record = self
+                    .store
+                    .load(comparison, origin, id)?
+                    .context("No publication intent is available")?;
+                if record.operation_id != operation_id || record.receipt().is_some() {
+                    return Ok(RefreshOutcome {
+                        record,
+                        adopt_body: None,
+                    });
+                }
+                record.recovery_candidates = candidates;
+                if record.recovery_candidates.len() != 1 {
+                    record.state = PublicationState::Unknown(
+                        if record.recovery_candidates.is_empty() {
+                            "No exact marker match found; absence is not proof creation failed"
+                                .into()
+                        } else {
+                            "Multiple marker matches found; inspect candidates before explicitly republishing".into()
+                        },
+                    );
+                    self.store.save(comparison, origin, id, &record)?;
+                    return Ok(RefreshOutcome {
+                        record,
+                        adopt_body: None,
+                    });
+                }
+                let mut receipt = record.recovery_candidates[0].clone();
+                let remote = RemoteNote {
+                    body: receipt.confirmed_body.clone(),
+                    position: receipt.remote_position.clone(),
+                    resolved: receipt.resolved,
+                    outdated: receipt.outdated,
+                };
+                receipt.confirmed_body = record.body.clone();
+                record.state = PublicationState::Published(receipt);
+                record.create_queued = false;
+                self.store.save(comparison, origin, id, &record)?;
+                let confirmed_body = record.body;
+                self.reconcile(
+                    comparison,
+                    origin,
+                    id,
+                    local_body,
+                    editing,
+                    RemoteRead {
+                        operation_id: record.operation_id,
+                        note: Some(remote),
+                        confirmed_body,
+                    },
+                )
+            }
+        }
     }
 
     pub fn reconcile(
@@ -817,7 +1114,9 @@ impl PublicationService {
         if record.deletion == Some(DeleteStatus::Confirmed) {
             return Ok(RefreshOutcome { record, adopt_body });
         }
-        if record.receipt().unwrap().confirmed_body != remote.confirmed_body {
+        if record.operation_id != remote.operation_id
+            || record.receipt().unwrap().confirmed_body != remote.confirmed_body
+        {
             return Ok(RefreshOutcome { record, adopt_body });
         }
         match remote.note {
@@ -829,7 +1128,9 @@ impl PublicationService {
                     || record.edit.as_ref().is_some_and(|edit| {
                         matches!(
                             edit.status,
-                            EditStatus::Sending { .. } | EditStatus::Unknown { .. }
+                            EditStatus::Sending { .. }
+                                | EditStatus::Unknown { .. }
+                                | EditStatus::Conflict { .. }
                         )
                     });
                 if !busy {
@@ -1137,6 +1438,14 @@ impl PublicationService {
                 .map(|r| r.operation_id.clone())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             body: comment.body.clone(),
+            absent_updates: previous
+                .as_ref()
+                .map(|record| record.absent_updates.clone())
+                .unwrap_or_default(),
+            prior_attempts: previous
+                .as_ref()
+                .map(|record| record.prior_attempts.clone())
+                .unwrap_or_default(),
             author_id: previous.and_then(|r| r.author_id),
             position: None,
             edit: None,
@@ -1145,6 +1454,7 @@ impl PublicationService {
             deletion: None,
             create_queued: false,
             deletion_body: None,
+            recovery_candidates: Vec::new(),
             state: PublicationState::Unknown(
                 "Confirmation unavailable; check GitLab before publishing again".into(),
             ),
@@ -1327,6 +1637,568 @@ mod tests {
             }
         })
     }
+    #[test]
+    fn verified_absence_after_lost_update_keeps_sent_evidence_and_requires_explicit_recreate() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut open, store) = published(directory.path());
+        let lost_http = FakeHttpClient::create(|request| async move {
+            if request.method() == http::Method::PUT {
+                return Ok(http::Response::builder()
+                    .status(500)
+                    .body(AsyncBody::from("lost"))
+                    .unwrap());
+            }
+            if request.uri().path().ends_with("/user") {
+                return Ok(response(serde_json::json!({"id":42})));
+            }
+            Ok(response(
+                serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":"please explain","author":{"id":42}}]}),
+            ))
+        });
+        let service = PublicationService::new(lost_http, store.clone());
+        open.begin_edit(1);
+        open.commit("sent B");
+        service
+            .queue_edit(&comparison(), &origin(), 1, "sent B")
+            .unwrap();
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        futures::executor::block_on(service.update(
+            &comparison(),
+            &origin(),
+            1,
+            &connection,
+            false,
+        ))
+        .unwrap();
+        open.begin_edit(1);
+        open.commit("newer C");
+        service
+            .queue_edit(&comparison(), &origin(), 1, "newer C")
+            .unwrap();
+        let absent_http = FakeHttpClient::create(|request| async move {
+            assert_eq!(request.method(), http::Method::GET);
+            if request.uri().path().ends_with("/user") {
+                return Ok(response(serde_json::json!({"id":42})));
+            }
+            if request.uri().path().ends_with("/discussion-1") {
+                return Ok(http::Response::builder()
+                    .status(404)
+                    .body(AsyncBody::from("absent"))
+                    .unwrap());
+            }
+            Ok(response(serde_json::json!([])))
+        });
+        let reader = PublicationService::new(absent_http, store.clone());
+        let checked = futures::executor::block_on(reader.check_again(
+            &comparison(),
+            &origin(),
+            1,
+            &connection,
+        ))
+        .unwrap();
+        let result = reader
+            .reconcile_check(&comparison(), &origin(), 1, "newer C", false, checked)
+            .unwrap();
+        assert!(result.record.website_deleted);
+        assert!(matches!(
+            result.record.edit.unwrap().status,
+            EditStatus::Failed(_)
+        ));
+        assert_eq!(result.record.absent_updates[0].sent_body, "sent B");
+        assert_eq!(result.record.absent_updates[0].receipt.note_id, 51);
+        assert_eq!(open.review().comments[0].body, "newer C");
+        let reserved = reader.queue_create(open.review(), &origin(), 1).unwrap();
+        assert!(reserved.create_queued);
+        assert_eq!(reserved.body, "newer C");
+        assert_eq!(reserved.absent_updates[0].sent_body, "sent B");
+        let creating = FakeHttpClient::create(|mut request| async move {
+            if let Some(value) = preflight(request.uri().path()) {
+                return Ok(response(value));
+            }
+            assert_eq!(request.method(), http::Method::POST);
+            let mut bytes = Vec::new();
+            request.body_mut().read_to_end(&mut bytes).await.unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(payload["body"].as_str().unwrap().starts_with("newer C"));
+            Ok(response(
+                serde_json::json!({"id":"new-thread","notes":[{"id":99,"body":payload["body"],"author":{"id":42}}]}),
+            ))
+        });
+        let created =
+            futures::executor::block_on(PublicationService::new(creating, store.clone()).publish(
+                open.review(),
+                open.contexts(),
+                &origin(),
+                1,
+                &connection,
+            ))
+            .unwrap();
+        assert_eq!(created.receipt().unwrap().note_id, 99);
+        assert_eq!(created.absent_updates[0].sent_body, "sent B");
+        assert_eq!(
+            store
+                .load(&comparison(), &origin(), 1)
+                .unwrap()
+                .unwrap()
+                .absent_updates[0]
+                .receipt
+                .note_id,
+            51
+        );
+    }
+
+    #[test]
+    fn a_late_check_for_the_old_native_comment_cannot_modify_a_recreated_counterpart() {
+        let directory = tempfile::tempdir().unwrap();
+        let (open, store) = published(directory.path());
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        let stale_reader = PublicationService::new(website_client("website D"), store.clone());
+        let stale = futures::executor::block_on(stale_reader.check_again(
+            &comparison(),
+            &origin(),
+            1,
+            &connection,
+        ))
+        .unwrap();
+        let absent = FakeHttpClient::create(|request| async move {
+            if request.uri().path().ends_with("/user") {
+                return Ok(response(serde_json::json!({"id":42})));
+            }
+            if request.uri().path().ends_with("/discussion-1") {
+                return Ok(http::Response::builder()
+                    .status(404)
+                    .body(AsyncBody::from("missing"))
+                    .unwrap());
+            }
+            Ok(response(serde_json::json!([])))
+        });
+        let absence = PublicationService::new(absent, store.clone());
+        let read =
+            futures::executor::block_on(absence.read(&comparison(), &origin(), 1, &connection))
+                .unwrap();
+        absence
+            .reconcile(&comparison(), &origin(), 1, "please explain", false, read)
+            .unwrap();
+        let created_http = FakeHttpClient::create(|mut request| async move {
+            if let Some(value) = preflight(request.uri().path()) {
+                return Ok(response(value));
+            }
+            let mut bytes = Vec::new();
+            request.body_mut().read_to_end(&mut bytes).await.unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            Ok(response(
+                serde_json::json!({"id":"new-thread","notes":[{"id":99,"body":payload["body"],"author":{"id":42}}]}),
+            ))
+        });
+        let publisher = PublicationService::new(created_http, store.clone());
+        publisher.queue_create(open.review(), &origin(), 1).unwrap();
+        futures::executor::block_on(publisher.publish(
+            open.review(),
+            open.contexts(),
+            &origin(),
+            1,
+            &connection,
+        ))
+        .unwrap();
+        let outcome = stale_reader
+            .reconcile_check(&comparison(), &origin(), 1, "please explain", false, stale)
+            .unwrap();
+        assert_eq!(outcome.record.receipt().unwrap().note_id, 99);
+        assert_eq!(
+            outcome.record.receipt().unwrap().confirmed_body,
+            "please explain"
+        );
+        assert!(outcome.adopt_body.is_none());
+    }
+
+    #[test]
+    fn checking_unknown_delete_requires_verified_absence_and_keeps_reads_readonly() {
+        for outcome in ["absent", "present", "denied"] {
+            let directory = tempfile::tempdir().unwrap();
+            let (mut open, store) = published(directory.path());
+            let lost_http = FakeHttpClient::create(|request| async move {
+                if request.method() == http::Method::DELETE {
+                    return Ok(http::Response::builder()
+                        .status(500)
+                        .body(AsyncBody::from("lost"))
+                        .unwrap());
+                }
+                if request.uri().path().ends_with("/user") {
+                    return Ok(response(serde_json::json!({"id":42})));
+                }
+                Ok(response(
+                    serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":"please explain","author":{"id":42}}]}),
+                ))
+            });
+            let service = PublicationService::new(lost_http, store.clone());
+            service
+                .queue_delete(&comparison(), &origin(), 1, "please explain")
+                .unwrap();
+            let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+            let lost = futures::executor::block_on(service.delete(
+                &comparison(),
+                &origin(),
+                1,
+                &connection,
+                false,
+            ))
+            .unwrap();
+            assert!(matches!(lost.deletion, Some(DeleteStatus::Unknown(_))));
+            let checking = FakeHttpClient::create(move |request| async move {
+                assert_eq!(request.method(), http::Method::GET);
+                if request.uri().path().ends_with("/user") {
+                    return Ok(response(serde_json::json!({"id":42})));
+                }
+                if outcome == "denied" {
+                    return Ok(http::Response::builder()
+                        .status(403)
+                        .body(AsyncBody::from("denied"))
+                        .unwrap());
+                }
+                if outcome == "present" {
+                    return Ok(response(
+                        serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":"please explain","author":{"id":42}}]}),
+                    ));
+                }
+                if request.uri().path().ends_with("/discussion-1") {
+                    return Ok(http::Response::builder()
+                        .status(404)
+                        .body(AsyncBody::from("missing"))
+                        .unwrap());
+                }
+                assert!(request.uri().path().ends_with("/discussions"));
+                Ok(response(serde_json::json!([])))
+            });
+            let reader = PublicationService::new(checking, store.clone());
+            let checked = futures::executor::block_on(reader.check_again(
+                &comparison(),
+                &origin(),
+                1,
+                &connection,
+            ));
+            if outcome == "denied" {
+                assert!(checked.is_err());
+                assert!(matches!(
+                    store
+                        .load(&comparison(), &origin(), 1)
+                        .unwrap()
+                        .unwrap()
+                        .deletion,
+                    Some(DeleteStatus::Unknown(_))
+                ));
+            } else {
+                let result = reader
+                    .reconcile_check(
+                        &comparison(),
+                        &origin(),
+                        1,
+                        "please explain",
+                        false,
+                        checked.unwrap(),
+                    )
+                    .unwrap();
+                if outcome == "absent" {
+                    assert_eq!(result.record.deletion, Some(DeleteStatus::Confirmed));
+                    open.complete_delete(1);
+                    assert!(open.review().comments.is_empty());
+                } else {
+                    assert!(matches!(
+                        result.record.deletion,
+                        Some(DeleteStatus::Failed(_))
+                    ));
+                    assert_eq!(open.review().comments.len(), 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn checking_unknown_update_confirms_sent_b_preserves_c_or_exposes_website_conflict() {
+        for website in ["sent B", "website D"] {
+            let directory = tempfile::tempdir().unwrap();
+            let (mut open, store) = published(directory.path());
+            let lost_http = FakeHttpClient::create(|request| async move {
+                if request.method() == http::Method::PUT {
+                    return Ok(http::Response::builder()
+                        .status(500)
+                        .body(AsyncBody::from("lost"))
+                        .unwrap());
+                }
+                if request.uri().path().ends_with("/user") {
+                    return Ok(response(serde_json::json!({"id":42})));
+                }
+                Ok(response(
+                    serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":"please explain","author":{"id":42}}]}),
+                ))
+            });
+            let service = PublicationService::new(lost_http, store.clone());
+            open.begin_edit(1);
+            open.commit("sent B");
+            service
+                .queue_edit(&comparison(), &origin(), 1, "sent B")
+                .unwrap();
+            let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+            let lost = futures::executor::block_on(service.update(
+                &comparison(),
+                &origin(),
+                1,
+                &connection,
+                false,
+            ))
+            .unwrap();
+            assert!(matches!(
+                lost.edit.as_ref().unwrap().status,
+                EditStatus::Unknown { .. }
+            ));
+            open.begin_edit(1);
+            open.commit("newer C");
+            service
+                .queue_edit(&comparison(), &origin(), 1, "newer C")
+                .unwrap();
+            let reader = PublicationService::new(
+                website_client(&format!("{website}\n\n{}", lost.marker())),
+                store.clone(),
+            );
+            let checked = futures::executor::block_on(reader.check_again(
+                &comparison(),
+                &origin(),
+                1,
+                &connection,
+            ))
+            .unwrap();
+            let outcome = reader
+                .reconcile_check(&comparison(), &origin(), 1, "newer C", false, checked)
+                .unwrap();
+            let edit = outcome.record.edit.as_ref().unwrap();
+            assert_eq!(edit.body, "newer C");
+            if website == "sent B" {
+                assert_eq!(outcome.record.receipt().unwrap().confirmed_body, "sent B");
+                assert_eq!(edit.status, EditStatus::Pending);
+            } else {
+                assert!(
+                    matches!(&edit.status, EditStatus::Conflict {website_body} if website_body == "website D")
+                );
+            }
+            assert!(outcome.adopt_body.is_none());
+            assert_eq!(open.review().comments[0].body, "newer C");
+        }
+    }
+
+    #[test]
+    fn zero_and_multiple_matches_require_duplicate_confirmation_and_retain_old_attempts() {
+        for count in [0, 2] {
+            let directory = tempfile::tempdir().unwrap();
+            let open = drafted(directory.path(), Side::Postimage, 2);
+            let store = PublicationStore::new(directory.path().join("remote"));
+            let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+            let losing = FakeHttpClient::create(|request| async move {
+                if let Some(value) = preflight(request.uri().path()) {
+                    return Ok(response(value));
+                }
+                Ok(http::Response::builder()
+                    .status(500)
+                    .body(AsyncBody::from("lost"))
+                    .unwrap())
+            });
+            let lost = futures::executor::block_on(
+                PublicationService::new(losing, store.clone()).publish(
+                    open.review(),
+                    open.contexts(),
+                    &origin(),
+                    1,
+                    &connection,
+                ),
+            )
+            .unwrap();
+            let body = lost.remote_body();
+            let client = FakeHttpClient::create(move |request| {
+                let body = body.clone();
+                async move {
+                    assert_eq!(request.method(), http::Method::GET);
+                    if request.uri().path().ends_with("/user") {
+                        return Ok(response(serde_json::json!({"id":42})));
+                    }
+                    let candidates: Vec<_> = (0..count).map(|n| serde_json::json!({"id":format!("thread-{n}"),"notes":[{"id":70+n,"body":body,"author":{"id":42}}]})).collect();
+                    Ok(response(serde_json::json!(candidates)))
+                }
+            });
+            let service = PublicationService::new(client, store.clone());
+            let checked = futures::executor::block_on(service.check_again(
+                &comparison(),
+                &origin(),
+                1,
+                &connection,
+            ))
+            .unwrap();
+            let result = service
+                .reconcile_check(
+                    &comparison(),
+                    &origin(),
+                    1,
+                    "please explain",
+                    false,
+                    checked,
+                )
+                .unwrap();
+            assert!(matches!(result.record.state, PublicationState::Unknown(_)));
+            assert_eq!(result.record.recovery_candidates.len(), count as usize);
+            assert!(
+                service
+                    .queue_republish(open.review(), &origin(), 1, false)
+                    .is_err()
+            );
+            assert_eq!(
+                store
+                    .load(&comparison(), &origin(), 1)
+                    .unwrap()
+                    .unwrap()
+                    .operation_id,
+                lost.operation_id
+            );
+            let reserved = service
+                .queue_republish(open.review(), &origin(), 1, true)
+                .unwrap();
+            assert_ne!(reserved.operation_id, lost.operation_id);
+            assert!(reserved.create_queued);
+            assert_eq!(reserved.prior_attempts.len(), 1);
+            assert_eq!(reserved.prior_attempts[0].operation_id, lost.operation_id);
+            assert_eq!(reserved.prior_attempts[0].candidates.len(), count as usize);
+            let old_visible = reserved.visible_body(&lost.remote_body());
+            assert_eq!(old_visible, "please explain");
+            let success = FakeHttpClient::create(|mut request| async move {
+                if let Some(value) = preflight(request.uri().path()) {
+                    return Ok(response(value));
+                }
+                let mut bytes = Vec::new();
+                request.body_mut().read_to_end(&mut bytes).await.unwrap();
+                let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                Ok(response(
+                    serde_json::json!({"id":"new-thread","notes":[{"id":99,"body":payload["body"],"author":{"id":42}}]}),
+                ))
+            });
+            let published = futures::executor::block_on(
+                PublicationService::new(success, store.clone()).publish(
+                    open.review(),
+                    open.contexts(),
+                    &origin(),
+                    1,
+                    &connection,
+                ),
+            )
+            .unwrap();
+            assert_eq!(published.receipt().unwrap().note_id, 99);
+            assert_eq!(published.prior_attempts[0].operation_id, lost.operation_id);
+            assert_eq!(
+                store
+                    .load(&comparison(), &origin(), 1)
+                    .unwrap()
+                    .unwrap()
+                    .prior_attempts
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn checking_lost_create_pages_exact_marker_author_and_restores_b_without_syncing_c() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut open = drafted(directory.path(), Side::Postimage, 2);
+        let store = PublicationStore::new(directory.path().join("remote"));
+        let losing = FakeHttpClient::create(|request| async move {
+            if let Some(value) = preflight(request.uri().path()) {
+                return Ok(response(value));
+            }
+            Ok(http::Response::builder()
+                .status(500)
+                .body(AsyncBody::from("lost response"))
+                .unwrap())
+        });
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        let lost =
+            futures::executor::block_on(PublicationService::new(losing, store.clone()).publish(
+                open.review(),
+                open.contexts(),
+                &origin(),
+                1,
+                &connection,
+            ))
+            .unwrap();
+        assert!(matches!(lost.state, PublicationState::Unknown(_)));
+        open.begin_edit(1);
+        open.commit("newer C");
+        PublicationService::new(website_client("unused"), store.clone())
+            .queue_edit(&comparison(), &origin(), 1, "newer C")
+            .unwrap();
+        PublicationService::new(website_client("unused"), store.clone())
+            .queue_delete(&comparison(), &origin(), 1, "newer C")
+            .unwrap();
+        let body = lost.remote_body();
+        let client = FakeHttpClient::create(move |request| {
+            let body = body.clone();
+            async move {
+                assert_eq!(request.method(), http::Method::GET);
+                if request.uri().path().ends_with("/user") {
+                    return Ok(response(serde_json::json!({"id":42})));
+                }
+                assert!(request.uri().path().ends_with("/discussions"));
+                if request.uri().query().unwrap().ends_with("&page=1") {
+                    let value = serde_json::json!([{"id":"wrong-author","notes":[{"id":60,"body":body,"author":{"id":99}}]},{"id":"changed-marker","notes":[{"id":61,"body":"please explain<!-- reviewfox:operation=changed -->","author":{"id":42}}]}]);
+                    return Ok(http::Response::builder()
+                        .status(200)
+                        .header("x-next-page", "2")
+                        .body(AsyncBody::from(value.to_string()))
+                        .unwrap());
+                }
+                assert!(request.uri().query().unwrap().ends_with("&page=2"));
+                Ok(response(
+                    serde_json::json!([{"id":"original-thread","notes":[{"id":51,"body":body,"author":{"id":42},"position":{"new_line":2}}]}]),
+                ))
+            }
+        });
+        let service = PublicationService::new(client, store.clone());
+        let checked = futures::executor::block_on(service.check_again(
+            &comparison(),
+            &origin(),
+            1,
+            &connection,
+        ))
+        .unwrap();
+        let outcome = service
+            .reconcile_check(&comparison(), &origin(), 1, "newer C", false, checked)
+            .unwrap();
+        assert_eq!(outcome.record.receipt().unwrap().note_id, 51);
+        assert_eq!(
+            outcome.record.receipt().unwrap().confirmed_body,
+            "please explain"
+        );
+        assert_eq!(outcome.record.deletion, Some(DeleteStatus::Pending));
+        assert_eq!(outcome.record.edit.unwrap().body, "newer C");
+        assert!(outcome.adopt_body.is_none());
+        let reopened = OpenReview::reopen(
+            comparison(),
+            "a.rs",
+            origin(),
+            ReviewStore::new(directory.path().join("local")),
+        )
+        .with_publication_store(store.clone());
+        assert_eq!(reopened.review().comments[0].body, "newer C");
+        assert_eq!(
+            store
+                .load(&comparison(), &origin(), 1)
+                .unwrap()
+                .unwrap()
+                .receipt()
+                .unwrap()
+                .note_id,
+            51
+        );
+        assert!(
+            !crate::export::export_review(reopened.review(), reopened.contexts())
+                .contains("reviewfox:operation")
+        );
+    }
+
     #[test]
     fn cancelling_during_position_read_never_starts_a_create_after_window_close() {
         use futures::FutureExt;

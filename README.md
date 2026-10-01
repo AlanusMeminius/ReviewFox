@@ -18,6 +18,10 @@ Saving a published body updates its existing GitLab note. Opening a Review or cl
 
 Deleting a published comment checks the same GitLab note first. A changed website body requires confirmation again; a website-deleted note retains local work and needs an explicit Publish to recreate it. Delete failures retain the correspondence for manual retry. A delete requested during a live create or update is saved and serialized after that request; uncertainty blocks another write. Confirmed deletion clears the local comment only when its body has not changed, no editor is active, and no other MR still owns a counterpart. Newer local work is retained.
 
+For an uncertain result, **Check again** only reads GitLab. An uncertain create scans all discussion pages on the captured MR for the exact saved marker and original author. One match restores that native comment; no matches or multiple matches remain uncertain. Candidate links and **View on GitLab** support inspection. **Republish…** requires confirmation that a duplicate may result and retains the earlier attempt for tracking. Markers are editable and copyable content, so this does not guarantee exactly-once creation.
+
+Checking an uncertain update confirms the sent body without declaring a newer local body synchronized; a different website body enters the conflict choices. Checking an uncertain delete requires verified absence. Permission and read errors preserve uncertainty. Verified absence after an uncertain update retains the sent body and old correspondence, allowing a new explicit Publish. Checking never automatically sends a pending update or deletion, including a deletion queued during a recovered create.
+
 The read before an update or delete detects ordinary conflicts but is not an atomic conditional write: a website edit can still arrive between reading and writing. Remote placement and resolution are separate from synchronization; outdated status is shown only if the server supplies it.
 
 ## Requirements

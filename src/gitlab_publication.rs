@@ -467,6 +467,59 @@ impl GitLabPublication {
             outdated: note.outdated,
         }))
     }
+    /// Markers are editable content, so every matching native note is a candidate.
+    pub async fn find_marked(
+        &self,
+        origin: &ReviewOrigin,
+        connection: &Connection,
+        record: &PublicationRecord,
+    ) -> Result<Vec<PublicationReceipt>, String> {
+        let endpoint = Self::endpoint(origin)?;
+        let author = record
+            .author_id
+            .ok_or("Original account identity unavailable; marker recovery cannot be verified")?;
+        let mut page = 1u64;
+        let mut candidates = Vec::new();
+        loop {
+            let (bytes, next) = self
+                .get(
+                    format!("{endpoint}/discussions?per_page=100&page={page}"),
+                    connection,
+                )
+                .await?;
+            let discussions: Vec<Discussion> =
+                serde_json::from_slice(&bytes).map_err(|_| "Invalid GitLab discussion response")?;
+            let full = discussions.len() == 100;
+            for discussion in discussions {
+                if discussion.id.is_empty() {
+                    return Err("Invalid native discussion identity".into());
+                }
+                for note in discussion.notes {
+                    if note.author.id == author && note.body.contains(&record.marker()) {
+                        if note.id == 0 {
+                            return Err("Invalid native comment identity".into());
+                        }
+                        candidates.push(PublicationReceipt {
+                            discussion_id: discussion.id.clone(),
+                            note_id: note.id,
+                            confirmed_body: record.visible_body(&note.body),
+                            remote_position: note.position,
+                            resolved: note.resolved,
+                            outdated: note.outdated,
+                        });
+                    }
+                }
+            }
+            match next_discussion_page(page, next, full)? {
+                Some(next) => page = next,
+                None => break,
+            }
+        }
+        candidates.sort_by_key(|candidate| candidate.note_id);
+        candidates.dedup_by(|a, b| a.note_id == b.note_id && a.discussion_id == b.discussion_id);
+        Ok(candidates)
+    }
+
     pub async fn read_known(
         &self,
         origin: &ReviewOrigin,
@@ -505,18 +558,9 @@ impl GitLabPublication {
                 {
                     return Self::known_note(discussion, record);
                 }
-                if let Some(next) = next.filter(|next| !next.is_empty()) {
-                    let next = next
-                        .parse::<u64>()
-                        .map_err(|_| "Invalid GitLab pagination")?;
-                    if next <= page {
-                        return Err("Invalid GitLab pagination".into());
-                    }
-                    page = next;
-                } else if full {
-                    page += 1;
-                } else {
-                    return Ok(None);
+                match next_discussion_page(page, next, full)? {
+                    Some(next) => page = next,
+                    None => return Ok(None),
                 }
             }
         }
@@ -682,6 +726,28 @@ impl GitLabPublication {
         }
     }
 }
+fn next_discussion_page(
+    page: u64,
+    next: Option<String>,
+    full: bool,
+) -> Result<Option<u64>, String> {
+    if let Some(next) = next.filter(|next| !next.is_empty()) {
+        let next = next
+            .parse::<u64>()
+            .map_err(|_| "Invalid GitLab pagination")?;
+        if next <= page {
+            return Err("Invalid GitLab pagination".into());
+        }
+        Ok(Some(next))
+    } else if full {
+        page.checked_add(1)
+            .map(Some)
+            .ok_or_else(|| "Invalid GitLab pagination".into())
+    } else {
+        Ok(None)
+    }
+}
+
 fn status_message(status: u16) -> String {
     match status {
         401 => "Authentication failed (401). Check the GitLab token".into(),
