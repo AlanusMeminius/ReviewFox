@@ -57,9 +57,7 @@ fn one_light() -> CodeTheme {
                 ..rgb(0x2457d6)
             },
             search_hit: rgb(0xfff4c7),
-            search_hit_ring: rgb(0x8d6500),
             search_current: rgb(0xffedac),
-            search_ring: rgb(0x8d5900),
             syntax: syntax_slots(ONE_LIGHT_SYNTAX),
         },
         marks: DiffMarks {
@@ -96,9 +94,7 @@ fn one_dark() -> CodeTheme {
                 ..rgb(0x61afef)
             },
             search_hit: rgb(0x313020),
-            search_hit_ring: rgb(0xdcc26b),
             search_current: rgb(0x392e20),
-            search_ring: rgb(0xeacb7e),
             syntax: syntax_slots(&[
                 ("attribute", 0xe5868d),
                 ("comment", 0x9da1a8),
@@ -160,9 +156,7 @@ fn atom_one_light() -> CodeTheme {
                 ..rgb(0x4078c0)
             },
             search_hit: rgb(0xfff4c7),
-            search_hit_ring: rgb(0x8d6500),
             search_current: rgb(0xffedac),
-            search_ring: rgb(0x8d5900),
             syntax: syntax_slots(&[
                 ("attribute", 0xa626a4),
                 ("comment", 0x5f6770),
@@ -242,9 +236,7 @@ pub struct AuthoredSlots {
     pub idle_comment: Rgba,
     pub selection: Rgba,
     pub search_hit: Rgba,
-    pub search_hit_ring: Rgba,
     pub search_current: Rgba,
-    pub search_ring: Rgba,
     pub syntax: Vec<(String, Rgba)>,
 }
 
@@ -413,9 +405,7 @@ mod tests {
             palette.slots.selection.a
         );
         assert_hex(palette.slots.search_hit, 0xfff4c7);
-        assert_hex(palette.slots.search_hit_ring, 0x8d6500);
         assert_hex(palette.slots.search_current, 0xffedac);
-        assert_hex(palette.slots.search_ring, 0x8d5900);
         let syntax = [
             ("attribute", 0x4b61b9),
             ("comment", 0x666769),
@@ -698,8 +688,6 @@ mod tests {
                 ("omission wave", m.omission_wave, m.omission_fill),
                 ("omission wave on paper", m.omission_wave, s.paper),
                 ("drafting edge", m.drafting_edge, m.drafting_band),
-                ("search hit outline", s.search_hit_ring, s.search_hit),
-                ("current search outline", s.search_ring, s.search_current),
                 ("comment icon on pad", s.comment, m.open_comment_pad),
             ];
             for (name, fg, bg) in checks {
@@ -717,17 +705,6 @@ mod tests {
                     let target = if name == "line number" { 4.5 } else { 3. };
                     let ratio = contrast_ratio(fg, bg);
                     if ratio < target {
-                        failures.push(format!("{} {name} on band {ix}: {ratio:.2}", theme.id));
-                    }
-                }
-            }
-            for (name, ring) in [
-                ("search hit outline", s.search_hit_ring),
-                ("current search outline", s.search_ring),
-            ] {
-                for (ix, bg) in bands.into_iter().enumerate() {
-                    let ratio = contrast_ratio(ring, bg);
-                    if ratio < 3. {
                         failures.push(format!("{} {name} on band {ix}: {ratio:.2}", theme.id));
                     }
                 }

@@ -12,7 +12,7 @@ use crate::ui::tooltip::Tooltip;
 pub enum ButtonStyle {
     #[default]
     Subtle,
-    Outlined,
+    Filled,
     #[allow(dead_code)] // Part of the component set; no Settings page uses it yet.
     Tinted(TintColor),
 }
@@ -50,42 +50,36 @@ impl ButtonSize {
 
 struct Colors {
     background: Hsla,
-    border: Hsla,
     hover: Hsla,
     active: Hsla,
 }
 
 impl ButtonStyle {
     fn colors(self, palette: theme::SoftwarePalette) -> Colors {
-        let (background, border, hover, active) = match self {
+        let (background, hover, active) = match self {
             ButtonStyle::Subtle => (
-                transparent_black(),
                 transparent_black(),
                 palette.control.hover.into(),
                 palette.control.pressed.into(),
             ),
-            ButtonStyle::Outlined => (
-                transparent_black(),
-                palette.control.outline.into(),
+            ButtonStyle::Filled => (
+                palette.settings.card.into(),
                 palette.control.hover.into(),
                 palette.control.pressed.into(),
             ),
             ButtonStyle::Tinted(TintColor::Success) => (
                 palette.feedback.success.background.into(),
-                palette.feedback.success.border.into(),
                 palette.control.hover.into(),
                 palette.control.pressed.into(),
             ),
             ButtonStyle::Tinted(TintColor::Error) => (
                 palette.feedback.error.background.into(),
-                palette.feedback.error.border.into(),
                 palette.control.hover.into(),
                 palette.control.pressed.into(),
             ),
         };
         Colors {
             background,
-            border,
             hover,
             active,
         }
@@ -189,7 +183,7 @@ impl Button {
         self
     }
 
-    /// Makes the button a Tab stop; keyboard focus shows a `border_focused` border.
+    /// Makes the button a Tab stop; keyboard focus uses a filled state.
     /// While focused, Enter / Space (no modifiers) run [`Self::on_click`]: GPUI's
     /// div turns their key-up into a `ClickEvent::Keyboard` for focused elements.
     pub fn tab_index(mut self, index: isize) -> Self {
@@ -269,9 +263,6 @@ impl RenderOnce for Button {
                 }
             })
             .rounded(px(4.))
-            // Always 1px so focus / outline never shifts the layout.
-            .border_1()
-            .border_color(colors.border)
             .bg(colors.background)
             .font_family(appearance::ui_font(cx))
             .ui_text_size(if self.small_label { 12. } else { 14. }, cx)
@@ -282,7 +273,7 @@ impl RenderOnce for Button {
                     .active(|button| button.bg(colors.active))
             })
             .when(focusable, |button| {
-                button.focus(|button| button.border_color(palette.settings.focus_border))
+                button.focus(|button| button.bg(palette.control.selected))
             })
             .when_some(self.tab_index, |button, index| button.tab_index(index))
             .when_some(self.focus_handle, |button, handle| {

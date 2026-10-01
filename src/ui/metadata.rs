@@ -36,8 +36,6 @@ pub fn capsule(value: impl Into<String>, cx: &App) -> Div {
         .py(px(1.))
         .rounded(px(4.))
         .bg(colors.background)
-        .border_1()
-        .border_color(colors.border)
         .ui_text_size(12., cx)
         .line_height(px(15.))
         .font_weight(FontWeight::MEDIUM)

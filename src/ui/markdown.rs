@@ -585,9 +585,7 @@ fn code_block_chrome(code_block_id: usize, fonts: &MarkdownFonts) -> Stateful<Di
             .overflow_x_scroll()
             .p_3()
             .rounded_md()
-            .bg(theme::software_palette().markdown.code_surface)
-            .border_1()
-            .border_color(theme::software_palette().markdown.code_border),
+            .bg(theme::software_palette().markdown.code_surface),
         fonts.code.as_deref(),
     )
     .text_size(markdown_text_size(fonts, 1.0))
@@ -685,8 +683,6 @@ fn render_block(
             div()
                 .w_full()
                 .pl_3()
-                .border_l_2()
-                .border_color(theme::software_palette().markdown.quote_border)
                 .text_color(theme::software_palette().markdown.secondary)
                 .child(render_blocks(blocks, fonts, link_index, sink))
                 .into_any_element()
@@ -768,8 +764,6 @@ fn render_block(
                 .id(("markdown-table", table_id))
                 .w_full()
                 .overflow_x_scroll()
-                .border_1()
-                .border_color(theme::software_palette().markdown.table_border)
                 .rounded_md();
             if !head.is_empty() {
                 table = table.child(render_table_row(head, true, fonts, sink.as_deref_mut()));
@@ -779,11 +773,7 @@ fn render_block(
             }
             table.into_any_element()
         }
-        Block::Rule => div()
-            .w_full()
-            .h(px(1.))
-            .bg(theme::software_palette().markdown.table_border)
-            .into_any_element(),
+        Block::Rule => div().w_full().h(px(8.)).into_any_element(),
     }
 }
 
@@ -793,11 +783,7 @@ fn render_table_row(
     fonts: &MarkdownFonts,
     mut sink: Option<&mut RenderSink>,
 ) -> Div {
-    let mut row = div()
-        .flex()
-        .min_w(px(320.))
-        .border_b_1()
-        .border_color(theme::software_palette().markdown.table_border);
+    let mut row = div().flex().min_w(px(320.));
     if header {
         row = row.bg(theme::software_palette().markdown.table_header);
     }
@@ -809,13 +795,7 @@ fn render_table_row(
                 sink.block_break();
             }
         }
-        let mut cell_element = div()
-            .min_w(px(120.))
-            .flex_1()
-            .px_3()
-            .py_2()
-            .border_r_1()
-            .border_color(theme::software_palette().markdown.table_border);
+        let mut cell_element = div().min_w(px(120.)).flex_1().px_3().py_2();
         if header {
             cell_element = cell_element.font_weight(FontWeight::SEMIBOLD);
         }

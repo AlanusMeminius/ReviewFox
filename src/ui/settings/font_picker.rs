@@ -222,7 +222,7 @@ impl FontPicker {
             }))
             .child(
                 Button::new(self.element_id("trigger"), trigger_label(family))
-                    .style(ButtonStyle::Outlined)
+                    .style(ButtonStyle::Filled)
                     .size(ButtonSize::Medium)
                     .end_icon("chevrons_up_down.svg")
                     .when(family.not_installed, |button| button.hint(NOT_INSTALLED))
@@ -279,9 +279,6 @@ impl FontPicker {
             .w(px(WIDTH))
             .overflow_hidden()
             .bg(palette.settings.popover)
-            .border_1()
-            .border_color(palette.settings.border)
-            .focus(move |list| list.border_color(palette.settings.focus_border))
             .rounded(px(6.))
             .shadow_lg()
             // Deferred content does not inherit the window's text style.
@@ -314,13 +311,7 @@ impl FontPicker {
                     }
                 }),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .border_b_1()
-                    .border_color(palette.settings.divider)
-                    .child(popover.search.clone()),
-            )
+            .child(div().flex_none().child(popover.search.clone()))
             .child(
                 div()
                     .relative()

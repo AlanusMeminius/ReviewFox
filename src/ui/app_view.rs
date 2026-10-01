@@ -1850,14 +1850,7 @@ fn render_entry_chrome(
                     cx,
                 )),
         )
-        .child(
-            div()
-                .id("entry-kind-divider")
-                .w(px(1.))
-                .h(px(14.))
-                .flex_none()
-                .bg(theme::software_palette().surface.divider),
-        )
+        .child(div().id("entry-kind-gap").w(px(4.)).flex_none().h(px(14.)))
         .child(
             div()
                 .id("entry-value-pill")
@@ -1867,11 +1860,6 @@ fn render_entry_chrome(
                 .min_w(px(0.))
                 .max_w(px(260.))
                 .px_2()
-                .border_1()
-                .border_color(gpui::Rgba {
-                    a: 0.,
-                    ..theme::software_palette().control.pill_outline
-                })
                 .rounded_full()
                 .bg(theme::software_palette().control.pill)
                 .flex()
@@ -1880,14 +1868,8 @@ fn render_entry_chrome(
                 .overflow_hidden()
                 .when(hide_value, |d| d.opacity(0.))
                 .when(!hide_value && kind != EntryKind::Uncommitted, |d| {
-                    d.hover(|d| {
-                        d.bg(theme::software_palette().control.pill_hover)
-                            .border_color(theme::software_palette().control.pill_outline)
-                    })
-                    .active(|d| {
-                        d.bg(theme::software_palette().control.pressed)
-                            .border_color(theme::software_palette().control.pill_outline)
-                    })
+                    d.hover(|d| d.bg(theme::software_palette().control.pill_hover))
+                        .active(|d| d.bg(theme::software_palette().control.pressed))
                 })
                 .child(
                     canvas(

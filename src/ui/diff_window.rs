@@ -1813,19 +1813,13 @@ fn render_search_bar(
                 .items_center()
                 .rounded(px(theme::FIND_FIELD_RADIUS))
                 .bg(palette.field.surface)
-                .border_1()
-                .border_color(if focused {
-                    palette.field.focused_border
-                } else {
-                    palette.field.border
-                })
+                .when(focused, |field| field.bg(palette.control.selected))
                 .child(view.search_field.clone()),
         )
         .child(render_side_segment(side, cx))
         .child(render_files_segment(files, cx))
         .child(
             IconButton::new("search-run", "search.svg", "Find")
-                .borderless()
                 .shortcut("Enter")
                 .disabled(total == 0)
                 .on_click(cx.listener(|this, _, _, cx| this.jump_search(1, cx))),
@@ -1839,28 +1833,25 @@ fn render_search_bar(
         )
         .child(
             IconButton::new("search-prev", "chevron_up.svg", "Previous Match")
-                .borderless()
                 .shortcut("Shift-Enter")
                 .disabled(total == 0)
                 .on_click(cx.listener(|this, _, _, cx| this.jump_search(-1, cx))),
         )
         .child(
             IconButton::new("search-next", "chevron_down.svg", "Next Match")
-                .borderless()
                 .shortcut("Enter")
                 .disabled(total == 0)
                 .on_click(cx.listener(|this, _, _, cx| this.jump_search(1, cx))),
         )
         .child(
             IconButton::new("search-close", "close.svg", "Close Find")
-                .borderless()
                 .shortcut("Esc")
                 .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx))),
         )
         .into_any_element()
 }
 
-/// Find Side/Files track: same height / inset / radius / border as [`capsule`].
+/// Find Side/Files track: same height and rounded inset as [`capsule`].
 fn search_seg_track() -> Div {
     let palette = theme::software_palette();
     div()
@@ -1869,9 +1860,7 @@ fn search_seg_track() -> Div {
         .flex()
         .items_center()
         .p(px(NAV_INSET))
-        .rounded(px(NAV_BUTTON_RADIUS + NAV_INSET + 1.))
-        .border_1()
-        .border_color(palette.field.border)
+        .rounded(px(NAV_BUTTON_RADIUS + NAV_INSET))
         .bg(palette.field.surface)
 }
 
@@ -2351,18 +2340,13 @@ fn render_draft_dock(
                 .items_start()
                 .rounded(px(theme::FIND_FIELD_RADIUS))
                 .bg(palette.field.surface)
-                .border_1()
-                .border_color(if focused {
-                    palette.field.focused_border
-                } else {
-                    palette.field.border
-                })
+                .when(focused, |field| field.bg(palette.control.selected))
                 .child(view.draft_field.clone()),
         )
         .into_any_element()
 }
 
-/// Inset between the nav capsule's border and its buttons.
+/// Inset between the nav capsule's edge and its buttons.
 const NAV_INSET: f32 = 2.;
 const NAV_BUTTON_RADIUS: f32 = 5.;
 

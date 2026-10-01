@@ -1142,31 +1142,21 @@ impl Frame {
                     let y = row.y0 + (self.row_h - mark_h) / 2.;
                     let rect = hline(text_x + a, text_x + b, y, mark_h);
                     if is_cur {
-                        // A persistent 2px ring distinguishes the current hit;
-                        // the pulse briefly enlarges it on navigation.
+                        // A larger filled mark distinguishes the current hit;
+                        // navigation briefly expands it further.
                         let pulse = self.search_pulse.unwrap_or(0.);
-                        let ring = 2. + pulse * 2.;
-                        let ring_rect = hline(
-                            text_x + a - ring,
-                            text_x + b + ring,
-                            y - ring,
-                            mark_h + ring * 2.,
+                        let inset = 2. + pulse * 2.;
+                        let current_rect = hline(
+                            text_x + a - inset,
+                            text_x + b + inset,
+                            y - inset,
+                            mark_h + inset * 2.,
                         );
                         window.paint_quad(
-                            fill(ring_rect, self.code_theme.slots.search_ring)
-                                .corner_radii(px(2. + ring)),
-                        );
-                        window.paint_quad(
-                            fill(rect, self.code_theme.slots.search_current).corner_radii(px(2.)),
+                            fill(current_rect, self.code_theme.slots.search_current)
+                                .corner_radii(px(2. + inset)),
                         );
                     } else {
-                        window.paint_quad(
-                            fill(
-                                hline(text_x + a - 1., text_x + b + 1., y - 1., mark_h + 2.),
-                                self.code_theme.slots.search_hit_ring,
-                            )
-                            .corner_radii(px(3.)),
-                        );
                         window.paint_quad(
                             fill(rect, self.code_theme.slots.search_hit).corner_radii(px(2.)),
                         );

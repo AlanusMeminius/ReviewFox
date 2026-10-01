@@ -1,4 +1,4 @@
-//! A small options dropdown: outlined trigger + list of (id, label) rows.
+//! A small options dropdown: filled trigger + list of (id, label) rows.
 //! Used for the Software Theme choice and both Code Theme pairing choices.
 
 use std::cell::Cell;
@@ -168,7 +168,7 @@ impl OptionsPicker {
             }))
             .child(
                 Button::new(self.element_id("trigger"), self.current_label())
-                    .style(ButtonStyle::Outlined)
+                    .style(ButtonStyle::Filled)
                     .size(ButtonSize::Medium)
                     .end_icon("chevrons_up_down.svg")
                     .track_focus(&self.trigger_focus)
@@ -202,9 +202,6 @@ impl OptionsPicker {
             .overflow_hidden()
             .py_1()
             .bg(palette.settings.popover)
-            .border_1()
-            .border_color(palette.settings.border)
-            .focus(move |list| list.border_color(palette.settings.focus_border))
             .rounded(px(6.))
             .shadow_lg()
             .font_family(appearance::ui_font(cx))

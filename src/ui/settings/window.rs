@@ -202,7 +202,7 @@ pub struct SettingsView {
     theme: Entity<code_theme_picker::OptionsPicker>,
     nav_focus: FocusHandle,
     nav: NavState,
-    /// Last nav interaction came from the keyboard: show the focus border.
+    /// Last nav interaction came from the keyboard: show the filled focus state.
     nav_keyboard: bool,
     content_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
@@ -751,7 +751,7 @@ impl SettingsView {
         );
 
         // Like Zed's configured API key, the card stands in for the whole row
-        // (last row of the section: 40px bottom padding, no divider).
+        // (last row of the section: 40px bottom padding).
         div()
             .id("settings-gitlab-token")
             .pt(px(16.))
@@ -839,7 +839,7 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// Heading, rows (each with its divider), then the preview in the group's
+    /// Heading, rows, then the preview in the group's
     /// resolved family and size.
     fn render_font_group(
         &self,
@@ -928,8 +928,7 @@ fn font_preview(lines: &'static [&'static str]) -> gpui::Div {
         .gap(px(4.))
         .p(px(12.))
         .rounded(px(6.))
-        .border_1()
-        .border_color(theme::software_palette().settings.border)
+        .bg(theme::software_palette().settings.card)
         .text_color(theme::software_palette().text.primary)
         .children(lines.iter().map(|&line| div().child(line)))
 }
@@ -1079,7 +1078,7 @@ pub fn open_or_focus_settings(target: Option<SettingsTarget>, cx: &mut App) {
         },
         |window, cx| {
             let view = cx.new(|cx| SettingsView::new(gitlab_connection, window, cx));
-            // Arrow keys work in the tree straight away; no focus border until used.
+            // Arrow keys work in the tree straight away; focus fill appears when used.
             let nav_focus = view.read(cx).nav_focus.clone();
             window.focus(&nav_focus);
             if let Some(target) = target {

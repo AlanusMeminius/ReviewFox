@@ -52,8 +52,6 @@ impl RenderOnce for ConfiguredCard {
             .mt(px(2.))
             .p_1()
             .rounded_md()
-            .border_1()
-            .border_color(palette.settings.border)
             .bg(palette.settings.card)
             .child(
                 div()

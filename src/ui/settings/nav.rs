@@ -1,4 +1,4 @@
-use gpui::{App, ClickEvent, ElementId, Rgba, SharedString, Window, div, prelude::*, px, svg};
+use gpui::{App, ClickEvent, ElementId, SharedString, Window, div, prelude::*, px, svg};
 
 use crate::ui::appearance::{self, UiTextSize};
 use crate::ui::theme;
@@ -77,7 +77,7 @@ impl NavItem {
         self
     }
 
-    /// Keyboard focus is on this row: `border_focused` border.
+    /// Keyboard focus is on this row and uses a filled state.
     pub fn focused(mut self, focused: bool) -> Self {
         self.focused = focused;
         self
@@ -106,10 +106,6 @@ impl RenderOnce for NavItem {
         let palette = theme::software_palette();
         let colors = palette.settings.nav_row;
         let focused = self.focused;
-        let border = Rgba {
-            a: if self.focused { 1. } else { 0. },
-            ..palette.settings.focus_border
-        };
         let label_color = if self.selected {
             palette.text.primary
         } else {
@@ -126,20 +122,16 @@ impl RenderOnce for NavItem {
 
         div()
             .id(self.id)
-            .relative()
             .flex()
             .flex_none()
             .items_center()
             .w_full()
             .h(px(28.))
             .gap_2()
-            // Keep a constant inset while the focus border appears.
             .pl(px(4.))
             .pr_1()
             // Same capsule as the main window's sidebar rows.
             .rounded_lg()
-            .border_1()
-            .border_color(border)
             .when(self.selected, |row| {
                 row.bg(colors.selected)
                     .hover(move |row| row.bg(colors.selected_hover))
@@ -149,6 +141,7 @@ impl RenderOnce for NavItem {
                 row.hover(move |row| row.bg(colors.hover))
                     .active(move |row| row.bg(colors.pressed))
             })
+            .when(focused, |row| row.bg(palette.control.selected))
             .cursor_pointer()
             .font_family(appearance::ui_font(cx))
             .ui_text_size(14., cx)
@@ -186,32 +179,8 @@ impl RenderOnce for NavItem {
                     )
                     .child(div().ui_label_size(14., cx).child(label)),
                 None => row
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .justify_center()
-                            .w(px(22.))
-                            .h_full()
-                            .child(div().w(px(1.)).h_full().bg(palette.settings.divider)),
-                    )
+                    .child(div().w(px(22.)).flex_none())
                     .child(div().ui_label_size(14., cx).child(label)),
             })
-            .child(
-                div()
-                    .absolute()
-                    .right(px(6.))
-                    .bottom(px(4.))
-                    .w(px(8.))
-                    .h(px(2.))
-                    .bg(if focused {
-                        palette.settings.focus_border
-                    } else {
-                        Rgba {
-                            a: 0.,
-                            ..palette.settings.focus_border
-                        }
-                    }),
-            )
     }
 }

@@ -18,7 +18,6 @@ pub struct IconButton {
     shortcut: Option<SharedString>,
     pressed: bool,
     disabled: bool,
-    borderless: bool,
     on_click: Option<ClickHandler>,
 }
 
@@ -37,7 +36,6 @@ impl IconButton {
             shortcut: None,
             pressed: false,
             disabled: false,
-            borderless: false,
             on_click: None,
         }
     }
@@ -59,12 +57,6 @@ impl IconButton {
         self
     }
 
-    /// Keep the icon clear inside a surface that already frames its controls.
-    pub fn borderless(mut self) -> Self {
-        self.borderless = true;
-        self
-    }
-
     pub fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -80,13 +72,12 @@ impl RenderOnce for IconButton {
         let color = if self.disabled {
             palette.control.disabled_icon
         } else if self.pressed {
-            palette.field.focused_border
+            palette.field.caret
         } else {
             palette.text.chrome_icon
         };
         let pressed = self.pressed;
         let enabled = !self.disabled;
-        let borderless = self.borderless;
         div()
             .id(self.id)
             .w(theme::TOGGLE_SIZE)
@@ -96,21 +87,6 @@ impl RenderOnce for IconButton {
             .items_center()
             .justify_center()
             .rounded_md()
-            .when(!borderless, |button| {
-                // Reserve the border in every state so disabling a button does
-                // not shift its glyph; enabled idle stays clear.
-                button.border_1().border_color(if self.disabled {
-                    palette.control.disabled_outline
-                } else {
-                    gpui::Rgba {
-                        a: 0.,
-                        ..palette.control.disabled_outline
-                    }
-                })
-            })
-            .when(self.disabled && !borderless, |button| {
-                button.bg(palette.control.disabled_surface)
-            })
             .when(pressed && enabled, |button| {
                 button.bg(palette.control.selected)
             })

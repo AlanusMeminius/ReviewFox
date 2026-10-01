@@ -29,7 +29,6 @@ pub struct SoftwarePalette {
 pub struct StatusColors {
     pub foreground: Rgba,
     pub background: Rgba,
-    pub border: Rgba,
 }
 
 #[derive(Clone, Copy)]
@@ -61,10 +60,7 @@ pub struct MarkdownColors {
     pub body: Rgba,
     pub secondary: Rgba,
     pub code_surface: Rgba,
-    pub code_border: Rgba,
     pub inline_code_surface: Rgba,
-    pub quote_border: Rgba,
-    pub table_border: Rgba,
     pub table_header: Rgba,
     pub link: Rgba,
     pub selection: Rgba,
@@ -76,9 +72,6 @@ pub struct SettingsColors {
     pub island: Rgba,
     pub card: Rgba,
     pub popover: Rgba,
-    pub border: Rgba,
-    pub divider: Rgba,
-    pub focus_border: Rgba,
     pub text_disabled: Rgba,
     pub nav_row: SettingsRowColors,
     pub option_row: SettingsRowColors,
@@ -97,7 +90,6 @@ pub struct SettingsRowColors {
 pub struct ControlColors {
     pub pill: Rgba,
     pub pill_hover: Rgba,
-    pub pill_outline: Rgba,
     pub accent: Rgba,
     pub on_accent: Rgba,
     pub hover: Rgba,
@@ -105,10 +97,7 @@ pub struct ControlColors {
     pub selected: Rgba,
     pub selected_hover: Rgba,
     pub selected_pressed: Rgba,
-    pub outline: Rgba,
-    pub disabled_surface: Rgba,
     pub disabled_icon: Rgba,
-    pub disabled_outline: Rgba,
     pub hint: Rgba,
 }
 
@@ -139,7 +128,6 @@ pub struct SurfaceColors {
     pub desk: Rgba,
     pub island: Rgba,
     pub popover: Rgba,
-    pub divider: Rgba,
     /// Continuous material behind titlebar controls and labels.
     pub titlebar_backing: Rgba,
     /// Stable backing for text that otherwise sits directly on window material.
@@ -169,11 +157,8 @@ pub struct TextColors {
 #[derive(Clone, Copy)]
 pub struct FieldColors {
     pub surface: Rgba,
-    pub border: Rgba,
-    pub focused_border: Rgba,
     pub caret: Rgba,
     pub selection: Rgba,
-    pub selection_outline: Rgba,
 }
 
 #[derive(Clone, Copy)]
@@ -236,27 +221,22 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 success: StatusColors {
                     foreground: rgb(0x0e6137),
                     background: rgb(0xe8f7ee),
-                    border: rgb(0x327e4e),
                 },
                 error: StatusColors {
                     foreground: rgb(0xa3261d),
                     background: rgb(0xfdeceb),
-                    border: rgb(0xa3261d),
                 },
                 warning: StatusColors {
                     foreground: rgb(0x754a00),
                     background: rgb(0xfff2cf),
-                    border: rgb(0x895a00),
                 },
                 info: StatusColors {
                     foreground: rgb(0x1d4ed8),
                     background: rgb(0xdbeafe),
-                    border: rgb(0x315eaf),
                 },
                 neutral: StatusColors {
                     foreground: rgb(0x4b5669),
                     background: rgb(0xf1f3f6),
-                    border: rgb(0x596579),
                 },
             },
             metadata: MetadataColors {
@@ -276,10 +256,7 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 body: rgb(0x172033),
                 secondary: rgb(0x596579),
                 code_surface: rgb(0xe9ebef),
-                code_border: rgb(0x7c8798),
                 inline_code_surface: rgb(0xe9ebef),
-                quote_border: rgb(0x7c8798),
-                table_border: rgb(0x7c8798),
                 table_header: rgb(0xe9ebef),
                 link: rgb(0x2457d6),
                 // The original Markdown selection was a 35% light blue wash.
@@ -291,7 +268,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             control: ControlColors {
                 pill: rgb(0xffffff),
                 pill_hover: rgb(0xe4e7ed),
-                pill_outline: rgb(0x657184),
                 accent: rgb(0x2457d6),
                 on_accent: rgb(0xffffff),
                 hover: rgb(0xe9ebef),
@@ -299,10 +275,7 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 selected: rgb(0xdce8f8),
                 selected_hover: rgb(0xd1e1f7),
                 selected_pressed: rgb(0xc3d9f4),
-                outline: rgb(0x7c8798),
-                disabled_surface: rgb(0xd0d7e2),
                 disabled_icon: rgb(0x657184),
-                disabled_outline: rgb(0x536073),
                 hint: rgb(0x4b5669),
             },
             tooltip: TooltipColors {
@@ -324,9 +297,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 island: rgb(0xffffff),
                 card: rgb(0xf4f5f7),
                 popover: rgb(0xffffff),
-                border: rgb(0x7c8798),
-                divider: rgb(0xc3c9d3),
-                focus_border: rgb(0x2457d6),
                 text_disabled: rgb(0x596579),
                 nav_row: SettingsRowColors {
                     hover: gpui::rgba(0xffffff8c),
@@ -348,7 +318,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 desk: CLEAR,
                 island: rgb(0xffffff),
                 popover: rgb(0xffffff),
-                divider: rgb(0x7c8798),
                 titlebar_backing: CLEAR,
                 chrome_backing: gpui::rgba(0xf4f5f7f5),
                 sidebar_backing: CLEAR,
@@ -368,11 +337,8 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             },
             field: FieldColors {
                 surface: rgb(0xffffff),
-                border: rgb(0x7c8798),
-                focused_border: rgb(0x2457d6),
                 caret: rgb(0x2457d6),
                 selection: gpui::rgba(0x2457d633),
-                selection_outline: rgb(0x2457d6),
             },
             scrollbar: ScrollbarColors {
                 track: rgb(0xffffff),
@@ -449,27 +415,22 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 success: StatusColors {
                     foreground: rgb(0xb2eabc),
                     background: rgb(0x1e3a2a),
-                    border: rgb(0x7acb98),
                 },
                 error: StatusColors {
                     foreground: rgb(0xffb6ad),
                     background: rgb(0x3d2422),
-                    border: rgb(0xe17c75),
                 },
                 warning: StatusColors {
                     foreground: rgb(0xffdb95),
                     background: rgb(0x423314),
-                    border: rgb(0xd7ac60),
                 },
                 info: StatusColors {
                     foreground: rgb(0xa8cdfc),
                     background: rgb(0x263b55),
-                    border: rgb(0x8cb7ed),
                 },
                 neutral: StatusColors {
                     foreground: rgb(0xd5dae3),
                     background: rgb(0x343b47),
-                    border: rgb(0xaeb7c5),
                 },
             },
             metadata: MetadataColors {
@@ -489,10 +450,7 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 body: rgb(0xd5dae3),
                 secondary: rgb(0xaeb7c5),
                 code_surface: rgb(0x343b47),
-                code_border: rgb(0x8993a3),
                 inline_code_surface: rgb(0x343b47),
-                quote_border: rgb(0x8993a3),
-                table_border: rgb(0x8993a3),
                 table_header: rgb(0x343b47),
                 link: rgb(0x89c7f7),
                 selection: Rgba {
@@ -503,7 +461,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             control: ControlColors {
                 pill: rgb(0x30343d),
                 pill_hover: rgb(0x39404a),
-                pill_outline: rgb(0xaeb7c5),
                 accent: rgb(0x2457a8),
                 on_accent: rgb(0xffffff),
                 hover: rgb(0x414a59),
@@ -511,10 +468,7 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 selected: rgb(0x344a65),
                 selected_hover: rgb(0x3b5574),
                 selected_pressed: rgb(0x435f81),
-                outline: rgb(0x8993a3),
-                disabled_surface: rgb(0x343b47),
                 disabled_icon: rgb(0x96a1b0),
-                disabled_outline: rgb(0xb8c4d4),
                 hint: rgb(0xd5dae3),
             },
             tooltip: TooltipColors {
@@ -536,9 +490,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 island: rgb(0x30343d),
                 card: rgb(0x343b47),
                 popover: rgb(0x30343d),
-                border: rgb(0x8993a3),
-                divider: rgb(0x596579),
-                focus_border: rgb(0x89c7f7),
                 text_disabled: rgb(0xaeb7c5),
                 nav_row: SettingsRowColors {
                     hover: rgb(0x343b47),
@@ -560,7 +511,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 desk: CLEAR,
                 island: rgb(0x30343d),
                 popover: rgb(0x30343d),
-                divider: rgb(0x8993a3),
                 titlebar_backing: gpui::rgba(0x1d2027b3),
                 chrome_backing: gpui::rgba(0x1d2027e6),
                 sidebar_backing: gpui::rgba(0x1d202780),
@@ -580,11 +530,8 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             },
             field: FieldColors {
                 surface: rgb(0x30343d),
-                border: rgb(0x8993a3),
-                focused_border: rgb(0x89c7f7),
                 caret: rgb(0x89c7f7),
                 selection: gpui::rgba(0x89c7f72a),
-                selection_outline: rgb(0x89c7f7),
             },
             scrollbar: ScrollbarColors {
                 track: rgb(0x1d2027),
@@ -973,28 +920,11 @@ mod software_palette_tests {
                     contrast(text, selected_surface)
                 );
             }
-            for (name, mark) in [
-                ("idle border", field.border),
-                ("focused border", field.focused_border),
-                ("caret", field.caret),
-                ("selection outline", field.selection_outline),
-            ] {
-                assert!(
-                    contrast(mark, field.surface) >= 3.,
-                    "{mode:?} {name} on input: {}",
-                    contrast(mark, field.surface)
-                );
-            }
-            assert!(
-                contrast(field.selection_outline, selected_surface) >= 3.,
-                "{mode:?} selection outline on selection: {}",
-                contrast(field.selection_outline, selected_surface)
-            );
+            assert!(contrast(field.caret, field.surface) >= 3.);
             for code_paper in [rgb(0x000000), rgb(0xffffff)] {
                 let overlay = composite(palette.surface.floating_overlay, code_paper);
                 assert!(contrast(palette.text.primary, overlay) >= 4.5);
                 assert!(contrast(palette.text.secondary, overlay) >= 4.5);
-                assert!(contrast(field.border, overlay) >= 3.);
             }
         }
     }
@@ -1208,11 +1138,6 @@ mod software_palette_tests {
                             "{mode:?} {name} {state} secondary icon/text"
                         );
                     }
-                    if name == "nav row" {
-                        assert!(contrast(settings.focus_border, rows.selected) >= 3.);
-                        assert!(contrast(settings.focus_border, rows.selected_hover) >= 3.);
-                        assert!(contrast(settings.focus_border, rows.selected_pressed) >= 3.);
-                    }
                     let secondary = if name == "nav row" {
                         palette.sidebar_row.section_text
                     } else {
@@ -1221,24 +1146,9 @@ mod software_palette_tests {
                     assert!(contrast(secondary, composite(rows.hover, idle)) >= 3.);
                 }
                 for surface in [settings.island, settings.card, settings.popover] {
-                    assert!(contrast(settings.border, surface) >= 3.);
-                    assert!(contrast(settings.focus_border, surface) >= 3.);
-                    assert!(contrast(palette.control.outline, surface) >= 3.);
                     assert!(contrast(settings.text_disabled, surface) >= 4.5);
                 }
-                assert!(
-                    contrast(
-                        palette.control.disabled_icon,
-                        palette.control.disabled_surface
-                    ) >= 3.
-                );
-                assert!(
-                    contrast(
-                        palette.control.disabled_outline,
-                        palette.control.disabled_surface
-                    ) >= 3.,
-                    "{mode:?} disabled outline on disabled control surface"
-                );
+                assert!(contrast(palette.control.disabled_icon, nav) >= 3.);
             }
             let tooltip = palette.tooltip;
             assert!(contrast(tooltip.text, tooltip.surface) >= 4.5);
@@ -1294,10 +1204,7 @@ mod software_palette_tests {
                         "{mode:?} secondary on {name}"
                     );
                 }
-                assert!(contrast(palette.surface.divider, palette.control.pill) >= 3.);
                 assert!(contrast(palette.text.section, palette.surface.island) >= 4.5);
-                assert!(contrast(palette.control.pill_outline, palette.control.pill_hover) >= 3.);
-                assert!(contrast(palette.control.pill_outline, palette.control.pressed) >= 3.);
                 assert!(contrast(palette.text.disabled, palette.surface.popover) >= 4.5);
                 assert!(contrast(palette.text.link, palette.surface.island) >= 4.5);
                 assert!(contrast(palette.control.on_accent, palette.control.accent) >= 4.5);
@@ -1383,10 +1290,6 @@ mod software_palette_tests {
                         contrast(colors.foreground, bg)
                     );
                 }
-                assert!(
-                    contrast(colors.border, colors.background) >= 3.,
-                    "{mode:?} {tone} badge border"
-                );
             }
             for (surface, bg) in [
                 ("idle", content.surface),
@@ -1415,10 +1318,6 @@ mod software_palette_tests {
                     contrast(palette.feedback.neutral.foreground, bg) >= 4.5,
                     "{mode:?} copy capsule {state} text"
                 );
-                assert!(
-                    contrast(palette.feedback.neutral.border, bg) >= 3.,
-                    "{mode:?} copy capsule {state} indicator"
-                );
             }
             for (surface, bg) in [
                 ("body", content.surface),
@@ -1446,22 +1345,6 @@ mod software_palette_tests {
                 assert!(
                     contrast(composite(markdown.selection, bg), bg) >= 1.05,
                     "{mode:?} Markdown selection fill on {surface}"
-                );
-            }
-            for (name, mark, bg) in [
-                ("code border", markdown.code_border, markdown.code_surface),
-                ("quote border", markdown.quote_border, content.surface),
-                ("table border", markdown.table_border, content.surface),
-                (
-                    "table border on heading",
-                    markdown.table_border,
-                    markdown.table_header,
-                ),
-            ] {
-                assert!(
-                    contrast(mark, bg) >= 3.,
-                    "{mode:?} Markdown {name}: {}",
-                    contrast(mark, bg)
                 );
             }
         }

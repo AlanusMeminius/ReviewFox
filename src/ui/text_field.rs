@@ -39,11 +39,10 @@ pub enum TextFieldEvent {
 }
 
 /// Visual variant. `Default` is the original full-width field; `Settings`
-/// follows Zed's settings input (min 256px wide, focused border); `Number` is
-/// the bare centered value inside a `NumberField`, which draws the frame;
+/// follows Zed's settings input (min 256px wide); `Number` is
+/// the bare centered value inside a `NumberField`;
 /// `Search` is the frameless full-width query bar atop a picker popover;
-/// `Draft` is the frameless body field inside the Diff draft dock, which draws
-/// its own frame and is taller than one line.
+/// `Draft` is the body field inside the Diff draft dock and is taller than one line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TextFieldStyle {
     #[default]
@@ -863,8 +862,7 @@ fn ink_nudge_for_line(
     ))
 }
 
-/// Keep the selection wash light enough for text contrast, and draw a strong
-/// 1px edge at both ends of its height so the selected span remains obvious.
+/// The filled selection wash carries the state without a separate outline.
 fn selection_quads(
     left: Pixels,
     right: Pixels,
@@ -873,21 +871,10 @@ fn selection_quads(
     colors: theme::FieldColors,
 ) -> Vec<PaintQuad> {
     let right = right.max(left + px(1.));
-    let width = right - left;
-    vec![
-        fill(
-            Bounds::from_corners(point(left, top), point(right, bottom)),
-            colors.selection,
-        ),
-        fill(
-            Bounds::new(point(left, top), size(width, px(1.))),
-            colors.selection_outline,
-        ),
-        fill(
-            Bounds::new(point(left, bottom - px(1.)), size(width, px(1.))),
-            colors.selection_outline,
-        ),
-    ]
+    vec![fill(
+        Bounds::from_corners(point(left, top), point(right, bottom)),
+        colors.selection,
+    )]
 }
 
 impl Render for TextField {
@@ -923,15 +910,13 @@ impl Render for TextField {
                         .line_height(px(32.))
                         .px_2()
                         .bg(theme::software_palette().field.surface)
-                        .border_1()
-                        .border_color(theme::software_palette().field.border)
                         .rounded(px(6.))
                 };
                 match self.style {
                     TextFieldStyle::Default => framed(field).w_full(),
-                    TextFieldStyle::Settings => framed(field).min_w(px(256.)).focus(|field| {
-                        field.border_color(theme::software_palette().field.focused_border)
-                    }),
+                    TextFieldStyle::Settings => framed(field)
+                        .min_w(px(256.))
+                        .focus(|field| field.bg(theme::software_palette().control.selected)),
                     // NumberField outer is h(28)+p(2) → 24px content.
                     TextFieldStyle::Number => field.size_full().line_height(px(24.)).px_1(),
                     TextFieldStyle::Search => field
