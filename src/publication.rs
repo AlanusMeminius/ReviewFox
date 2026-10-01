@@ -1174,6 +1174,71 @@ mod tests {
     }
 
     #[test]
+    fn reopening_an_interrupted_update_retains_sent_body_without_implicit_confirmation_or_write() {
+        use futures::FutureExt;
+        let directory = tempfile::tempdir().unwrap();
+        let (mut open, store) = published(directory.path());
+        let client = FakeHttpClient::create(|request| async move {
+            if request.uri().path().ends_with("/user") {
+                return Ok(response(serde_json::json!({"id":42})));
+            }
+            if request.method() == http::Method::GET {
+                return Ok(response(
+                    serde_json::json!({"id":"discussion-1","notes":[{"id":51,"body":"please explain","author":{"id":42},"position":{"new_line":2}}]}),
+                ));
+            }
+            futures::future::pending().await
+        });
+        let service = PublicationService::new(client, store.clone());
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        open.begin_edit(1);
+        open.commit("sent B");
+        service
+            .queue_edit(&comparison(), &origin(), 1, "sent B")
+            .unwrap();
+        assert!(
+            service
+                .update(&comparison(), &origin(), 1, &connection, false)
+                .now_or_never()
+                .is_none()
+        );
+        drop(open);
+        let reopened = OpenReview::reopen(
+            comparison(),
+            "a.rs",
+            origin(),
+            ReviewStore::new(directory.path().join("local")),
+        );
+        let service = PublicationService::new(website_client("sent B"), store.clone());
+        let interrupted = service
+            .restore_interrupted(&comparison(), &origin(), 1)
+            .unwrap();
+        assert!(
+            matches!(interrupted.edit.as_ref().unwrap().status,EditStatus::Unknown {ref sent_body,..} if sent_body=="sent B")
+        );
+        let remote =
+            futures::executor::block_on(service.read(&comparison(), &origin(), 1, &connection))
+                .unwrap();
+        let outcome = service
+            .reconcile(
+                &comparison(),
+                &origin(),
+                1,
+                &reopened.current().comments[0].body,
+                false,
+                remote,
+            )
+            .unwrap();
+        assert!(outcome.adopt_body.is_none());
+        assert_eq!(outcome.record.edit, interrupted.edit);
+        assert_eq!(
+            outcome.record.receipt().unwrap().confirmed_body,
+            "please explain"
+        );
+        assert_eq!(reopened.current().comments[0].body, "sent B");
+    }
+
+    #[test]
     fn saving_a_published_body_updates_the_same_native_note_and_preserves_marker() {
         let directory = tempfile::tempdir().unwrap();
         let (mut open, store) = published(directory.path());
