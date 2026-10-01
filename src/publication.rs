@@ -125,6 +125,45 @@ pub struct PublicationReceipt {
     #[serde(default)]
     pub outdated: Option<bool>,
 }
+impl PublicationReceipt {
+    /// Server placement, resolution and outdated capability are independent of
+    /// local body synchronization and the Review's captured Anchor.
+    pub fn placement_label(&self) -> String {
+        let position = &self.remote_position;
+        let path = position
+            .get("new_path")
+            .and_then(|value| value.as_str())
+            .filter(|path| !path.is_empty())
+            .or_else(|| position.get("old_path").and_then(|value| value.as_str()));
+        let location = path
+            .map(|path| {
+                let line = position
+                    .get("new_line")
+                    .and_then(|value| value.as_u64())
+                    .map(|line| format!(" +{line}"))
+                    .or_else(|| {
+                        position
+                            .get("old_line")
+                            .and_then(|value| value.as_u64())
+                            .map(|line| format!(" −{line}"))
+                    })
+                    .unwrap_or_default();
+                format!("GitLab attachment: {path}{line}")
+            })
+            .unwrap_or_else(|| "GitLab attachment unavailable".into());
+        let outdated = match self.outdated {
+            Some(true) => "Outdated on GitLab",
+            Some(false) => "Current on GitLab",
+            None => "Outdated status unavailable",
+        };
+        let resolved = match self.resolved {
+            Some(true) => "Resolved on GitLab",
+            Some(false) => "Open on GitLab",
+            None => "Resolution status unavailable",
+        };
+        format!("{location} · {outdated} · {resolved}")
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PublicationState {
     Published(PublicationReceipt),
@@ -1425,6 +1464,509 @@ mod tests {
         .unwrap();
         assert_eq!(record.receipt().unwrap().confirmed_body, "local C");
         assert!(record.edit.is_none());
+    }
+
+    #[test]
+    fn collapsed_version_retrieval_stays_pinned_and_reports_distinct_file_limits() {
+        for (case, reason) in [
+            ("collapsed_success", None),
+            ("collapsed_missing", Some("collapsed")),
+            ("too_large", Some("too_large")),
+            ("rename_only", Some("Rename-only")),
+            ("empty", Some("no text diff")),
+            ("overflow", Some("file/line limits")),
+            ("changed_version", Some("different version")),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut open = OpenReview::reopen(
+                comparison(),
+                "a.rs",
+                origin(),
+                ReviewStore::new(directory.path().join("local")),
+            );
+            open.begin_draft(Side::Postimage, 1, 2);
+            open.capture_draft_context(
+                "unchanged\ntail\n".into(),
+                "unchanged\nadded\ntail\n".into(),
+            );
+            open.commit("retained range");
+            let mut fixture = version();
+            match case {
+                "collapsed_success" | "collapsed_missing" | "changed_version" => {
+                    fixture["diffs"][0]["collapsed"] = true.into();
+                    fixture["diffs"][0]["diff"] = "".into();
+                }
+                "too_large" => {
+                    fixture["diffs"][0]["too_large"] = true.into();
+                    fixture["diffs"][0]["diff"] = "".into();
+                }
+                "rename_only" => {
+                    fixture["diffs"][0]["renamed_file"] = true.into();
+                    fixture["diffs"][0]["old_path"] = "old.rs".into();
+                    fixture["diffs"][0]["diff"] = "".into();
+                }
+                "empty" => {
+                    fixture["diffs"][0].as_object_mut().unwrap().remove("diff");
+                }
+                "overflow" => {
+                    fixture["state"] = "overflow".into();
+                    fixture["diffs"] = serde_json::json!([]);
+                }
+                _ => unreachable!(),
+            }
+            let client = FakeHttpClient::create(move |mut request| {
+                let fixture = fixture.clone();
+                async move {
+                    if request.uri().path().ends_with("/user") {
+                        return Ok(response(serde_json::json!({"id":42})));
+                    }
+                    if request.uri().path().ends_with("/versions") {
+                        return Ok(response(serde_json::json!([fixture])));
+                    }
+                    if request.uri().path().ends_with("/versions/7") {
+                        if request.uri().query() == Some("unidiff=true") {
+                            assert!(matches!(
+                                case,
+                                "collapsed_success" | "collapsed_missing" | "changed_version"
+                            ));
+                            let mut unified = version();
+                            if case == "collapsed_missing" {
+                                unified = fixture;
+                            }
+                            if case == "changed_version" {
+                                unified["head_commit_sha"] =
+                                    Oid::from_bytes([4; 20]).to_string().into();
+                            }
+                            return Ok(response(unified));
+                        }
+                        return Ok(response(fixture));
+                    }
+                    assert_eq!(
+                        case, "collapsed_success",
+                        "Unavailable historical position must not write or fetch a current diff"
+                    );
+                    assert_eq!(request.method(), http::Method::POST);
+                    let mut bytes = Vec::new();
+                    request.body_mut().read_to_end(&mut bytes).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    assert!(payload["position"]["line_range"].is_object());
+                    Ok(response(
+                        serde_json::json!({"id":"unified-thread","notes":[{"id":51,"body":payload["body"],"author":{"id":42},"position":payload["position"]}]}),
+                    ))
+                }
+            });
+            let record = futures::executor::block_on(
+                PublicationService::new(
+                    client,
+                    PublicationStore::new(directory.path().join("remote")),
+                )
+                .publish(
+                    open.review(),
+                    open.contexts(),
+                    &origin(),
+                    1,
+                    &Connection::new("https://gitlab.example.com".into(), "secret".into()),
+                ),
+            )
+            .unwrap();
+            if let Some(reason) = reason {
+                assert!(matches!(record.state, PublicationState::Failed(_)));
+                assert!(
+                    record.status_label().contains(reason),
+                    "{}",
+                    record.status_label()
+                );
+            } else {
+                assert!(record.receipt().is_some());
+            }
+            assert_eq!(open.current().comments.len(), 1);
+            assert!(
+                crate::export::export_review(open.review(), open.contexts())
+                    .contains("retained range")
+            );
+        }
+    }
+
+    #[test]
+    fn cross_gitlab_sections_and_unverifiable_expanded_ranges_remain_local_without_truncation() {
+        for (start, count, reason) in [
+            (3, 11, "crosses GitLab diff sections"),
+            (6, 6, "three-line unfolding window"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let pre = (1..=20).map(|n| format!("line{n}\n")).collect::<String>();
+            let post = (1..=20)
+                .flat_map(|n| {
+                    let mut lines = if n == 12 {
+                        vec![]
+                    } else {
+                        vec![format!("line{n}\n")]
+                    };
+                    if n == 2 {
+                        lines.extend(["addedA\n".into(), "addedB\n".into()]);
+                    }
+                    lines
+                })
+                .collect::<String>();
+            let mut open = OpenReview::reopen(
+                comparison(),
+                "a.rs",
+                origin(),
+                ReviewStore::new(directory.path().join("local")),
+            );
+            open.begin_draft(Side::Postimage, start, count);
+            open.capture_draft_context(pre.into(), post.into());
+            open.commit("unavailable range");
+            let original = open.current().comments[0].anchor.clone();
+            let mut fixture = version();
+            fixture["diffs"][0]["diff"]="@@ -1,3 +1,5 @@\n line1\n line2\n+addedA\n+addedB\n line3\n@@ -11,3 +13,2 @@\n line11\n-line12\n line13\n".into();
+            let client = FakeHttpClient::create(move |request| {
+                let fixture = fixture.clone();
+                async move {
+                    assert_eq!(
+                        request.method(),
+                        http::Method::GET,
+                        "Do not split, collapse or publish a partial selection"
+                    );
+                    if request.uri().path().ends_with("/user") {
+                        return Ok(response(serde_json::json!({"id":42})));
+                    }
+                    if request.uri().path().ends_with("/versions") {
+                        return Ok(response(serde_json::json!([fixture])));
+                    }
+                    assert!(request.uri().path().ends_with("/versions/7"));
+                    Ok(response(fixture))
+                }
+            });
+            let record = futures::executor::block_on(
+                PublicationService::new(
+                    client,
+                    PublicationStore::new(directory.path().join("remote")),
+                )
+                .publish(
+                    open.review(),
+                    open.contexts(),
+                    &origin(),
+                    1,
+                    &Connection::new("https://gitlab.example.com".into(), "secret".into()),
+                ),
+            )
+            .unwrap();
+            assert!(
+                record.status_label().contains(reason),
+                "{}",
+                record.status_label()
+            );
+            assert_eq!(open.current().comments[0].anchor, original);
+            assert!(
+                crate::export::export_review(open.review(), open.contexts())
+                    .contains(&format!("L{start}-{}", start + count - 1))
+            );
+        }
+    }
+
+    #[test]
+    fn renamed_whitespace_only_historical_ranges_use_original_refs_and_server_tracked_placement() {
+        for (side, path) in [
+            (Side::Preimage, "new.rs"),
+            (Side::Preimage, "old.rs"),
+            (Side::Postimage, "new.rs"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut open = OpenReview::reopen(
+                comparison(),
+                path,
+                origin(),
+                ReviewStore::new(directory.path().join("local")),
+            );
+            open.begin_draft(side, 2, 2);
+            open.capture_draft_context(
+                "same\n old1\n old2\ntail\n".into(),
+                "same\nold1\nold2\ntail\n".into(),
+            );
+            open.commit("whitespace range");
+            let before = open.current().comments[0].anchor.clone();
+            let mut fixture = version();
+            fixture["diffs"][0] = serde_json::json!({"old_path":"old.rs","new_path":"new.rs","renamed_file":true,"diff":"@@ -1,4 +1,4 @@\n same\n- old1\n- old2\n+old1\n+old2\n tail\n"});
+            let client = FakeHttpClient::create(move |mut request| {
+                let fixture = fixture.clone();
+                async move {
+                    if request.uri().path().ends_with("/user") {
+                        return Ok(response(serde_json::json!({"id":42})));
+                    }
+                    if request.uri().path().ends_with("/versions") {
+                        let mut current = fixture.clone();
+                        current["id"] = 8.into();
+                        current["head_commit_sha"] = Oid::from_bytes([4; 20]).to_string().into();
+                        return Ok(response(serde_json::json!([current, fixture])));
+                    }
+                    if request.uri().path().ends_with("/versions/7") {
+                        return Ok(response(fixture));
+                    }
+                    assert_eq!(request.method(), http::Method::POST);
+                    let mut bytes = Vec::new();
+                    request.body_mut().read_to_end(&mut bytes).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(
+                        payload["position"]["base_sha"],
+                        Oid::from_bytes([1; 20]).to_string()
+                    );
+                    assert_eq!(
+                        payload["position"]["head_sha"],
+                        Oid::from_bytes([2; 20]).to_string()
+                    );
+                    assert_eq!(
+                        payload["position"]["start_sha"],
+                        Oid::from_bytes([3; 20]).to_string()
+                    );
+                    assert_eq!(payload["position"]["old_path"], "old.rs");
+                    assert_eq!(payload["position"]["new_path"], "new.rs");
+                    let (start_code, end_code, kind) = match side {
+                        Side::Preimage => (
+                            "e6d049e7e635307aff069ed13eadd2e56f36bc52_2_2",
+                            "e6d049e7e635307aff069ed13eadd2e56f36bc52_3_2",
+                            "old",
+                        ),
+                        Side::Postimage => (
+                            "e6d049e7e635307aff069ed13eadd2e56f36bc52_4_2",
+                            "e6d049e7e635307aff069ed13eadd2e56f36bc52_4_3",
+                            "new",
+                        ),
+                    };
+                    assert_eq!(
+                        payload["position"]["line_range"]["start"]["line_code"],
+                        start_code
+                    );
+                    assert_eq!(
+                        payload["position"]["line_range"]["end"]["line_code"],
+                        end_code
+                    );
+                    assert_eq!(payload["position"]["line_range"]["end"]["type"], kind);
+                    Ok(response(
+                        serde_json::json!({"id":"tracked-thread","notes":[{"id":51,"body":payload["body"],"author":{"id":42},"position":{"new_path":"new.rs","head_sha":Oid::from_bytes([4;20]).to_string(),"new_line":77},"resolved":true}]}),
+                    ))
+                }
+            });
+            let record = futures::executor::block_on(
+                PublicationService::new(
+                    client,
+                    PublicationStore::new(directory.path().join("remote")),
+                )
+                .publish(
+                    open.review(),
+                    open.contexts(),
+                    &origin(),
+                    1,
+                    &Connection::new("https://gitlab.example.com".into(), "secret".into()),
+                ),
+            )
+            .unwrap();
+            let receipt = record
+                .receipt()
+                .unwrap_or_else(|| panic!("{}", record.status_label()));
+            assert_eq!(receipt.remote_position["new_line"], 77);
+            assert_eq!(receipt.resolved, Some(true));
+            assert_eq!(receipt.outdated, None);
+            assert!(receipt.placement_label().contains("unavailable"));
+            assert_eq!(open.current().comments[0].anchor, before);
+            assert_eq!(record.status_label(), "Published on GitLab");
+        }
+    }
+
+    #[test]
+    fn expanded_context_ranges_use_each_gap_offset_and_validate_both_captured_blobs() {
+        let pre = (1..=20).map(|n| format!("line{n}\n")).collect::<String>();
+        let post = (1..=20)
+            .flat_map(|n| {
+                let mut lines = if n == 12 {
+                    Vec::new()
+                } else {
+                    vec![format!("line{n}\n")]
+                };
+                if n == 2 {
+                    lines.extend(["addedA\n".into(), "addedB\n".into()]);
+                }
+                lines
+            })
+            .collect::<String>();
+        for (start, old_start, valid) in [(8, 6, true), (17, 16, true), (8, 6, false)] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut open = OpenReview::reopen(
+                comparison(),
+                "a.rs",
+                origin(),
+                ReviewStore::new(directory.path().join("local")),
+            );
+            open.begin_draft(Side::Postimage, start, 2);
+            open.capture_draft_context(
+                pre.clone().into(),
+                if valid {
+                    post.clone()
+                } else {
+                    post.replace("line6\n", "changed6\n")
+                }
+                .into(),
+            );
+            open.commit("expanded body");
+            let mut fixture = version();
+            fixture["diffs"][0]["diff"]="@@ -1,3 +1,5 @@\n line1\n line2\n+addedA\n+addedB\n line3\n@@ -11,3 +13,2 @@\n line11\n-line12\n line13\n".into();
+            let client = FakeHttpClient::create(move |mut request| {
+                let fixture = fixture.clone();
+                async move {
+                    if request.uri().path().ends_with("/user") {
+                        return Ok(response(serde_json::json!({"id":42})));
+                    }
+                    if request.uri().path().ends_with("/versions") {
+                        return Ok(response(serde_json::json!([fixture])));
+                    }
+                    if request.uri().path().ends_with("/versions/7") {
+                        return Ok(response(fixture));
+                    }
+                    assert!(valid, "Invalid captured context must not write");
+                    let mut bytes = Vec::new();
+                    request.body_mut().read_to_end(&mut bytes).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(payload["position"]["old_line"], old_start + 1);
+                    assert_eq!(payload["position"]["new_line"], start + 1);
+                    assert_eq!(
+                        payload["position"]["line_range"]["start"]["line_code"],
+                        format!("0973b0b779533bb9fb584987e16ebcddbfe706f1_{old_start}_{start}")
+                    );
+                    assert_eq!(
+                        payload["position"]["line_range"]["end"]["line_code"],
+                        format!(
+                            "0973b0b779533bb9fb584987e16ebcddbfe706f1_{}_{}",
+                            old_start + 1,
+                            start + 1
+                        )
+                    );
+                    Ok(response(
+                        serde_json::json!({"id":"expanded-thread","notes":[{"id":51,"body":payload["body"],"author":{"id":42},"position":payload["position"]}]}),
+                    ))
+                }
+            });
+            let record = futures::executor::block_on(
+                PublicationService::new(
+                    client,
+                    PublicationStore::new(directory.path().join("remote")),
+                )
+                .publish(
+                    open.review(),
+                    open.contexts(),
+                    &origin(),
+                    1,
+                    &Connection::new("https://gitlab.example.com".into(), "secret".into()),
+                ),
+            )
+            .unwrap();
+            if valid {
+                assert!(record.receipt().is_some(), "{}", record.status_label());
+            } else {
+                assert!(record.status_label().contains("captured"));
+            }
+            assert!(
+                crate::export::export_review(open.review(), open.contexts())
+                    .contains("expanded body")
+            );
+        }
+    }
+
+    #[test]
+    fn publish_preserves_added_deleted_and_context_range_endpoints_in_gitlab_raw_section() {
+        for (side, start, pre, post, patch, expected) in [
+            (
+                Side::Postimage,
+                2,
+                "same\ntail\n",
+                "same\nnew1\nnew2\ntail\n",
+                "@@ -1,2 +1,4 @@\n same\n+new1\n+new2\n tail\n",
+                serde_json::json!({"start":{"line_code":"0973b0b779533bb9fb584987e16ebcddbfe706f1_2_2","type":"new","new_line":2},"end":{"line_code":"0973b0b779533bb9fb584987e16ebcddbfe706f1_2_3","type":"new","new_line":3}}),
+            ),
+            (
+                Side::Preimage,
+                2,
+                "same\nold1\nold2\ntail\n",
+                "same\ntail\n",
+                "@@ -1,4 +1,2 @@\n same\n-old1\n-old2\n tail\n",
+                serde_json::json!({"start":{"line_code":"0973b0b779533bb9fb584987e16ebcddbfe706f1_2_2","type":"old","old_line":2},"end":{"line_code":"0973b0b779533bb9fb584987e16ebcddbfe706f1_3_2","type":"old","old_line":3}}),
+            ),
+            (
+                Side::Postimage,
+                1,
+                "same1\nsame2\ntail\n",
+                "same1\nsame2\nnew\ntail\n",
+                "@@ -1,3 +1,4 @@\n same1\n same2\n+new\n tail\n",
+                serde_json::json!({"start":{"line_code":"0973b0b779533bb9fb584987e16ebcddbfe706f1_1_1","type":null,"old_line":1,"new_line":1},"end":{"line_code":"0973b0b779533bb9fb584987e16ebcddbfe706f1_2_2","type":null,"old_line":2,"new_line":2}}),
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut open = OpenReview::reopen(
+                comparison(),
+                "a.rs",
+                origin(),
+                ReviewStore::new(directory.path().join("local")),
+            );
+            open.begin_draft(side, start, 2);
+            open.capture_draft_context(pre.into(), post.into());
+            open.commit("range body");
+            let before = open.current().comments[0].anchor.clone();
+            let mut fixture = version();
+            fixture["diffs"][0]["diff"] = patch.into();
+            let client = FakeHttpClient::create(move |mut request| {
+                let fixture = fixture.clone();
+                let expected = expected.clone();
+                async move {
+                    if request.uri().path().ends_with("/user") {
+                        return Ok(response(serde_json::json!({"id":42})));
+                    }
+                    if request.uri().path().ends_with("/versions") {
+                        return Ok(response(serde_json::json!([fixture])));
+                    }
+                    if request.uri().path().ends_with("/versions/7") {
+                        return Ok(response(fixture));
+                    }
+                    assert_eq!(request.method(), http::Method::POST);
+                    let mut bytes = Vec::new();
+                    request.body_mut().read_to_end(&mut bytes).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(payload["position"]["line_range"], expected);
+                    assert_eq!(
+                        payload["position"].get("old_line"),
+                        expected["end"].get("old_line")
+                    );
+                    assert_eq!(
+                        payload["position"].get("new_line"),
+                        expected["end"].get("new_line")
+                    );
+                    Ok(response(
+                        serde_json::json!({"id":"range-thread","notes":[{"id":51,"body":payload["body"],"author":{"id":42},"position":payload["position"]}]}),
+                    ))
+                }
+            });
+            let record = futures::executor::block_on(
+                PublicationService::new(
+                    client,
+                    PublicationStore::new(directory.path().join("remote")),
+                )
+                .publish(
+                    open.review(),
+                    open.contexts(),
+                    &origin(),
+                    1,
+                    &Connection::new("https://gitlab.example.com".into(), "secret".into()),
+                ),
+            )
+            .unwrap();
+            assert!(
+                matches!(record.state, PublicationState::Published(_)),
+                "{}",
+                record.status_label()
+            );
+            assert_eq!(open.current().comments[0].anchor, before);
+            assert!(
+                crate::export::export_review(open.review(), open.contexts()).contains("range body")
+            );
+        }
     }
 
     #[test]

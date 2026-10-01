@@ -423,7 +423,7 @@ impl DiffView {
                 .is_ok()
             && !self.publication_in_progress(id)
             && self.open_review.review().comments.iter().any(|c| {
-                c.id == id && matches!(&c.anchor, Anchor::Line { span, .. } if span.count==1)
+                c.id == id && matches!(&c.anchor, Anchor::Line { span, .. } if span.count>0)
             })
             && self.publication_records.get(&id).is_none_or(|record| {
                 (matches!(record.state, PublicationState::Failed(_))
@@ -3101,12 +3101,12 @@ fn render_comment_island(
                                 else if let Some(record) = view.publication_records.get(&id) { record.status_label() }
                                 else if view.publication_protected.contains(&id) { "Published or awaiting confirmation on another MR".into() }
                                 else if let Err(reason) = view.open_review.origin().preparation_eligibility(&view.open_review.review().comparison) { reason.into() }
-                                else if !matches!(&c.anchor, Anchor::Line { span, .. } if span.count==1) { "Multiline publication unavailable".into() }
+                                else if !matches!(&c.anchor, Anchor::Line { span, .. } if span.count>0) { "File comment publication unavailable".into() }
                                 else { "Local draft · publish explicitly".into() }
                             ))
                             .when(view.publication_records.get(&id).and_then(|record|record.receipt()).is_some(),|row| {
                                 let receipt=view.publication_records.get(&id).and_then(|record|record.receipt()).unwrap();
-                                let label=match (receipt.outdated,receipt.resolved) {(Some(true),Some(true))=>"Outdated · resolved on GitLab",(Some(true),_)=>"Outdated on GitLab",(_,Some(true))=>"Resolved on GitLab",_=>""};
+                                let label=receipt.placement_label();
                                 row.child(div().ui_text_size(11.,cx).text_color(palette.text.secondary).child(label))
                             })
                             .when(view.publication_records.get(&id).is_some_and(|record|record.deletion.is_some()),|row| {

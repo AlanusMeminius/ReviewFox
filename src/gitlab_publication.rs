@@ -23,6 +23,24 @@ pub struct GitLabDiffPosition {
     pub old_line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_range: Option<GitLabLineRange>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitLabLineRange {
+    pub start: GitLabRangeEndpoint,
+    pub end: GitLabRangeEndpoint,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitLabRangeEndpoint {
+    pub line_code: String,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_line: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -41,12 +59,17 @@ struct Version {
     start_commit_sha: String,
     #[serde(default)]
     diffs: Vec<VersionDiff>,
+    #[serde(default)]
+    state: Option<String>,
 }
 #[derive(Deserialize)]
 struct VersionDiff {
     old_path: String,
     new_path: String,
+    #[serde(default)]
     diff: String,
+    #[serde(default)]
+    renamed_file: bool,
     #[serde(default)]
     too_large: bool,
     #[serde(default)]
@@ -207,11 +230,8 @@ impl GitLabPublication {
         else {
             return Err("File comments are not yet supported for publication".into());
         };
-        if span.count != 1 || span.start == 0 {
-            return Err(
-                "This release currently publishes single-line comments; range support is pending"
-                    .into(),
-            );
+        if span.count == 0 || span.start == 0 {
+            return Err("Selected range is empty or invalid".into());
         }
         let context =
             context.ok_or("Original file context unavailable; comment retained locally")?;
@@ -219,7 +239,11 @@ impl GitLabPublication {
             Side::Preimage => &context.preimage,
             Side::Postimage => &context.postimage,
         };
-        if text.lines().count() < span.start as usize {
+        let end = span
+            .start
+            .checked_add(span.count - 1)
+            .ok_or("Selected range exceeds supported line numbers")?;
+        if text.lines().count() < end as usize {
             return Err("Selected line is outside its captured file".into());
         }
         let endpoint = Self::endpoint(origin)?;
@@ -261,9 +285,10 @@ impl GitLabPublication {
         let (bytes, _) = self
             .get(format!("{endpoint}/versions/{}", matched.id), connection)
             .await?;
-        let version: Version =
+        let mut version: Version =
             serde_json::from_slice(&bytes).map_err(|_| "GitLab returned invalid diff data")?;
-        if version.base_commit_sha != *base_sha
+        if version.id != matched.id
+            || version.base_commit_sha != *base_sha
             || version.head_commit_sha != *head_sha
             || version.start_commit_sha != matched.start_commit_sha
             || version
@@ -273,28 +298,76 @@ impl GitLabPublication {
         {
             return Err("GitLab returned a different reviewed version".into());
         }
-        let files:Vec<_>=version.diffs.iter().filter(|file|match side {Side::Preimage=>&file.old_path,Side::Postimage=>&file.new_path}==path).collect();
-        if files.len() != 1 {
+        let locate_file = |version: &Version| -> Result<usize, String> {
+            let primary:Vec<_>=version.diffs.iter().enumerate().filter(|(_,file)|match side {Side::Preimage=>&file.old_path,Side::Postimage=>&file.new_path}==path).map(|(index,_)|index).collect();
+            let candidates = if primary.is_empty() {
+                version
+                    .diffs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, file)| {
+                        file.renamed_file && (file.old_path == *path || file.new_path == *path)
+                    })
+                    .map(|(index, _)| index)
+                    .collect()
+            } else {
+                primary
+            };
+            if candidates.len() != 1 {
+                return Err(match version.state.as_deref() {
+                    Some("overflow"|"without_files"|"overflow_diff_files_limit"|"overflow_diff_lines_limit") => "GitLab diff version exceeded its file/line limits; selected historical file unavailable, local work retained".into(),
+                    _ => "Selected file cannot be uniquely located in the reviewed GitLab version".into(),
+                });
+            }
+            Ok(candidates[0])
+        };
+        let mut index = locate_file(&version)?;
+        if version.diffs[index].collapsed
+            && !version.diffs[index].too_large
+            && version.diffs[index].diff.is_empty()
+        {
+            // Supported version-pinned representation request. Never use the
+            // current MR raw_diffs endpoint to fill a historical omission.
+            let (bytes, _) = self
+                .get(
+                    format!("{endpoint}/versions/{}?unidiff=true", matched.id),
+                    connection,
+                )
+                .await?;
+            let expanded: Version = serde_json::from_slice(&bytes)
+                .map_err(|_| "GitLab returned invalid unified historical diff data")?;
+            if expanded.id != version.id
+                || expanded.base_commit_sha != version.base_commit_sha
+                || expanded.start_commit_sha != version.start_commit_sha
+                || expanded.head_commit_sha != version.head_commit_sha
+            {
+                return Err("GitLab returned a different version during unified diff retrieval; local work retained".into());
+            }
+            index = locate_file(&expanded)?;
+            version = expanded;
+        }
+        let file = &version.diffs[index];
+        if file.too_large {
+            return Err("GitLab too_large limit excludes this file's diff; keep the comment and Export locally".into());
+        }
+        if file.collapsed && file.diff.is_empty() {
+            return Err("GitLab still omitted this collapsed historical file after unified retrieval; view that version on GitLab or keep it local".into());
+        }
+        if file.diff.is_empty() && file.renamed_file {
             return Err(
-                "Selected file cannot be uniquely located in the reviewed GitLab version".into(),
+                "Rename-only file has no GitLab text section; keep the line comment locally".into(),
             );
         }
-        let file = files[0];
-        if file.too_large || file.collapsed || file.diff.is_empty() {
-            return Err("GitLab omitted this file's diff; position cannot yet be verified".into());
+        if file.diff.is_empty() {
+            return Err("GitLab returned no text diff for this historical file; local comment and Export retained".into());
         }
-        let (old_line, new_line) = single_line(&file.diff, *side, span.start)?;
-        if let (Some(old), Some(new)) = (old_line, new_line) {
-            let preimage = old
-                .checked_sub(1)
-                .and_then(|index| context.preimage.lines().nth(index as usize));
-            let postimage = new
-                .checked_sub(1)
-                .and_then(|index| context.postimage.lines().nth(index as usize));
-            if preimage.is_none() || preimage != postimage {
-                return Err("Unchanged position does not match both captured file versions".into());
-            }
-        }
+        let file_path = if file.new_path.is_empty() {
+            &file.old_path
+        } else {
+            &file.new_path
+        };
+        let (old_line, new_line, line_range) =
+            selected_positions(&file.diff, *side, span.start, end, file_path, context)?;
         Ok(GitLabDiffPosition {
             position_type: "text".into(),
             base_sha: base_sha.clone(),
@@ -304,6 +377,7 @@ impl GitLabPublication {
             new_path: file.new_path.clone(),
             old_line,
             new_line,
+            line_range,
         })
     }
     fn known_note(
@@ -561,71 +635,247 @@ fn status_message(status: u16) -> String {
     }
 }
 
-/// Use GitLab's raw patch, independently of local ignore-whitespace presentation.
-fn single_line(
-    patch: &str,
-    side: Side,
-    selected: u32,
-) -> Result<(Option<u32>, Option<u32>), String> {
-    let headers = regex::Regex::new(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@").unwrap();
-    let (mut old, mut new) = (1u32, 1u32);
-    let mut has_header = false;
+/// A raw GitLab section, independent of local Hunk and ViewOptions.
+struct RawSection {
+    old_start: u32,
+    new_start: u32,
+    old_end: u32,
+    new_end: u32,
+    lines: Vec<RawLine>,
+}
+#[derive(Clone)]
+struct RawLine {
+    old: u32,
+    new: u32,
+    kind: Option<&'static str>,
+    text: Option<String>,
+    section: Section,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Raw(usize),
+    Gap(usize),
+}
+impl RawLine {
+    fn old_line(&self) -> Option<u32> {
+        (self.kind != Some("new")).then_some(self.old)
+    }
+    fn new_line(&self) -> Option<u32> {
+        (self.kind != Some("old")).then_some(self.new)
+    }
+    fn endpoint(&self, path: &str) -> GitLabRangeEndpoint {
+        GitLabRangeEndpoint {
+            line_code: format!(
+                "{}_{old}_{new}",
+                sha1_smol::Sha1::from(path.as_bytes()).digest(),
+                old = self.old,
+                new = self.new
+            ),
+            kind: self.kind.map(str::to_owned),
+            old_line: self.old_line(),
+            new_line: self.new_line(),
+        }
+    }
+    fn validate(&self, context: &CommentContext) -> Result<(), String> {
+        let old = self
+            .old_line()
+            .and_then(|n| n.checked_sub(1))
+            .and_then(|n| context.preimage.lines().nth(n as usize));
+        let new = self
+            .new_line()
+            .and_then(|n| n.checked_sub(1))
+            .and_then(|n| context.postimage.lines().nth(n as usize));
+        let valid = match self.kind {
+            Some("old") => old.is_some() && self.text.as_deref() == old,
+            Some("new") => new.is_some() && self.text.as_deref() == new,
+            None => {
+                old.is_some()
+                    && old == new
+                    && self.text.as_deref().is_none_or(|text| Some(text) == old)
+            }
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(
+                "GitLab position does not match both captured file versions; local work retained"
+                    .into(),
+            )
+        }
+    }
+}
+fn raw_sections(patch: &str) -> Result<Vec<RawSection>, String> {
+    let headers = regex::Regex::new(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@").unwrap();
+    let mut sections: Vec<RawSection> = Vec::new();
+    let (mut old, mut new) = (0u32, 0u32);
     for line in patch.lines() {
         if let Some(header) = headers.captures(line) {
-            let old_start = header[1]
-                .parse::<u32>()
-                .map_err(|_| "Invalid GitLab diff header")?;
-            let new_start = header[2]
-                .parse::<u32>()
-                .map_err(|_| "Invalid GitLab diff header")?;
-            let (cursor, start) = match side {
-                Side::Preimage => (old, old_start),
-                Side::Postimage => (new, new_start),
-            };
-            if selected >= cursor && selected < start {
-                let delta = selected - cursor;
-                return Ok((Some(old + delta), Some(new + delta)));
+            if sections
+                .last()
+                .is_some_and(|last| last.old_end != old || last.new_end != new)
+            {
+                return Err("GitLab raw section is truncated; position cannot be verified".into());
             }
-            old = old_start;
-            new = new_start;
-            has_header = true;
+            old = header[1].parse().map_err(|_| "Invalid GitLab old line")?;
+            new = header[3].parse().map_err(|_| "Invalid GitLab new line")?;
+            let old_count = header
+                .get(2)
+                .map_or(Ok(1), |value| value.as_str().parse::<u32>())
+                .map_err(|_| "Invalid GitLab section length")?;
+            let new_count = header
+                .get(4)
+                .map_or(Ok(1), |value| value.as_str().parse::<u32>())
+                .map_err(|_| "Invalid GitLab section length")?;
+            if (old_count > 0 && old == 0) || (new_count > 0 && new == 0) {
+                return Err("Invalid GitLab section origin".into());
+            }
+            let old_end = old
+                .checked_add(old_count)
+                .ok_or("Invalid GitLab section end")?;
+            let new_end = new
+                .checked_add(new_count)
+                .ok_or("Invalid GitLab section end")?;
+            if sections
+                .last()
+                .is_some_and(|last| last.old_end > old || last.new_end > new)
+            {
+                return Err("GitLab raw sections overlap; position cannot be verified".into());
+            }
+            sections.push(RawSection {
+                old_start: old,
+                new_start: new,
+                old_end,
+                new_end,
+                lines: Vec::new(),
+            });
             continue;
         }
-        if !has_header {
+        if sections.is_empty() || line.starts_with('\\') {
             continue;
         }
-        let kind = line.as_bytes().first().copied();
-        let (old_hit, new_hit) = match kind {
-            Some(b'+') => (None, Some(new)),
-            Some(b'-') => (Some(old), None),
-            Some(b' ') => (Some(old), Some(new)),
-            Some(b'\\') => continue,
+        let kind = match line.as_bytes().first() {
+            Some(b'+') => Some("new"),
+            Some(b'-') => Some("old"),
+            Some(b' ') => None,
             _ => return Err("Unrecognized GitLab diff data".into()),
         };
-        if match side {
-            Side::Preimage => old_hit,
-            Side::Postimage => new_hit,
-        } == Some(selected)
-        {
-            return Ok((old_hit, new_hit));
+        let index = sections.len() - 1;
+        sections[index].lines.push(RawLine {
+            old,
+            new,
+            kind,
+            text: Some(line[1..].to_owned()),
+            section: Section::Raw(index),
+        });
+        if kind != Some("new") {
+            old = old.checked_add(1).ok_or("Invalid GitLab old line")?;
         }
-        if old_hit.is_some() {
-            old = old.checked_add(1).ok_or("Invalid GitLab line number")?;
-        }
-        if new_hit.is_some() {
-            new = new.checked_add(1).ok_or("Invalid GitLab line number")?;
+        if kind != Some("old") {
+            new = new.checked_add(1).ok_or("Invalid GitLab new line")?;
         }
     }
-    if !has_header {
+    if sections.is_empty() {
         return Err("GitLab diff has no text position data".into());
     }
-    let cursor = match side {
-        Side::Preimage => old,
-        Side::Postimage => new,
-    };
-    if selected >= cursor {
-        let delta = selected - cursor;
-        return Ok((old.checked_add(delta), new.checked_add(delta)));
+    if sections
+        .last()
+        .is_some_and(|last| last.old_end != old || last.new_end != new)
+    {
+        return Err("GitLab raw section is truncated; position cannot be verified".into());
     }
-    Err("Selected line cannot be mapped to the reviewed GitLab diff".into())
+    Ok(sections)
+}
+fn locate(sections: &[RawSection], side: Side, selected: u32) -> Result<RawLine, String> {
+    for section in sections {
+        if let Some(line)=section.lines.iter().find(|line|match side {Side::Preimage=>line.old_line(),Side::Postimage=>line.new_line()}==Some(selected)) {return Ok(line.clone());}
+    }
+    // Each omitted gap has its own offset. The adjacent headers must agree.
+    for gap in 0..=sections.len() {
+        let previous = gap.checked_sub(1).map(|index| &sections[index]);
+        let next = sections.get(gap);
+        let delta = previous
+            .map(|section| i64::from(section.new_end) - i64::from(section.old_end))
+            .unwrap_or_else(|| i64::from(sections[0].new_start) - i64::from(sections[0].old_start));
+        if next.is_some_and(|section| {
+            i64::from(section.new_start) - i64::from(section.old_start) != delta
+        }) {
+            continue;
+        }
+        let (old, new) = match side {
+            Side::Preimage => (i64::from(selected), i64::from(selected) + delta),
+            Side::Postimage => (i64::from(selected) - delta, i64::from(selected)),
+        };
+        let (Ok(old), Ok(new)) = (u32::try_from(old), u32::try_from(new)) else {
+            continue;
+        };
+        if old == 0 || new == 0 {
+            continue;
+        }
+        if previous.is_some_and(|section| old < section.old_end || new < section.new_end)
+            || next.is_some_and(|section| old >= section.old_start || new >= section.new_start)
+        {
+            continue;
+        }
+        return Ok(RawLine {
+            old,
+            new,
+            kind: None,
+            text: None,
+            section: Section::Gap(gap),
+        });
+    }
+    Err("Selected line cannot be mapped uniquely to the reviewed GitLab diff".into())
+}
+fn selected_positions(
+    patch: &str,
+    side: Side,
+    start: u32,
+    end: u32,
+    path: &str,
+    context: &CommentContext,
+) -> Result<(Option<u32>, Option<u32>, Option<GitLabLineRange>), String> {
+    let sections = raw_sections(patch)?;
+    let selected = (start..=end)
+        .map(|number| locate(&sections, side, number))
+        .collect::<Result<Vec<_>, _>>()?;
+    for line in &selected {
+        line.validate(context)?;
+    }
+    let first = selected.first().ok_or("Selected range is empty")?;
+    let last = selected.last().unwrap();
+    let range = if start == end {
+        None
+    } else {
+        let raw_ids = selected
+            .iter()
+            .filter_map(|line| match line.section {
+                Section::Raw(index) => Some(index),
+                Section::Gap(_) => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        if raw_ids.len() > 1 {
+            return Err(
+                "Range crosses GitLab diff sections; keep it local or select one section".into(),
+            );
+        }
+        if !selected.iter().all(|line| line.section == first.section)
+            || matches!(first.section, Section::Gap(_))
+        {
+            // GitLab LinesUnfolder uses three blob lines around the final position.
+            // Only claim one unfolded section if the whole selection is in that
+            // generated window; do not assign gaps to a neighboring raw hunk.
+            if !matches!(last.section, Section::Gap(_))
+                || last.old.saturating_sub(3) > first.old
+                || !selected.iter().all(|line| line.section == last.section)
+            {
+                return Err("Expanded range cannot be verified within GitLab's three-line unfolding window; select a shorter context range or keep it local".into());
+            }
+        }
+        Some(GitLabLineRange {
+            start: first.endpoint(path),
+            end: last.endpoint(path),
+        })
+    };
+    Ok((last.old_line(), last.new_line(), range))
 }
