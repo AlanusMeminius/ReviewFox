@@ -1675,7 +1675,11 @@ fn render_commit_menu(view: &AppView, cx: &mut Context<AppView>) -> impl IntoEle
 
 /// The window's one full-width band. Every gap in it drags, and on Windows the caption
 /// buttons close it out flush against the right edge — no floating overlay, no dead strip.
-fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -> impl IntoElement {
+fn render_titlebar(
+    view: &AppView,
+    window: &mut Window,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     let mono = appearance::code_font(cx);
     let (branch, label, checkout) = match &view.state {
         MainState::Ready(loaded) => {
@@ -1700,6 +1704,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
 
     div()
         .id("titlebar")
+        .map(|bar| super::titlebar::app_owned(bar, window))
         .h(theme::TITLEBAR_HEIGHT)
         .bg(theme::software_palette().surface.titlebar_backing)
         .flex_none()
@@ -1737,7 +1742,14 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                         .flex_1()
                         .min_w(px(0.))
                         .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
+                        .map(|region| {
+                            super::titlebar::drag_region(
+                                region,
+                                window,
+                                cx,
+                                "titlebar-drag-leading",
+                            )
+                        }),
                 ),
         )
         .child(
@@ -1761,7 +1773,9 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                         .flex_1()
                         .min_w(px(0.))
                         .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
+                        .map(|region| {
+                            super::titlebar::drag_region(region, window, cx, "titlebar-drag")
+                        }),
                 )
                 .child(
                     div()
@@ -1779,7 +1793,14 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                         .w(px(theme::CHANGES_INSET))
                         .flex_none()
                         .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
+                        .map(|region| {
+                            super::titlebar::drag_region(
+                                region,
+                                window,
+                                cx,
+                                "titlebar-drag-trailing",
+                            )
+                        }),
                 ),
         )
         .children(window_controls(window))
@@ -1809,6 +1830,7 @@ fn render_entry_chrome(
 
     div()
         .id("entry-chrome")
+        .map(super::titlebar::consume_control_mouse_events)
         .flex()
         .items_center()
         .gap(px(theme::CHROME_GAP))
@@ -3291,16 +3313,27 @@ fn render_file_tree(
                         cx.notify();
                     }))
                 }
-                TreeRow::File { depth, path } => file_tree_rows::file_row(
-                    ("file", i),
-                    *depth,
-                    path,
-                    false,
-                    RowSurface::Island,
-                    mono.clone(),
-                    pane_width,
-                    cx,
-                ),
+                TreeRow::File { depth, path } => {
+                    let diff_path = path.path.clone();
+                    file_tree_rows::file_row(
+                        ("file", i),
+                        *depth,
+                        path,
+                        false,
+                        RowSurface::Island,
+                        mono.clone(),
+                        pane_width,
+                        cx,
+                    )
+                    .cursor_pointer()
+                    .on_click(cx.listener(
+                        move |this, event: &ClickEvent, _, cx| {
+                            if event.click_count() >= 2 {
+                                this.push_diff(diff_path.clone(), cx);
+                            }
+                        },
+                    ))
+                }
             })),
         sb,
     )

@@ -16,9 +16,10 @@ use gpui::{
     relative, size,
 };
 
-use super::layout::{Layout, LineKind, Row};
+use super::layout::{Layout, LineKind, LineRow, Row};
 use super::pane::{DualPane, PointerMove};
 use super::tabs::TabExpansion;
+use super::text_selection::{OccurrenceHighlight, TextSelection};
 use super::trace::{self, FrameStats};
 use super::viewport::{Viewport, route_wheel, snap};
 use super::visual_wrap::WrapSide;
@@ -84,6 +85,10 @@ pub(super) struct Decorations {
     pub active_match: Option<ActiveSearchMatch>,
     /// Pulse strength 1→0 over ~250ms after land; `None` = settled.
     pub search_pulse: Option<f32>,
+    /// Caret-free character span. A decoration: it does not rebuild Layout.
+    pub text: Option<TextSelection>,
+    /// Other Identifier occurrences. A decoration: it does not rebuild Layout.
+    pub occurrences: Vec<OccurrenceHighlight>,
 }
 
 /// Shaped text and line number per `(side, visual row)`. Cleared on Layout
@@ -106,6 +111,29 @@ struct RowShape {
 impl ShapeCache {
     pub fn clear(&mut self) {
         self.rows.clear();
+    }
+
+    /// Continuation indent stored with the shaped row, so hit testing uses the
+    /// same text origin paint does. `0` when this row has not been shaped.
+    pub(super) fn text_leading(&self, side: Side, row: u32) -> f32 {
+        self.rows
+            .get(&(side, row))
+            .map(|shape| shape.text_leading)
+            .unwrap_or(0.)
+    }
+
+    /// Display column under a pointer whose x is already relative to the row's
+    /// text origin (the point glyphs are painted from). Uses the shaped glyph
+    /// edges, not a uniform advance.
+    pub(super) fn column_near(
+        &self,
+        layout: &Layout,
+        side: Side,
+        line: &LineRow,
+        local_x: f32,
+    ) -> Option<usize> {
+        let text = self.rows.get(&(side, line.row))?.text.as_ref()?;
+        Some(column_from_shaped(layout, side, line, text, local_x))
     }
 
     fn retain(&mut self, keep: &[Range<usize>; 2]) {
@@ -317,6 +345,10 @@ struct RowPaint {
     marks: Vec<(f32, f32)>,
     /// Search-hit runs, x relative to the text origin; `true` = current hit.
     search: Vec<(f32, f32, bool)>,
+    /// TextSelection runs, x relative to the text origin.
+    chars: Vec<(f32, f32)>,
+    /// OccurrenceHighlight runs, x relative to the text origin.
+    occurrences: Vec<(f32, f32)>,
     label: Option<ShapedLine>,
     show_label: bool,
 }
@@ -408,6 +440,9 @@ pub struct Frame {
     waves: Vec<(f32, f32)>,
     /// One resolved Code Theme for both sides of this frame.
     code_theme: ResolvedCodeTheme,
+    /// Code-column hitboxes over text rows only, so the I-beam is not shown
+    /// on omission, padding, or hatch.
+    text_cursors: Vec<Hitbox>,
     /// Frame-trace numbers (zeros unless `REVIEWFOX_FRAME_TRACE=1`).
     pub(super) stats: FrameStats,
 }
@@ -461,6 +496,7 @@ pub(super) fn build_frame(
     let view_h = f32::from(geom.bounds.size.height);
     let screen = (view_h / row_h).ceil() as usize;
     let mut keep = [0..0, 0..0];
+    let mut text_cursors = Vec::new();
     let sides = [Side::Preimage, Side::Postimage].map(|side| {
         let rows = layout.side(side);
         let visible = vp.visible_rows(side);
@@ -596,6 +632,49 @@ pub(super) fn build_frame(
             if let Some(text) = &shape.text {
                 widest = widest.max(shape.text_leading + f32::from(text.width));
             }
+            let chars = match row {
+                Row::Line(l) if !l.is_equal_padding() => char_spans(
+                    decorations.text.as_ref(),
+                    side,
+                    l,
+                    rows.text(l),
+                    shape.tabs.as_ref(),
+                    shape.text.as_ref(),
+                    layout,
+                ),
+                _ => Vec::new(),
+            };
+            let occurrences = match row {
+                Row::Line(l) if !l.is_equal_padding() => {
+                    let ranges: Vec<(usize, usize)> = decorations
+                        .occurrences
+                        .iter()
+                        .filter(|o| o.side == side && o.line == l.ln)
+                        .map(|o| (o.start_byte, o.end_byte))
+                        .collect();
+                    byte_spans(
+                        &ranges,
+                        side,
+                        l,
+                        shape.tabs.as_ref(),
+                        shape.text.as_ref(),
+                        layout,
+                    )
+                }
+                _ => Vec::new(),
+            };
+            if let Row::Line(l) = row
+                && !l.is_equal_padding()
+            {
+                let pane = geom.pane(side);
+                text_cursors.push(window.insert_hitbox(
+                    Bounds::from_corners(
+                        point(pane.left(), px(y_of(i))),
+                        point(pane.right(), px(y_of(i + 1))),
+                    ),
+                    HitboxBehavior::Normal,
+                ));
+            }
             out.push(RowPaint {
                 y0: y_of(i),
                 y1: y_of(i + 1),
@@ -612,6 +691,8 @@ pub(super) fn build_frame(
                 text_leading: leading,
                 marks,
                 search,
+                chars,
+                occurrences,
                 label: shape.label.clone(),
                 show_label,
             });
@@ -718,7 +799,141 @@ pub(super) fn build_frame(
         bridges,
         waves,
         code_theme,
+        text_cursors,
         stats,
+    }
+}
+
+fn char_spans(
+    sel: Option<&TextSelection>,
+    side: Side,
+    line: &LineRow,
+    line_text: &str,
+    tabs: Option<&TabExpansion>,
+    shaped: Option<&ShapedLine>,
+    layout: &Layout,
+) -> Vec<(f32, f32)> {
+    let Some(sel) = sel else {
+        return Vec::new();
+    };
+    if sel.side != side {
+        return Vec::new();
+    }
+    let Some((start, end)) = sel.bytes_on(line.ln, line_text.len()) else {
+        return Vec::new();
+    };
+    byte_spans(&[(start, end)], side, line, tabs, shaped, layout)
+}
+
+fn byte_spans(
+    ranges: &[(usize, usize)],
+    side: Side,
+    line: &LineRow,
+    tabs: Option<&TabExpansion>,
+    shaped: Option<&ShapedLine>,
+    layout: &Layout,
+) -> Vec<(f32, f32)> {
+    let (Some(tabs), Some(shaped)) = (tabs, shaped) else {
+        return Vec::new();
+    };
+    if ranges.is_empty() {
+        return Vec::new();
+    }
+    let (segment, _) = wrap_segment(layout, side, line, tabs, layout.side(side));
+    let clipped = clip_runs_to_display_segment(ranges, tabs, segment);
+    run_spans(&clipped, shaped)
+}
+
+/// x where this row's glyphs start. Paint and hit testing both use this.
+pub(super) fn code_text_x(
+    pane_left: f32,
+    x_offset: f32,
+    text_leading: f32,
+    comment_inset: f32,
+) -> f32 {
+    pane_left + TEXT_PAD - x_offset + text_leading + comment_inset
+}
+
+/// Display column under `pointer_x`. `origin_x` is the visual row's text origin
+/// (pane edge + pad − scroll + comment inset), before continuation indent.
+/// A tab's expanded spaces share one original character; that map lives in the model.
+/// Fallback when the row has not been shaped; visible rows use [`ShapeCache::column_near`].
+pub(super) fn display_column(
+    layout: &Layout,
+    side: Side,
+    line: &LineRow,
+    origin_x: f32,
+    pointer_x: f32,
+    advance: f32,
+) -> usize {
+    let text = layout.side(side).text(line);
+    let tabs = TabExpansion::new(text);
+    let (seg, leading) = wrap_segment(layout, side, line, &tabs, layout.side(side));
+    let base = tabs
+        .text
+        .get(..seg.start)
+        .map(|prefix| prefix.chars().count())
+        .unwrap_or(0);
+    let seg_cols = tabs
+        .text
+        .get(seg.clone())
+        .map(|segment| segment.chars().count())
+        .unwrap_or(0);
+    let local = pointer_x - (origin_x + leading);
+    let extra = if advance <= 0. || local <= 0. {
+        0
+    } else {
+        (local / advance).floor() as usize
+    };
+    column_on_segment(base, extra, seg_cols, seg.end == tabs.text.len())
+}
+
+/// Map a byte index into one visual segment onto a full-line display column.
+/// `index >= segment.len()` is past that segment: the last segment reads as
+/// end-of-line, an earlier one stays on its last column.
+fn column_from_segment_index(base: usize, index: usize, segment: &str, last: bool) -> usize {
+    let cols = segment.chars().count();
+    if index >= segment.len() {
+        return column_on_segment(base, cols, cols, last);
+    }
+    let within = segment
+        .get(..index)
+        .map(|prefix| prefix.chars().count())
+        .unwrap_or(0);
+    base + within
+}
+
+fn column_from_shaped(
+    layout: &Layout,
+    side: Side,
+    line: &LineRow,
+    shaped: &ShapedLine,
+    local_x: f32,
+) -> usize {
+    let tabs = TabExpansion::new(layout.side(side).text(line));
+    let (seg, _) = wrap_segment(layout, side, line, &tabs, layout.side(side));
+    let base = tabs
+        .text
+        .get(..seg.start)
+        .map(|prefix| prefix.chars().count())
+        .unwrap_or(0);
+    let segment = tabs.text.get(seg.clone()).unwrap_or("");
+    let last = seg.end == tabs.text.len();
+    let index = if local_x < 0. {
+        0
+    } else {
+        shaped.index_for_x(px(local_x)).unwrap_or(shaped.len())
+    };
+    column_from_segment_index(base, index, segment, last)
+}
+
+fn column_on_segment(base: usize, extra: usize, seg_cols: usize, last: bool) -> usize {
+    if seg_cols == 0 || extra < seg_cols {
+        base + extra
+    } else if last {
+        base + extra
+    } else {
+        base + seg_cols - 1
     }
 }
 
@@ -1127,13 +1342,21 @@ impl Frame {
                     ));
                 }
                 let (bar_x0, bar_x1, bar_text_inset) = comment_bar_layout(side, x0, x1);
-                let mut text_x = x0 + TEXT_PAD - frame.x_offset + row.text_leading;
-                if row.commented {
-                    text_x += bar_text_inset;
-                }
+                let text_x = code_text_x(
+                    x0,
+                    frame.x_offset,
+                    row.text_leading,
+                    if row.commented { bar_text_inset } else { 0. },
+                );
+                // Back to front: line-span wash, intra-line marks, find hits,
+                // OccurrenceHighlight, TextSelection. They stack.
                 for &(a, b) in &row.marks {
-                    let y = row.y0 + (self.row_h - mark_h) / 2.;
-                    let rect = hline(text_x + a, text_x + b, y, mark_h);
+                    let rect = hline(
+                        text_x + a,
+                        text_x + b,
+                        row.y0 + (self.row_h - mark_h) / 2.,
+                        mark_h,
+                    );
                     window.paint_quad(
                         fill(rect, self.code_theme.slots.word_difference).corner_radii(px(2.)),
                     );
@@ -1161,6 +1384,24 @@ impl Frame {
                             fill(rect, self.code_theme.slots.search_hit).corner_radii(px(2.)),
                         );
                     }
+                }
+                for &(a, b) in &row.occurrences {
+                    window.paint_quad(fill(
+                        hline(text_x + a, text_x + b, row.y0, row.y1 - row.y0),
+                        Rgba {
+                            a: 0.22,
+                            ..self.code_theme.slots.selection
+                        },
+                    ));
+                }
+                for &(a, b) in &row.chars {
+                    window.paint_quad(fill(
+                        hline(text_x + a, text_x + b, row.y0, row.y1 - row.y0),
+                        Rgba {
+                            a: 0.45,
+                            ..self.code_theme.slots.selection
+                        },
+                    ));
                 }
                 if let Some(text) = &row.text {
                     text.paint(point(px(text_x), px(row.y0)), row_h, window, cx)
@@ -1607,7 +1848,10 @@ impl Element for DualPaneElement {
         let t = trace::start();
         frame.paint(window, cx);
         for code in &frame.code {
-            window.set_cursor_style(CursorStyle::IBeam, code);
+            window.set_cursor_style(CursorStyle::Arrow, code);
+        }
+        for row in &frame.text_cursors {
+            window.set_cursor_style(CursorStyle::IBeam, row);
         }
         for icon in &frame.icon_hitboxes {
             window.set_cursor_style(CursorStyle::PointingHand, icon);
@@ -1726,7 +1970,8 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                         pane.press_h_track(side, local, cx);
                     } else {
                         // Bar hidden: still allow omit-expand under the track strip.
-                        pane.press_code(side, y, cx);
+                        let x = f32::from(event.position.x);
+                        pane.press_code(side, x, y, event.click_count, cx);
                     }
                 });
                 return;
@@ -1744,10 +1989,14 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                 }
             }
         }
-        // Code column: omit-expand click only — never starts a line selection.
+        // Code column: text selection, and an omission-separator click. Never a
+        // gutter line span. Right-click does not reach here.
         for side in [Side::Preimage, Side::Postimage] {
             if down_code[side_ix(side)].is_hovered(window) {
-                entity.update(cx, |pane, cx| pane.press_code(side, y, cx));
+                let x = f32::from(event.position.x);
+                entity.update(cx, |pane, cx| {
+                    pane.press_code(side, x, y, event.click_count, cx)
+                });
                 return;
             }
         }
@@ -1759,10 +2008,11 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
             return;
         }
         let y = f32::from(event.position.y) - geom.top();
+        let x = f32::from(event.position.x);
         let side = [Side::Preimage, Side::Postimage]
             .into_iter()
             .find(|&side| code[side_ix(side)].is_hovered(window));
-        entity.update(cx, |pane, cx| pane.release(side, y, cx));
+        entity.update(cx, |pane, cx| pane.release(side, x, y, cx));
     });
 
     let entity = pane.clone();
@@ -1793,10 +2043,12 @@ fn register_listeners(pane: &Entity<DualPane>, frame: &Frame, window: &mut Windo
                     hovered,
                     h_hovered,
                     gutter_y: in_gutter.then_some(y),
+                    pane_x: f32::from(pos.x),
                     pane_y: y,
                     track_y,
                     h_track_x,
                 },
+                window,
                 cx,
             )
         });
@@ -1943,5 +2195,28 @@ mod tests {
         let line = "\"中文\"";
         assert_eq!(line.len(), 8);
         assert_eq!(got(line, &[(0..8, CaptureId(1))]), [(8, str_rgb)]);
+    }
+
+    #[test]
+    fn blank_beside_a_wrapped_segment_stays_on_that_segment() {
+        // "abcd|efgh": columns 0..4 are the first visual row.
+        assert_eq!(column_on_segment(0, 1, 4, false), 1);
+        assert_eq!(column_on_segment(0, 3, 4, false), 3);
+        assert_eq!(column_on_segment(0, 9, 4, false), 3);
+        // Last row: past the glyphs is past the logical line.
+        assert_eq!(column_on_segment(4, 2, 4, true), 6);
+        assert_eq!(column_on_segment(4, 9, 4, true), 13);
+    }
+
+    #[test]
+    fn segment_index_follows_the_glyph_not_a_uniform_advance() {
+        // Shaped edges are 10px apart. A uniform advance of 8 would put x=25
+        // on column 3; the glyph that contains 25 is column 2.
+        assert_eq!(column_from_segment_index(0, 2, "abcdef", false), 2);
+        assert_eq!(column_from_segment_index(4, 1, "efgh", true), 5);
+        // Past a non-final segment stays on its last column.
+        assert_eq!(column_from_segment_index(0, 4, "abcd", false), 3);
+        // Past the final segment is end-of-line.
+        assert_eq!(column_from_segment_index(0, 4, "abcd", true), 4);
     }
 }

@@ -3,7 +3,7 @@ use gpui::{
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent,
     ParentElement, Render, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
     Subscription, Task, Timer, WeakEntity, Window, WindowControlArea, actions, canvas, div,
-    ease_out_quint, prelude::*, px,
+    ease_out_quint, prelude::*, px, svg,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -109,6 +109,10 @@ pub struct DiffView {
     collapsed_dirs: HashSet<String>,
     /// Reset collapsed_dirs when this no longer matches current ChangedPath list.
     tree_path_fingerprint: Vec<String>,
+    /// Sidebar path filter. Empty shows every changed file. Mirrored from [`Self::tree_filter`].
+    tree_query: String,
+    tree_filter: Entity<TextField>,
+    _tree_filter_sub: Subscription,
     pane: Entity<DualPane>,
     _pane_events: Subscription,
     /// Cached view that renders the shell; created on the first render.
@@ -193,6 +197,7 @@ impl DiffView {
                         this.close_dock(window, cx);
                     }
                 }
+                PaneEvent::FocusDiff => window.focus(&this.focus),
                 PaneEvent::HunkIndexChanged(index) => {
                     this.hunk_index = *index;
                     cx.notify();
@@ -222,6 +227,22 @@ impl DiffView {
                 },
             ),
         ];
+        let tree_filter =
+            cx.new(|cx| TextField::new("search", false, cx).with_style(TextFieldStyle::Search));
+        let tree_filter_sub = cx.observe(&tree_filter, |this, field, cx| {
+            let q = field.read(cx).content().to_string();
+            if q == this.tree_query {
+                return;
+            }
+            // Only the empty → text step opens matching dirs. A collapse during
+            // the same query stays until the field is cleared.
+            let was_empty = this.tree_query.trim().is_empty();
+            this.tree_query = q;
+            if was_empty {
+                this.expand_dirs_for_tree_query();
+            }
+            cx.notify();
+        });
         let draft_field = cx.new(|cx| {
             TextField::new("Write a comment…", false, cx).with_style(TextFieldStyle::Draft)
         });
@@ -251,6 +272,9 @@ impl DiffView {
             export_status: None,
             collapsed_dirs: HashSet::new(),
             tree_path_fingerprint: Vec::new(),
+            tree_query: String::new(),
+            tree_filter,
+            _tree_filter_sub: tree_filter_sub,
             pane,
             _pane_events: pane_events,
             shell: None,
@@ -509,35 +533,30 @@ impl DiffView {
         self.with_pane(cx, |pane, cx| pane.jump_hunk(dir, cx));
     }
 
-    /// Selected path's position in tree order, as `(index, total)`.
-    fn file_position(&self) -> (usize, usize) {
+    /// Open file's place in the nav order: `(Some(index), total)` when it is in
+    /// the list, `(None, total)` when a filter has excluded it. Empty query uses
+    /// every changed file. Collapse does not affect this list.
+    fn file_position(&self) -> (Option<usize>, usize) {
         let Some(snap) = &self.snapshot else {
-            return (0, 0);
+            return (None, 0);
         };
-        let order = file_tree::file_order(&snap.changed_paths);
-        let index = order
-            .iter()
-            .position(|p| *p == snap.selected_path)
-            .unwrap_or(0);
+        let order = file_tree::file_order_query(&snap.changed_paths, &self.tree_query);
+        let index = order.iter().position(|p| *p == snap.selected_path);
         (index, order.len())
     }
 
-    /// Steps to the neighbouring file in tree order; stops at either end.
+    /// Steps to the neighbouring file in nav order. Stops at either end.
+    /// An open file outside the list moves to the first match forward, or the last backward.
     fn jump_file(&mut self, dir: i32, cx: &mut Context<Self>) {
         let Some(snap) = &self.snapshot else {
             return;
         };
-        let order = file_tree::file_order(&snap.changed_paths);
-        let (index, _) = self.file_position();
-        let target = if dir < 0 {
-            index.checked_sub(1)
-        } else {
-            Some(index + 1)
+        let order = file_tree::file_order_query(&snap.changed_paths, &self.tree_query);
+        let Some(path) = file_tree::step_file(&order, &snap.selected_path, dir) else {
+            return;
         };
-        if let Some(path) = target.and_then(|i| order.get(i).cloned()) {
-            self.select_path(path, cx);
-            cx.notify();
-        }
+        self.select_path(path, cx);
+        cx.notify();
     }
 
     fn jump_to_search_match(&mut self, m: SearchMatch, cx: &mut Context<Self>) {
@@ -895,6 +914,34 @@ impl DiffView {
         })
     }
 
+    fn expand_dirs_for_tree_query(&mut self) {
+        if self.tree_query.trim().is_empty() {
+            return;
+        }
+        let Some(paths) = self.snapshot.as_ref().map(|s| s.changed_paths.clone()) else {
+            return;
+        };
+        self.collapsed_dirs.retain(|dir| {
+            !paths.iter().any(|p| {
+                file_tree::path_matches_query(&p.path, &self.tree_query)
+                    && (p.path == *dir || p.path.starts_with(&format!("{dir}/")))
+            })
+        });
+    }
+
+    fn collapse_all_dirs(&mut self) {
+        let Some(paths) = self.snapshot.as_ref().map(|s| s.changed_paths.clone()) else {
+            return;
+        };
+        self.collapsed_dirs = file_tree::flatten(&paths, &HashSet::new())
+            .into_iter()
+            .filter_map(|row| match row {
+                TreeRow::Dir { path, .. } => Some(path),
+                TreeRow::File { .. } => None,
+            })
+            .collect();
+    }
+
     fn sync_collapsed_dirs(&mut self) {
         let next = self
             .snapshot
@@ -962,7 +1009,8 @@ impl DiffView {
     /// Open the bottom dock on the span the module already recorded, with `body`
     /// loaded. Find and draft are mutually exclusive, so an open find bar is
     /// dismissed first. The dock's span becomes the selection, so the icon that
-    /// reopens it stays under the pointer after a save. Reveals the span start.
+    /// reopens it stays under the pointer after a save. Opening the dock does
+    /// not navigate: a newly dragged span must stay where the user selected it.
     fn open_dock(
         &mut self,
         view: PathView,
@@ -980,7 +1028,6 @@ impl DiffView {
         let end = dock.span.start + dock.span.count.saturating_sub(1);
         self.with_pane(cx, |pane, cx| {
             pane.select_span(dock.side, dock.span.start, end, cx);
-            pane.reveal_line(dock.side, dock.span.start, cx);
         });
         self.draft_field
             .update(cx, |field, cx| field.set_content(body, cx));
@@ -1009,7 +1056,15 @@ impl DiffView {
         let Some(body) = view.body.clone() else {
             return;
         };
+        let dock = view.dock;
         self.open_dock(view, body, window, cx);
+        // Editing from the comment island can target a folded/offscreen line.
+        // Keep that navigation separate from opening a new draft in the gutter.
+        if let Some(dock) = dock {
+            self.with_pane(cx, |pane, cx| {
+                pane.reveal_line(dock.side, dock.span.start, cx);
+            });
+        }
     }
 
     /// Line span of a DraftComment. `None` for an unknown id or a file Anchor.
@@ -1105,8 +1160,12 @@ impl DiffView {
         window.remove_window();
     }
 
-    /// Esc: Find → cancel draft (clears wash) → clear selection → close window.
+    /// Esc: TextSelection, then find, cancel draft (clears wash), gutter line span, close.
     fn dismiss_or_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pane.read(cx).has_text_selection() {
+            self.with_pane(cx, |pane, cx| pane.clear_text_selection(cx));
+            return;
+        }
         if has_search(self) {
             self.close_search(window, cx);
             return;
@@ -1125,6 +1184,18 @@ impl DiffView {
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let mods = &event.keystroke.modifiers;
+        if mods.secondary() && !mods.alt && !mods.shift && event.keystroke.key == "c" {
+            // A focused find field or draft body owns this key: TextField's Copy
+            // already wrote that field's selection. Only the Diff focus writes
+            // the TextSelection. A press in the code column focuses the Diff.
+            if self.focus.is_focused(window)
+                && let Some(text) = self.pane.read(cx).copied_text()
+            {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                cx.stop_propagation();
+            }
+            return;
+        }
         if mods.secondary() && !mods.alt && !mods.shift {
             let op = match event.keystroke.key.as_str() {
                 "=" | "+" => Some(FontOp::Inc),
@@ -1223,7 +1294,7 @@ impl DiffView {
                     .min_h(px(0.))
                     .flex()
                     .overflow_hidden()
-                    .child(render_tree_pane(self, tree_w, cx))
+                    .child(render_tree_pane(self, tree_w, window, cx))
                     .when(show_tree_split, |d| {
                         d.child(splitter::handle(
                             "diff-tree-resize-handle",
@@ -1448,7 +1519,7 @@ const STATUS_BAR_HEIGHT: f32 = 28.;
 
 fn render_titlebar(
     view: &DiffView,
-    window: &Window,
+    window: &mut Window,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
     // Leading zone spans exactly what sits left of the stage, so what follows starts
@@ -1460,6 +1531,7 @@ fn render_titlebar(
     };
     div()
         .id("diff-titlebar")
+        .map(|bar| super::titlebar::app_owned(bar, window))
         .h(theme::TITLEBAR_HEIGHT)
         .bg(theme::software_palette().surface.titlebar_backing)
         .flex_none()
@@ -1492,7 +1564,14 @@ fn render_titlebar(
                         .flex_1()
                         .min_w(px(0.))
                         .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
+                        .map(|region| {
+                            super::titlebar::drag_region(
+                                region,
+                                window,
+                                cx,
+                                "diff-titlebar-drag-leading",
+                            )
+                        }),
                 ),
         )
         .child(
@@ -1511,7 +1590,7 @@ fn render_titlebar(
                 // on the stage edge and shares it with the island. Collapsed: the
                 // island's own left inset, measured from the stage edge.
                 .when(view.tree_collapsed, |d| d.pl(px(theme::CHANGES_INSET)))
-                .child(render_nav_capsule(view, cx))
+                .child(render_nav_capsule(view, window, cx))
                 .child(
                     capsule()
                         .child(nav_button(
@@ -1603,7 +1682,9 @@ fn render_titlebar(
                         .flex_1()
                         .min_w(px(0.))
                         .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
+                        .map(|region| {
+                            super::titlebar::drag_region(region, window, cx, "diff-titlebar-drag")
+                        }),
                 )
                 .child(comments_toggle_button(view, window, cx))
                 .child(
@@ -1614,7 +1695,14 @@ fn render_titlebar(
                         .w(px(theme::CHANGES_INSET))
                         .flex_none()
                         .window_control_area(WindowControlArea::Drag)
-                        .occlude(),
+                        .map(|region| {
+                            super::titlebar::drag_region(
+                                region,
+                                window,
+                                cx,
+                                "diff-titlebar-drag-trailing",
+                            )
+                        }),
                 ),
         )
         // Outside the zones' padding: close must land in the physical corner.
@@ -1624,6 +1712,7 @@ fn render_titlebar(
 fn render_tree_pane(
     view: &DiffView,
     width: gpui::Pixels,
+    window: &Window,
     cx: &mut Context<DiffView>,
 ) -> impl IntoElement {
     let mono = appearance::code_font(cx);
@@ -1637,7 +1726,12 @@ fn render_tree_pane(
         .as_ref()
         .map(|s| s.selected_path.clone())
         .unwrap_or_default();
-    let rows = file_tree::flatten(&paths, &view.collapsed_dirs);
+    let rows = file_tree::flatten_query(&paths, &view.collapsed_dirs, &view.tree_query);
+    let filter_focused = view
+        .tree_filter
+        .read(cx)
+        .focus_handle(cx)
+        .is_focused(window);
 
     div()
         .id("diff-tree")
@@ -1650,6 +1744,105 @@ fn render_tree_pane(
         // Light appearance exposes the native frosted material; dark appearance
         // adds a bounded tint behind ChangedPath labels.
         .bg(theme::software_palette().tree.desk.backing)
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_2()
+                .pt_1()
+                .child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.))
+                        .h(px(theme::FIND_FIELD_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(gpui::Rgba {
+                            a: if filter_focused { 1. } else { 0. },
+                            ..theme::software_palette().field.focused_border
+                        })
+                        .bg(theme::software_palette().field.surface)
+                        .child(
+                            svg()
+                                .ml_2()
+                                .size(theme::ICON_SIZE_SM)
+                                .flex_none()
+                                .path("search.svg")
+                                .text_color(theme::software_palette().text.secondary),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .h_full()
+                                .child(view.tree_filter.clone()),
+                        )
+                        .when(!view.tree_query.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .id("diff-tree-filter-clear")
+                                    .mr_1()
+                                    .size(px(18.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(4.))
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(theme::software_palette().control.hover))
+                                    .tooltip(Tooltip::text("Clear", None))
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                                        window.prevent_default();
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.tree_filter.update(cx, |field, cx| {
+                                            field.set_content("", cx);
+                                        });
+                                        let handle = this.tree_filter.read(cx).focus_handle(cx);
+                                        window.focus(&handle);
+                                    }))
+                                    .child(
+                                        svg()
+                                            .size(px(12.))
+                                            .flex_none()
+                                            .path("close.svg")
+                                            .text_color(theme::software_palette().text.secondary),
+                                    ),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_1()
+                        .child(
+                            IconButton::new(
+                                "diff-tree-collapse",
+                                "fold_vertical.svg",
+                                "Collapse All",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.collapse_all_dirs();
+                                cx.notify();
+                            })),
+                        )
+                        .child(
+                            IconButton::new(
+                                "diff-tree-expand",
+                                "unfold_vertical.svg",
+                                "Expand All",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.collapsed_dirs.clear();
+                                cx.notify();
+                            })),
+                        ),
+                ),
+        )
         .child({
             let (scroll, sb) = scrollbar::vertical("diff-tree-sb", cx);
             let pane_width = f32::from(width);
@@ -2357,14 +2550,65 @@ fn render_draft_dock(
 const NAV_INSET: f32 = 2.;
 const NAV_BUTTON_RADIUS: f32 = 5.;
 
+/// Reserve the widest index with as many digits as `total`, independent of
+/// the current position. Measure the UI face so proportional fonts work too.
+fn nav_counter(text: String, total: usize, window: &Window, cx: &App) -> Div {
+    let size = appearance::ui_text(cx, 12.);
+    let face = gpui::font(appearance::ui_font(cx));
+    let measure = |text: String| {
+        let text: SharedString = text.into();
+        let run = gpui::TextRun {
+            len: text.len(),
+            font: face.clone(),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .shape_line(text, size, &[run], None)
+            .width
+    };
+    let dash_width = measure("—".into());
+    let width = if total == 0 {
+        dash_width
+    } else {
+        let total_text = total.to_string();
+        let digit_width = ('0'..='9')
+            .map(|digit| measure(digit.to_string()))
+            .fold(px(0.), |width, next| width.max(next));
+        (digit_width * total_text.len() as f32).max(dash_width) + measure(format!("/{total_text}"))
+    };
+    div()
+        .flex_none()
+        .w(px(f32::from(width).ceil()))
+        .whitespace_nowrap()
+        .text_right()
+        .text_color(theme::software_palette().text.primary)
+        .child(text)
+}
+
 /// `« ‹ File 3/12 · Hunk 2/5 › »`: outer chevrons step files, inner ones hunks.
 /// Sized to `TOGGLE_SIZE` so it sits in the toolbar like any other button.
-fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoElement {
+fn render_nav_capsule(
+    view: &DiffView,
+    window: &Window,
+    cx: &mut Context<DiffView>,
+) -> impl IntoElement {
     let (index, total) = view.file_position();
-    let file = if total == 0 {
-        "—".to_string()
-    } else {
-        format!("{}/{total}", index + 1)
+    let file = match index {
+        Some(i) => format!("{}/{total}", i + 1),
+        None if total == 0 => "—".to_string(),
+        None => format!("—/{total}"),
+    };
+    let prev_file = match index {
+        Some(i) => i > 0,
+        None => total > 0,
+    };
+    let next_file = match index {
+        Some(i) => i + 1 < total,
+        None => total > 0,
     };
     let hunk_count = view.pane.read(cx).hunk_count().unwrap_or(0);
     let hunk = if hunk_count == 0 {
@@ -2378,7 +2622,7 @@ fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoE
             "chevrons_left.svg",
             "Previous File",
             Some("{".into()),
-            index > 0,
+            prev_file,
             false,
             cx.listener(|this, _, _, cx| this.jump_file(-1, cx)),
         ))
@@ -2405,11 +2649,7 @@ fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoE
                         .text_color(theme::software_palette().text.secondary)
                         .child("File"),
                 )
-                .child(
-                    div()
-                        .text_color(theme::software_palette().text.primary)
-                        .child(file),
-                )
+                .child(nav_counter(file, total, window, cx))
                 .child(
                     div()
                         .text_color(theme::software_palette().text.secondary)
@@ -2420,11 +2660,7 @@ fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoE
                         .text_color(theme::software_palette().text.secondary)
                         .child("Hunk"),
                 )
-                .child(
-                    div()
-                        .text_color(theme::software_palette().text.primary)
-                        .child(hunk),
-                ),
+                .child(nav_counter(hunk, hunk_count, window, cx)),
         )
         .child(nav_button(
             "next-hunk",
@@ -2440,7 +2676,7 @@ fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoE
             "chevrons_right.svg",
             "Next File",
             Some("}".into()),
-            index + 1 < total,
+            next_file,
             false,
             cx.listener(|this, _, _, cx| this.jump_file(1, cx)),
         ))
@@ -2449,6 +2685,7 @@ fn render_nav_capsule(view: &DiffView, cx: &mut Context<DiffView>) -> impl IntoE
 /// Group of toolbar buttons, `TOGGLE_SIZE` tall like any other button.
 fn capsule() -> Div {
     div()
+        .map(super::titlebar::consume_control_mouse_events)
         .flex_none()
         .h(theme::TOGGLE_SIZE)
         .flex()
@@ -2607,6 +2844,112 @@ fn traffic_lights_space() -> Option<Div> {
 #[cfg(test)]
 mod tests {
     use super::{LineSpan, Side, selection_matches_span, span_label};
+
+    #[gpui::test]
+    fn titlebar_capsule_consumes_clicks_on_buttons_and_padding(cx: &mut gpui::TestAppContext) {
+        use gpui::IntoElement;
+        for (enabled, position, activates) in [
+            (true, gpui::point(gpui::px(10.), gpui::px(10.)), true),
+            (false, gpui::point(gpui::px(10.), gpui::px(10.)), false),
+            (true, gpui::point(gpui::px(1.), gpui::px(1.)), false),
+        ] {
+            super::super::titlebar::tests::assert_consumes_clicks(
+                cx,
+                move |clicks| {
+                    use gpui::ParentElement;
+                    super::capsule()
+                        .child(super::nav_button(
+                            "test-nav",
+                            "chevron_right.svg",
+                            "Next Hunk",
+                            None,
+                            enabled,
+                            false,
+                            move |_, _, _| clicks.set(clicks.get() + 1),
+                        ))
+                        .into_any_element()
+                },
+                position,
+                activates,
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn opening_a_draft_on_visible_selected_lines_keeps_code_in_place(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::domain::{Alignment, AlignmentOp, Comparison, Oid, Repository};
+        use crate::ui::appearance;
+        use gpui::AppContext;
+
+        cx.update(|cx| cx.set_global(appearance::resolve(&Default::default(), &[])));
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            let text: std::sync::Arc<str> = (1..=100)
+                .map(|i| format!("line {i}\n"))
+                .collect::<String>()
+                .into();
+            let span = LineSpan {
+                start: 1,
+                count: 100,
+            };
+            let view = cx.new(|cx| {
+                super::DiffView::with_snapshot(
+                    super::DiffSnapshot {
+                        comparison: Comparison {
+                            repository: Repository::new("/tmp/diff-draft-test".into()),
+                            base_oid: None,
+                            head_oid: Oid::from_bytes([1; 20]),
+                            uncommitted: false,
+                        },
+                        changed_paths: Vec::new(),
+                        selected_path: "sample.txt".into(),
+                        file: crate::git::FileDiff::Text {
+                            alignment: Alignment {
+                                ops: vec![AlignmentOp::Equal {
+                                    preimage: span,
+                                    postimage: span,
+                                }],
+                            },
+                            preimage_text: text.clone(),
+                            postimage_text: text,
+                        },
+                    },
+                    window,
+                    cx,
+                )
+            });
+            view.update(cx, |view, cx| {
+                view.with_pane(cx, |pane, cx| {
+                    pane.set_soft_wrap(false, cx);
+                    pane.expand_all(cx);
+                });
+                // At several viewport positions, select visible lines away from
+                // the one-third navigation anchor, just as a gutter drag does.
+                for (side, scroll, start) in [
+                    (Side::Preimage, 200., 4),
+                    (Side::Postimage, 600., 28),
+                    (Side::Preimage, 600., 30),
+                    (Side::Postimage, 1000., 48),
+                ] {
+                    let before = view.with_pane(cx, |pane, cx| {
+                        pane.select_span(side, start, start + 2, cx);
+                        pane.test_viewport_tops(600., Some(scroll))
+                    });
+                    view.begin_draft(side, start, 3, window, cx);
+                    let dock = view.open_review.dock().expect("draft dock is open");
+                    assert_eq!(dock.side, side);
+                    assert_eq!(dock.span, LineSpan { start, count: 3 });
+                    let after = view.with_pane(cx, |pane, _| pane.test_viewport_tops(600., None));
+                    assert_eq!(
+                        after, before,
+                        "clicking comment on L{start} must keep both code panes still"
+                    );
+                }
+            });
+        });
+    }
 
     #[test]
     fn span_label_names_one_line_and_a_range() {

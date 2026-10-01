@@ -14,6 +14,8 @@ mod gitlab_connection;
 mod icon_button;
 #[cfg(target_os = "macos")]
 mod mac_column_vibrancy;
+#[cfg(target_os = "macos")]
+mod mac_titlebar;
 mod markdown;
 mod metadata;
 mod scrollbar;
@@ -22,6 +24,7 @@ mod settings;
 mod splitter;
 mod text_field;
 mod theme;
+mod titlebar;
 mod tooltip;
 mod window_controls;
 mod window_geometry;
@@ -227,7 +230,7 @@ pub fn run() {
                 )
                 .expect("open main window");
 
-            // Diff opens via Open Diff on the main Changes chrome, or boot restore.
+            // Diff opens from the main Changes chrome, or via boot restore.
             cx.activate(true);
         });
 }
