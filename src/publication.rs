@@ -111,6 +111,44 @@ use anyhow::{Context, Result, bail};
 use gpui_http_client::HttpClient;
 use std::{path::PathBuf, sync::Arc};
 
+/// A target-scoped operation key. Local Review identity remains the Comparison.
+#[derive(Clone, Debug)]
+pub struct PublicationKey {
+    pub comparison: Comparison,
+    pub origin: ReviewOrigin,
+    pub comment_id: u64,
+}
+impl PublicationKey {
+    pub fn new(comparison: Comparison, origin: ReviewOrigin, comment_id: u64) -> Self {
+        Self {
+            comparison,
+            origin,
+            comment_id,
+        }
+    }
+    pub fn matches_review(&self, comparison: &Comparison, origin: &ReviewOrigin) -> bool {
+        self.comparison == *comparison && self.origin.same_target(origin)
+    }
+}
+impl PartialEq for PublicationKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.comment_id == other.comment_id && self.matches_review(&other.comparison, &other.origin)
+    }
+}
+impl Eq for PublicationKey {}
+impl std::hash::Hash for PublicationKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(
+            &(
+                &self.comparison,
+                self.origin.target_identity(),
+                self.comment_id,
+            ),
+            state,
+        );
+    }
+}
+
 /// Credentials belong to the live connection, never to durable Review data.
 pub struct Connection {
     pub base_url: String,
@@ -293,6 +331,41 @@ pub struct PublicationRecord {
     pub absent_updates: Vec<AbsentUpdate>,
 }
 impl PublicationRecord {
+    fn recreate_requested(&self) -> bool {
+        self.website_deleted || self.deletion == Some(DeleteStatus::Confirmed)
+    }
+    fn fresh_create(comment: &DraftComment, previous: Option<&Self>, queued: bool) -> Self {
+        Self {
+            operation_id: previous
+                .filter(|record| !record.recreate_requested())
+                .map(|record| record.operation_id.clone())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            body: comment.body.clone(),
+            author_id: previous.and_then(|record| record.author_id),
+            absent_updates: previous
+                .map(|record| record.absent_updates.clone())
+                .unwrap_or_default(),
+            prior_attempts: previous
+                .map(|record| record.prior_attempts.clone())
+                .unwrap_or_default(),
+            position: None,
+            state: PublicationState::Unknown(
+                if queued {
+                    "Create queued; confirmation unavailable"
+                } else {
+                    "Confirmation unavailable; check GitLab before publishing again"
+                }
+                .into(),
+            ),
+            edit: None,
+            website_body: None,
+            website_deleted: false,
+            deletion: None,
+            create_queued: queued,
+            deletion_body: None,
+            recovery_candidates: Vec::new(),
+        }
+    }
     /// Shared eligibility for the toolbar count and durable batch reservation.
     pub fn batch_eligible(record: Option<&Self>) -> bool {
         record.is_none_or(|record| {
@@ -423,6 +496,9 @@ impl PublicationStore {
             serde_json::to_vec(&(comparison, "gitlab", origin.target_identity(), comment_id))?;
         let hash = git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)?;
         Ok(self.directory.join(format!("{hash}.json")))
+    }
+    pub fn load_key(&self, key: &PublicationKey) -> Result<Option<PublicationRecord>> {
+        self.load(&key.comparison, &key.origin, key.comment_id)
     }
     pub fn load(
         &self,
@@ -687,9 +763,9 @@ impl PublicationService {
         }) {
             bail!("Previous write remains uncertain; check GitLab first");
         }
-        let recreate = previous.as_ref().is_some_and(|record| {
-            record.website_deleted || record.deletion == Some(DeleteStatus::Confirmed)
-        });
+        let recreate = previous
+            .as_ref()
+            .is_some_and(PublicationRecord::recreate_requested);
         if previous
             .as_ref()
             .is_some_and(|record| record.receipt().is_some() && !recreate)
@@ -701,32 +777,7 @@ impl PublicationService {
             .iter()
             .find(|comment| comment.id == id)
             .context("DraftComment no longer exists")?;
-        let record = PublicationRecord {
-            operation_id: previous
-                .as_ref()
-                .filter(|_| !recreate)
-                .map(|record| record.operation_id.clone())
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-            body: comment.body.clone(),
-            absent_updates: previous
-                .as_ref()
-                .map(|record| record.absent_updates.clone())
-                .unwrap_or_default(),
-            prior_attempts: previous
-                .as_ref()
-                .map(|record| record.prior_attempts.clone())
-                .unwrap_or_default(),
-            author_id: previous.and_then(|record| record.author_id),
-            position: None,
-            state: PublicationState::Unknown("Create queued; confirmation unavailable".into()),
-            edit: None,
-            website_body: None,
-            website_deleted: false,
-            deletion: None,
-            create_queued: true,
-            deletion_body: None,
-            recovery_candidates: Vec::new(),
-        };
+        let record = PublicationRecord::fresh_create(comment, previous.as_ref(), true);
         self.store.save(&review.comparison, origin, id, &record)?;
         Ok(record)
     }
@@ -767,6 +818,26 @@ impl PublicationService {
         record.create_queued = false;
         self.store.save(&review.comparison, origin, id, &record)?;
         self.queue_create(review, origin, id)
+    }
+
+    /// Cancel only an unsent deletion intent; uncertainty and recovery evidence remain.
+    pub fn cancel_pending_delete(
+        &self,
+        comparison: &Comparison,
+        origin: &ReviewOrigin,
+        id: u64,
+    ) -> Result<PublicationRecord> {
+        let mut record = self
+            .store
+            .load(comparison, origin, id)?
+            .context("Publication no longer exists")?;
+        if record.deletion != Some(DeleteStatus::Pending) {
+            bail!("Only a deletion that has not been sent can be cancelled");
+        }
+        record.deletion = None;
+        record.deletion_body = None;
+        self.store.save(comparison, origin, id, &record)?;
+        Ok(record)
     }
 
     /// Preserve the draft and receipt until the remote deletion is confirmed.
@@ -1388,9 +1459,9 @@ impl PublicationService {
         cancelled: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<PublicationRecord> {
         let previous = self.store.load(&review.comparison, origin, comment_id)?;
-        let recreate = previous.as_ref().is_some_and(|record| {
-            record.website_deleted || record.deletion == Some(DeleteStatus::Confirmed)
-        });
+        let recreate = previous
+            .as_ref()
+            .is_some_and(PublicationRecord::recreate_requested);
         if let Some(record) = &previous {
             if record.create_queued && record.deletion == Some(DeleteStatus::Pending) {
                 let mut cancelled = record.clone();
@@ -1431,34 +1502,7 @@ impl PublicationService {
             .iter()
             .find(|comment| comment.id == comment_id)
             .context("DraftComment no longer exists")?;
-        let mut record = PublicationRecord {
-            operation_id: previous
-                .as_ref()
-                .filter(|_| !recreate)
-                .map(|r| r.operation_id.clone())
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-            body: comment.body.clone(),
-            absent_updates: previous
-                .as_ref()
-                .map(|record| record.absent_updates.clone())
-                .unwrap_or_default(),
-            prior_attempts: previous
-                .as_ref()
-                .map(|record| record.prior_attempts.clone())
-                .unwrap_or_default(),
-            author_id: previous.and_then(|r| r.author_id),
-            position: None,
-            edit: None,
-            website_body: None,
-            website_deleted: false,
-            deletion: None,
-            create_queued: false,
-            deletion_body: None,
-            recovery_candidates: Vec::new(),
-            state: PublicationState::Unknown(
-                "Confirmation unavailable; check GitLab before publishing again".into(),
-            ),
-        };
+        let mut record = PublicationRecord::fresh_create(comment, previous.as_ref(), false);
         self.save_create(&review.comparison, origin, comment_id, &mut record)?;
         if !connection.matches(origin) || connection.pat.trim().is_empty() {
             record.state = PublicationState::Failed(if connection.pat.trim().is_empty() {
@@ -1844,6 +1888,11 @@ mod tests {
             ))
             .unwrap();
             assert!(matches!(lost.deletion, Some(DeleteStatus::Unknown(_))));
+            assert!(
+                service
+                    .cancel_pending_delete(&comparison(), &origin(), 1)
+                    .is_err()
+            );
             let checking = FakeHttpClient::create(move |request| async move {
                 assert_eq!(request.method(), http::Method::GET);
                 if request.uri().path().ends_with("/user") {
@@ -2023,6 +2072,9 @@ mod tests {
                 }
             });
             let service = PublicationService::new(client, store.clone());
+            service
+                .queue_delete(&comparison(), &origin(), 1, "please explain")
+                .unwrap();
             let checked = futures::executor::block_on(service.check_again(
                 &comparison(),
                 &origin(),
@@ -2055,8 +2107,35 @@ mod tests {
                     .operation_id,
                 lost.operation_id
             );
+            assert!(
+                service
+                    .queue_republish(open.review(), &origin(), 1, true)
+                    .is_err()
+            );
+            let kept = service
+                .cancel_pending_delete(&comparison(), &origin(), 1)
+                .unwrap();
+            assert!(matches!(kept.state, PublicationState::Unknown(_)));
+            assert_eq!(kept.operation_id, lost.operation_id);
+            assert_eq!(kept.marker(), lost.marker());
+            assert_eq!(kept.recovery_candidates, result.record.recovery_candidates);
+            assert!(kept.deletion.is_none());
+            assert!(kept.deletion_body.is_none());
+            let reopened = OpenReview::reopen(
+                comparison(),
+                "a.rs",
+                origin(),
+                ReviewStore::new(directory.path().join("local")),
+            )
+            .with_publication_store(store.clone());
+            assert_eq!(reopened.review().comments.len(), 1);
+            assert!(
+                service
+                    .queue_republish(reopened.review(), &origin(), 1, false)
+                    .is_err()
+            );
             let reserved = service
-                .queue_republish(open.review(), &origin(), 1, true)
+                .queue_republish(reopened.review(), &origin(), 1, true)
                 .unwrap();
             assert_ne!(reserved.operation_id, lost.operation_id);
             assert!(reserved.create_queued);

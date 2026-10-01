@@ -1,6 +1,6 @@
 use crate::publication::{
-    BatchCancellation, Connection, DeleteStatus, EditStatus, PublicationBatch, PublicationRecord,
-    PublicationService, PublicationState, PublicationStore, ReviewOrigin,
+    BatchCancellation, Connection, DeleteStatus, EditStatus, PublicationBatch, PublicationKey,
+    PublicationRecord, PublicationService, PublicationState, PublicationStore, ReviewOrigin,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity,
@@ -85,7 +85,7 @@ fn selection_matches_span(selection: Option<(Side, u32, u32)>, side: Side, span:
 
 struct ActiveBatch {
     cancellation: BatchCancellation,
-    keys: Vec<(Comparison, ReviewOrigin, u64)>,
+    keys: Vec<PublicationKey>,
 }
 impl Drop for ActiveBatch {
     fn drop(&mut self) {
@@ -123,15 +123,15 @@ pub struct DiffView {
     publication_records: HashMap<u64, PublicationRecord>,
     publication_protected: HashSet<u64>,
     publication_error: Option<String>,
-    publishing: HashSet<(Comparison, ReviewOrigin, u64)>,
-    updating: HashSet<(Comparison, ReviewOrigin, u64)>,
-    deleting: HashSet<(Comparison, ReviewOrigin, u64)>,
-    queued_deletes: HashSet<(Comparison, ReviewOrigin, u64)>,
-    queued_updates: HashSet<(Comparison, ReviewOrigin, u64)>,
+    publishing: HashSet<PublicationKey>,
+    updating: HashSet<PublicationKey>,
+    deleting: HashSet<PublicationKey>,
+    queued_deletes: HashSet<PublicationKey>,
+    queued_updates: HashSet<PublicationKey>,
     refreshing: HashSet<(Comparison, ReviewOrigin)>,
-    checking: HashSet<(Comparison, ReviewOrigin, u64)>,
-    check_errors: HashMap<(Comparison, ReviewOrigin, u64), String>,
-    republish_confirmations: HashMap<(Comparison, ReviewOrigin, u64), String>,
+    checking: HashSet<PublicationKey>,
+    check_errors: HashMap<PublicationKey, String>,
+    republish_confirmations: HashMap<PublicationKey, String>,
     active_batch: Option<ActiveBatch>,
     batch_status: Option<String>,
     export_status: Option<String>,
@@ -413,9 +413,7 @@ impl DiffView {
             .chain(self.updating.iter())
             .chain(self.deleting.iter())
             .chain(self.checking.iter())
-            .any(|(active_comparison, _, comment)| {
-                active_comparison == comparison && *comment == id
-            })
+            .any(|key| key.comparison == *comparison && key.comment_id == id)
     }
     fn can_delete_comment(&self, id: u64) -> bool {
         self.publication_error.is_none()
@@ -511,7 +509,7 @@ impl DiffView {
             Ok(batch) => {
                 let keys: Vec<_> = batch
                     .ids()
-                    .map(|id| (comparison.clone(), origin.clone(), id))
+                    .map(|id| PublicationKey::new(comparison.clone(), origin.clone(), id))
                     .collect();
                 self.publishing.extend(keys.iter().cloned());
                 self.active_batch = Some(ActiveBatch {
@@ -570,7 +568,7 @@ impl DiffView {
                         .as_ref()?
                         .keys
                         .iter()
-                        .find(|key| key.2 == id)
+                        .find(|key| key.comment_id == id)
                         .cloned()
                 });
                 if let Some(key) = &key {
@@ -582,15 +580,16 @@ impl DiffView {
                 }
                 this.reload_publications();
                 if let Some(key) = &key {
-                    if this.open_review.review().comparison == key.0
-                        && this.open_review.origin().same_target(&key.1)
-                        && this.queued_updates.remove(key)
+                    if key.matches_review(
+                        &this.open_review.review().comparison,
+                        this.open_review.origin(),
+                    ) && this.queued_updates.remove(key)
                         && this
                             .publication_records
-                            .get(&key.2)
+                            .get(&key.comment_id)
                             .is_some_and(|record| record.receipt().is_some())
                     {
-                        this.queue_comment_update(key.2, cx);
+                        this.queue_comment_update(key.comment_id, cx);
                     }
                     this.continue_deletions(key, cx);
                 }
@@ -642,7 +641,7 @@ impl DiffView {
         let review = self.open_review.review().clone();
         let contexts = self.open_review.contexts().clone();
         let origin = self.open_review.origin().clone();
-        let key = (review.comparison.clone(), origin.clone(), id);
+        let key = PublicationKey::new(review.comparison.clone(), origin.clone(), id);
         self.publishing.insert(key.clone());
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -662,12 +661,13 @@ impl DiffView {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.publishing.remove(&key);
-                if this.open_review.review().comparison == key.0 {
+                if this.open_review.review().comparison == key.comparison {
                     this.reload_publications();
                 }
-                if this.open_review.review().comparison == key.0
-                    && this.open_review.origin().same_target(&key.1)
-                {
+                if key.matches_review(
+                    &this.open_review.review().comparison,
+                    this.open_review.origin(),
+                ) {
                     match result {
                         Ok(record) => {
                             this.publication_records.insert(id, record);
@@ -713,11 +713,46 @@ impl DiffView {
                     && matches!(record.state, PublicationState::Unknown(_))
             })
     }
+    fn can_keep_uncertain_comment(&self, id: u64) -> bool {
+        !self.publication_in_progress(id)
+            && self.open_review.storage_error().is_none()
+            && self.publication_records.get(&id).is_some_and(|record| {
+                record.receipt().is_none()
+                    && matches!(record.state, PublicationState::Unknown(_))
+                    && record.deletion == Some(DeleteStatus::Pending)
+            })
+    }
+    fn keep_uncertain_comment(&mut self, id: u64, cx: &mut Context<Self>) {
+        if !self.can_keep_uncertain_comment(id) {
+            return;
+        }
+        let Some(service) = self.publication_service(cx) else {
+            return;
+        };
+        match service.cancel_pending_delete(
+            &self.open_review.review().comparison,
+            self.open_review.origin(),
+            id,
+        ) {
+            Ok(record) => {
+                self.publication_records.insert(id, record);
+                self.queued_deletes.remove(&PublicationKey::new(
+                    self.open_review.review().comparison.clone(),
+                    self.open_review.origin().clone(),
+                    id,
+                ));
+            }
+            Err(error) => {
+                self.publication_error = Some(format!("{error:#}"));
+            }
+        }
+        cx.notify();
+    }
     fn request_republish(&mut self, id: u64, cx: &mut Context<Self>) {
         if !self.can_republish_comment(id) {
             return;
         }
-        let key = (
+        let key = PublicationKey::new(
             self.open_review.review().comparison.clone(),
             self.open_review.origin().clone(),
             id,
@@ -730,7 +765,7 @@ impl DiffView {
         if !self.can_republish_comment(id) {
             return;
         }
-        let key = (
+        let key = PublicationKey::new(
             self.open_review.review().comparison.clone(),
             self.open_review.origin().clone(),
             id,
@@ -770,7 +805,7 @@ impl DiffView {
         let Some(service) = self.publication_service(cx) else {
             return;
         };
-        let key = (
+        let key = PublicationKey::new(
             self.open_review.review().comparison.clone(),
             self.open_review.origin().clone(),
             id,
@@ -784,15 +819,21 @@ impl DiffView {
                 .background_executor()
                 .spawn(async move {
                     reader
-                        .check_again(&captured.0, &captured.1, id, &Self::saved_connection())
+                        .check_again(
+                            &captured.comparison,
+                            &captured.origin,
+                            id,
+                            &Self::saved_connection(),
+                        )
                         .await
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.checking.remove(&key);
-                if this.open_review.review().comparison == key.0
-                    && this.open_review.origin().same_target(&key.1)
-                {
+                if key.matches_review(
+                    &this.open_review.review().comparison,
+                    this.open_review.origin(),
+                ) {
                     let Some(comment) = this
                         .open_review
                         .review()
@@ -807,7 +848,14 @@ impl DiffView {
                         .dock()
                         .is_some_and(|dock| dock.editing == Some(id));
                     match result.and_then(|checked| {
-                        service.reconcile_check(&key.0, &key.1, id, &comment.body, editing, checked)
+                        service.reconcile_check(
+                            &key.comparison,
+                            &key.origin,
+                            id,
+                            &comment.body,
+                            editing,
+                            checked,
+                        )
                     }) {
                         Ok(outcome) => {
                             if let Some(body) = outcome.adopt_body {
@@ -843,30 +891,29 @@ impl DiffView {
             .clone()
             .map(|store| PublicationService::new(cx.http_client(), store))
     }
-    fn continue_deletions(
-        &mut self,
-        finished: &(Comparison, ReviewOrigin, u64),
-        cx: &mut Context<Self>,
-    ) {
+    fn continue_deletions(&mut self, finished: &PublicationKey, cx: &mut Context<Self>) {
         let keys: Vec<_> = self
             .queued_deletes
             .iter()
-            .filter(|key| key.0 == finished.0 && key.2 == finished.2)
+            .filter(|key| {
+                key.comparison == finished.comparison && key.comment_id == finished.comment_id
+            })
             .cloned()
             .collect();
         for key in keys {
             let Some(store) = &self.publication_store else {
                 continue;
             };
-            let Ok(Some(record)) = store.load(&key.0, &key.1, key.2) else {
+            let Ok(Some(record)) = store.load_key(&key) else {
                 continue;
             };
             if record.deletion == Some(DeleteStatus::Confirmed) {
                 self.queued_deletes.remove(&key);
-                if self.open_review.review().comparison == key.0
-                    && self.open_review.origin().same_target(&key.1)
-                {
-                    let view = self.open_review.complete_delete(key.2);
+                if key.matches_review(
+                    &self.open_review.review().comparison,
+                    self.open_review.origin(),
+                ) {
+                    let view = self.open_review.complete_delete(key.comment_id);
                     self.apply_review(&view, cx);
                     self.reload_publications();
                 }
@@ -877,17 +924,17 @@ impl DiffView {
     }
     fn start_delete(
         &mut self,
-        key: (Comparison, ReviewOrigin, u64),
+        key: PublicationKey,
         confirm_changed_body: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.publication_in_progress_for(&key.0, key.2) {
+        if self.publication_in_progress_for(&key.comparison, key.comment_id) {
             return;
         }
         let Some(service) = self.publication_service(cx) else {
             return;
         };
-        let Ok(Some(record)) = service.store.load(&key.0, &key.1, key.2) else {
+        let Ok(Some(record)) = service.store.load_key(&key) else {
             return;
         };
         if record.receipt().is_none()
@@ -911,9 +958,9 @@ impl DiffView {
                 .spawn(async move {
                     service
                         .delete(
-                            &task_key.0,
-                            &task_key.1,
-                            task_key.2,
+                            &task_key.comparison,
+                            &task_key.origin,
+                            task_key.comment_id,
                             &Self::saved_connection(),
                             confirm_changed_body,
                         )
@@ -922,13 +969,14 @@ impl DiffView {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.deleting.remove(&key);
-                if this.open_review.review().comparison == key.0
-                    && this.open_review.origin().same_target(&key.1)
-                {
+                if key.matches_review(
+                    &this.open_review.review().comparison,
+                    this.open_review.origin(),
+                ) {
                     match result {
                         Ok(record) => {
                             if record.deletion == Some(DeleteStatus::Confirmed) {
-                                let view = this.open_review.complete_delete(key.2);
+                                let view = this.open_review.complete_delete(key.comment_id);
                                 this.apply_review(&view, cx);
                             }
                             this.reload_publications();
@@ -947,7 +995,7 @@ impl DiffView {
     }
     fn retry_delete(&mut self, id: u64, confirm_changed_body: bool, cx: &mut Context<Self>) {
         self.start_delete(
-            (
+            PublicationKey::new(
                 self.open_review.review().comparison.clone(),
                 self.open_review.origin().clone(),
                 id,
@@ -965,8 +1013,8 @@ impl DiffView {
     fn refresh_publications(&mut self, cx: &mut Context<Self>) {
         let comparison = self.open_review.review().comparison.clone();
         let origin = self.open_review.origin().clone();
-        let key = (comparison.clone(), origin.clone());
-        if self.refreshing.contains(&key) {
+        let refresh_key = (comparison.clone(), origin.clone());
+        if self.refreshing.contains(&refresh_key) {
             return;
         }
         let ids: Vec<_> = self
@@ -985,7 +1033,7 @@ impl DiffView {
         let Some(service) = self.publication_service(cx) else {
             return;
         };
-        self.refreshing.insert(key.clone());
+        self.refreshing.insert(refresh_key.clone());
         // Convert durable sends with no live task to uncertainty; restart never retries them.
         for id in &ids {
             if !self.publication_in_progress(*id) {
@@ -1009,9 +1057,9 @@ impl DiffView {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.refreshing.remove(&key);
-                if this.open_review.review().comparison == key.0
-                    && this.open_review.origin().same_target(&key.1)
+                this.refreshing.remove(&refresh_key);
+                if this.open_review.review().comparison == refresh_key.0
+                    && this.open_review.origin().same_target(&refresh_key.1)
                 {
                     this.reload_publications();
                     for (id, result) in results {
@@ -1029,7 +1077,14 @@ impl DiffView {
                             .dock()
                             .is_some_and(|dock| dock.editing == Some(id));
                         match result.and_then(|remote| {
-                            service.reconcile(&key.0, &key.1, id, &comment.body, editing, remote)
+                            service.reconcile(
+                                &refresh_key.0,
+                                &refresh_key.1,
+                                id,
+                                &comment.body,
+                                editing,
+                                remote,
+                            )
                         }) {
                             Ok(outcome) => {
                                 if let Some(body) = outcome.adopt_body {
@@ -1074,7 +1129,7 @@ impl DiffView {
                 return;
             }
         }
-        let key = (comparison, origin, id);
+        let key = PublicationKey::new(comparison, origin, id);
         if self.updating.contains(&key) || self.publication_in_progress(id) {
             self.queued_updates.insert(key);
             return;
@@ -1102,7 +1157,7 @@ impl DiffView {
         let Some(service) = self.publication_service(cx) else {
             return;
         };
-        let key = (
+        let key = PublicationKey::new(
             self.open_review.review().comparison.clone(),
             self.open_review.origin().clone(),
             id,
@@ -1115,8 +1170,8 @@ impl DiffView {
                 .spawn(async move {
                     service
                         .update(
-                            &task_key.0,
-                            &task_key.1,
+                            &task_key.comparison,
+                            &task_key.origin,
                             id,
                             &Self::saved_connection(),
                             overwrite,
@@ -1127,9 +1182,10 @@ impl DiffView {
             let _ = this.update(cx, |this, cx| {
                 this.updating.remove(&key);
                 let queued = this.queued_updates.remove(&key);
-                if this.open_review.review().comparison == key.0
-                    && this.open_review.origin().same_target(&key.1)
-                {
+                if key.matches_review(
+                    &this.open_review.review().comparison,
+                    this.open_review.origin(),
+                ) {
                     this.reload_publications();
                     match result {
                         Ok(record) => {
@@ -2027,12 +2083,12 @@ impl DiffView {
             else {
                 return;
             };
-            let key = (
+            let key = PublicationKey::new(
                 self.open_review.review().comparison.clone(),
                 self.open_review.origin().clone(),
                 id,
             );
-            match service.queue_delete(&key.0, &key.1, id, &body) {
+            match service.queue_delete(&key.comparison, &key.origin, id, &body) {
                 Ok(record) => {
                     self.publication_records.insert(id, record);
                     self.queued_deletes.insert(key.clone());
@@ -3509,7 +3565,7 @@ fn render_publication_recovery(view: &DiffView, id: u64, cx: &mut Context<DiffVi
                 EditStatus::Unknown { .. } | EditStatus::Sending { .. }
             )
         });
-    let key = (
+    let key = PublicationKey::new(
         view.open_review.review().comparison.clone(),
         view.open_review.origin().clone(),
         id,
@@ -3602,6 +3658,13 @@ fn render_publication_recovery(view: &DiffView, id: u64, cx: &mut Context<DiffVi
     if let Some(error) = view.check_errors.get(&key) {
         controls = controls.child(div().child(error.clone()));
     }
+    if view.can_keep_uncertain_comment(id) {
+        controls = controls.child(div().child("A deletion is pending, but no unique remote comment has been identified."))
+            .child(div().id(("keep-uncertain-comment", id as usize)).cursor_pointer().text_color(palette.text.link)
+                .child("Keep comment and cancel unsent deletion")
+                .on_click(cx.listener(move|this,_,_,cx| {cx.stop_propagation();this.keep_uncertain_comment(id,cx);})))
+            .child(div().child("The create result stays unknown. Republishing still requires duplicate-risk confirmation."));
+    }
     if view.republish_confirmations.get(&key) == Some(&record.operation_id)
         && view.can_republish_comment(id)
     {
@@ -3627,7 +3690,7 @@ fn render_publication_recovery(view: &DiffView, id: u64, cx: &mut Context<DiffVi
                     .child("Cancel")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        let key = (
+                        let key = PublicationKey::new(
                             this.open_review.review().comparison.clone(),
                             this.open_review.origin().clone(),
                             id,
