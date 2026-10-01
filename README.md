@@ -4,6 +4,8 @@ Local clipboard-oriented code review over a Git two-tree comparison: browse stru
 
 ## GitLab comments
 
+Implementation is covered by controlled tests; actual self-managed GitLab version and website behavior remain [pending live acceptance](docs/gitlab-publication-acceptance.md). No tested minimum server version is currently claimed.
+
 Publish a local DraftComment explicitly from its complete GitLab MR Review. A PAT with `api` scope and permission to comment on that MR enables writing; `read_api` supports browsing.
 
 The Review toolbar offers **Publish all drafts (N)** for its captured MR. It reserves each draft independently and shows each result on that comment. A new batch retries only definite failures; successful, uncertain and known unsupported items are excluded. Cancel or closing the window stops unsent items for manual retry. A request already sent retains its receipt or uncertain result. Reopening never continues a batch. Editing or deleting while a create is in flight preserves the later intent.

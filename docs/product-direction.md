@@ -39,9 +39,9 @@ These entries preserve discussed options and their benchmarks. “Agreed directi
 
 ## First-release detail decisions and remaining acceptance work
 
-The first-release product details were confirmed through the design interview. Implementation and acceptance work remains:
+The first-release product details were confirmed through the design interview. Tickets 01–07 are implemented and controlled tests pass; actual server/version and website behavior remain [pending live acceptance](gitlab-publication-acceptance.md). The agreed behaviors and remaining compatibility evidence are:
 
-- Single-comment Publish and Publish all drafts (N) are agreed; concrete layout/copy remains. Definite failures retain visible records and require manual retry after network recovery/restart.
+- Single-comment Publish and Publish all drafts (N) are implemented. Definite failures retain visible records and require manual retry after network recovery/restart.
 - Conflict behavior is agreed: adopt website-only edits; simultaneous edits offer Adopt website body / Overwrite with local body; website deletion preserves local work and requires explicit republishing. Show a remotely changed body before reconfirming local deletion.
 - Refresh on open, manually and before update/delete; no periodic polling. Unsaved inputs survive refresh.
 - Compatibility direction is agreed: validate the actual configured self-managed instance/version first and retain standard GitLab.com API compatibility. Historical/multiline/context positions still need real-instance acceptance; no untested blanket minimum-version promise.

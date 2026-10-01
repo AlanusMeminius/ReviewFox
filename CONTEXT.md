@@ -2,7 +2,7 @@
 
 Local code review over a Git two-tree comparison: browse structured diffs, attach local comments through Anchors, export plain text for pasting elsewhere, and manage their Publications on supported forge MR Entries.
 
-GitLab Publication scope is agreed in ADR-0018; implementation is in progress. Product direction and deferred capabilities are tracked in [docs/product-direction.md](docs/product-direction.md). Review persistence stores credential-free originating targets, local comments, Anchors and creation context; remote Publication operations are pending.
+GitLab Publication scope is agreed in ADR-0018. Local persistence and Publication creation, editing/deletion, batch publishing and uncertain-result recovery are implemented with controlled tests; [real-instance acceptance remains pending](docs/gitlab-publication-acceptance.md). Review persistence stores credential-free originating targets, local comments, Anchors and creation context; target-scoped Publication records retain native correspondence and pending operations. Product direction and deferred capabilities are tracked in [docs/product-direction.md](docs/product-direction.md).
 
 ## Language
 
