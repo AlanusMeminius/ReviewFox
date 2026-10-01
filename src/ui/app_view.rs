@@ -1444,12 +1444,8 @@ fn sidebar_nav_row(
         .id(id)
         .w_full()
         .h(px(theme::SIDEBAR_ROW_HEIGHT))
-        .pl(px(
-            theme::SIDEBAR_ROW_PAD_X - theme::SIDEBAR_ROW_INDICATOR_IDLE_WIDTH
-        ))
+        .pl(px(theme::SIDEBAR_ROW_PAD_X))
         .pr(px(theme::SIDEBAR_ROW_PAD_X))
-        .border_l(px(theme::SIDEBAR_ROW_INDICATOR_IDLE_WIDTH))
-        .border_color(palette.sidebar_row.idle_indicator)
         .rounded(px(theme::SIDEBAR_ROW_RADIUS))
         .min_w(px(0.))
         .overflow_hidden()
@@ -1459,38 +1455,19 @@ fn sidebar_nav_row(
         .cursor_pointer()
         .when(selected, |d| {
             d.bg(palette.sidebar_row.selected)
-                .border_color(palette.sidebar_row.selection_indicator)
-                .hover(|d| {
-                    d.bg(palette.sidebar_row.selected_hover)
-                        .border_l(px(theme::SIDEBAR_ROW_INDICATOR_HOVER_WIDTH))
-                        .pl(px(
-                            theme::SIDEBAR_ROW_PAD_X - theme::SIDEBAR_ROW_INDICATOR_HOVER_WIDTH
-                        ))
-                })
-                .active(|d| {
-                    d.bg(palette.sidebar_row.selected_pressed)
-                        .border_l(px(theme::SIDEBAR_ROW_INDICATOR_PRESSED_WIDTH))
-                        .pl(px(
-                            theme::SIDEBAR_ROW_PAD_X - theme::SIDEBAR_ROW_INDICATOR_PRESSED_WIDTH
-                        ))
-                })
+                .hover(|d| d.bg(palette.sidebar_row.selected_hover))
+                .active(|d| d.bg(palette.sidebar_row.selected_pressed))
         })
         .when(!selected, |d| {
-            d.hover(|d| {
-                d.bg(palette.sidebar_row.hover)
-                    .border_color(palette.sidebar_row.hover_indicator)
-            })
-            .active(|d| {
-                d.bg(palette.sidebar_row.pressed)
-                    .border_color(palette.sidebar_row.pressed_indicator)
-            })
+            d.hover(|d| d.bg(palette.sidebar_row.hover))
+                .active(|d| d.bg(palette.sidebar_row.pressed))
         })
         .child(
             svg()
                 .size(theme::ICON_SIZE)
                 .flex_none()
                 .path(icon)
-                .text_color(palette.text.secondary),
+                .text_color(palette.sidebar_row.icon),
         )
         .child(
             div()
@@ -1512,7 +1489,7 @@ fn sidebar_section_header(label: &'static str, extra_top: bool, cx: &App) -> imp
         .flex()
         .items_end()
         .ui_text_size(11., cx)
-        .text_color(theme::software_palette().text.section)
+        .text_color(theme::software_palette().sidebar_row.section_text)
         .child(label)
 }
 
@@ -1724,6 +1701,7 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
     div()
         .id("titlebar")
         .h(theme::TITLEBAR_HEIGHT)
+        .bg(theme::software_palette().surface.titlebar_backing)
         .flex_none()
         .flex()
         .items_center()
@@ -1788,13 +1766,9 @@ fn render_titlebar(view: &AppView, window: &Window, cx: &mut Context<AppView>) -
                 .child(
                     div()
                         .flex_none()
-                        .px(px(4.))
-                        .py(px(2.))
-                        .rounded_md()
-                        .bg(theme::software_palette().surface.chrome_backing)
                         .font_family(mono.clone())
                         .text_xs()
-                        .text_color(theme::software_palette().text.secondary)
+                        .text_color(theme::software_palette().text.primary)
                         .child(label),
                 )
                 .child(
@@ -1913,8 +1887,6 @@ fn render_entry_chrome(
                     .active(|d| {
                         d.bg(theme::software_palette().control.pressed)
                             .border_color(theme::software_palette().control.pill_outline)
-                            .border_l_2()
-                            .pl(px(7.))
                     })
                 })
                 .child(
@@ -2120,11 +2092,6 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
                     .overflow_y_scroll()
                     .children(loaded.commits().iter().enumerate().map(|(i, commit)| {
                         let in_range = loaded.in_range().get(i).copied().unwrap_or(false);
-                        let indicator = if in_range {
-                            palette.metadata.range_indicator
-                        } else {
-                            palette.metadata.row_indicator
-                        };
                         let summary = commit.summary.clone();
                         let meta = format!(
                             "{} · {} · {}",
@@ -2138,12 +2105,6 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
                             .my_0p5()
                             .px_3()
                             .py_2()
-                            .border_1()
-                            .border_color(if in_range {
-                                indicator
-                            } else {
-                                gpui::Rgba { a: 0., ..indicator }
-                            })
                             .rounded_lg()
                             .cursor_pointer()
                             .when(in_range, |d| d.bg(palette.metadata.range))
@@ -2153,9 +2114,6 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
                                 } else {
                                     d.bg(palette.metadata.row_hover)
                                 }
-                                .border_color(indicator)
-                                .border_l_2()
-                                .pl(px(11.))
                             })
                             .active(move |d| {
                                 if in_range {
@@ -2163,9 +2121,6 @@ fn render_commit_capsule(view: &AppView, cx: &mut Context<AppView>) -> impl Into
                                 } else {
                                     d.bg(palette.metadata.row_pressed)
                                 }
-                                .border_color(indicator)
-                                .border_l_4()
-                                .pl(px(9.))
                             })
                             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                                 // Double-click: always fold Comparison to this single
@@ -2524,22 +2479,11 @@ fn mr_metadata_items(detail: &MergeRequestDetail) -> Vec<metadata::Item> {
 
 fn picker_option_row(id: (&'static str, usize), width: f32, selected: bool) -> gpui::Stateful<Div> {
     let palette = theme::software_palette();
-    let indicator = if selected {
-        palette.text.link
-    } else {
-        palette.text.secondary
-    };
     div()
         .id(id)
         .w(px(width))
         .px_3()
         .py_2()
-        .border_1()
-        .border_color(if selected {
-            indicator
-        } else {
-            gpui::Rgba { a: 0., ..indicator }
-        })
         .rounded_md()
         .cursor_pointer()
         .when(selected, |row| row.bg(palette.control.selected))
@@ -2549,9 +2493,6 @@ fn picker_option_row(id: (&'static str, usize), width: f32, selected: bool) -> g
             } else {
                 palette.control.hover
             })
-            .border_color(indicator)
-            .border_l_2()
-            .pl(px(11.))
         })
         .active(move |row| {
             row.bg(if selected {
@@ -2559,9 +2500,6 @@ fn picker_option_row(id: (&'static str, usize), width: f32, selected: bool) -> g
             } else {
                 palette.control.pressed
             })
-            .border_color(indicator)
-            .border_l_4()
-            .pl(px(9.))
         })
 }
 

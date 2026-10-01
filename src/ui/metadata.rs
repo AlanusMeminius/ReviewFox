@@ -55,19 +55,8 @@ fn copyable_capsule(value: impl Into<String>, cx: &App) -> Stateful<Div> {
         .id(SharedString::from(format!("copy-metadata-{value}")))
         .debug_selector(move || format!("metadata-copy-{value}"))
         .cursor_pointer()
-        // Grow the left edge 1→2→4px, compensating padding so the ID stays put.
-        .hover(move |capsule| {
-            capsule
-                .bg(palette.metadata.copy_hover)
-                .border_l_2()
-                .pl(px(4.))
-        })
-        .active(move |capsule| {
-            capsule
-                .bg(palette.metadata.copy_pressed)
-                .border_l_4()
-                .pl(px(2.))
-        })
+        .hover(move |capsule| capsule.bg(palette.metadata.copy_hover))
+        .active(move |capsule| capsule.bg(palette.metadata.copy_pressed))
         .tooltip(Tooltip::text("Click to copy", None))
         .on_click(move |_, _, cx: &mut App| {
             cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));

@@ -106,15 +106,9 @@ impl RenderOnce for NavItem {
         let palette = theme::software_palette();
         let colors = palette.settings.nav_row;
         let focused = self.focused;
-        let border = if self.focused {
-            palette.settings.focus_border
-        } else if self.selected {
-            colors.indicator
-        } else {
-            Rgba {
-                a: 0.,
-                ..colors.indicator
-            }
+        let border = Rgba {
+            a: if self.focused { 1. } else { 0. },
+            ..palette.settings.focus_border
         };
         let label_color = if self.selected {
             palette.text.primary
@@ -139,8 +133,7 @@ impl RenderOnce for NavItem {
             .w_full()
             .h(px(28.))
             .gap_2()
-            // Left border grows 1→2→4px; compensate padding so the chevron
-            // and label keep the same x position in every state.
+            // Keep a constant inset while the focus border appears.
             .pl(px(4.))
             .pr_1()
             // Same capsule as the main window's sidebar rows.
@@ -149,22 +142,12 @@ impl RenderOnce for NavItem {
             .border_color(border)
             .when(self.selected, |row| {
                 row.bg(colors.selected)
-                    .hover(move |row| row.bg(colors.selected_hover).border_l_2().pl(px(3.)))
-                    .active(move |row| row.bg(colors.selected_pressed).border_l_4().pl(px(1.)))
+                    .hover(move |row| row.bg(colors.selected_hover))
+                    .active(move |row| row.bg(colors.selected_pressed))
             })
             .when(!self.selected, |row| {
-                row.hover(move |row| {
-                    row.bg(colors.hover)
-                        .border_color(palette.text.secondary)
-                        .border_l_2()
-                        .pl(px(3.))
-                })
-                .active(move |row| {
-                    row.bg(colors.pressed)
-                        .border_color(colors.indicator)
-                        .border_l_4()
-                        .pl(px(1.))
-                })
+                row.hover(move |row| row.bg(colors.hover))
+                    .active(move |row| row.bg(colors.pressed))
             })
             .cursor_pointer()
             .font_family(appearance::ui_font(cx))

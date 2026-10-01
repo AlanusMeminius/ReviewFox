@@ -1015,15 +1015,7 @@ fn paint_scrollbar_track(
     bounds: Bounds<Pixels>,
     colors: theme::ScrollbarColors,
 ) {
-    let edge = px(scrollbar::TRACK_OUTLINE_WIDTH);
-    window.paint_quad(
-        fill(bounds, colors.track_outline).corner_radii(px(scrollbar::TRACK_WIDTH / 2.)),
-    );
-    let inner = Bounds::from_corners(
-        point(bounds.left() + edge, bounds.top() + edge),
-        point(bounds.right() - edge, bounds.bottom() - edge),
-    );
-    window.paint_quad(fill(inner, colors.track).corner_radii(px(scrollbar::TRACK_WIDTH / 2. - 1.)));
+    window.paint_quad(fill(bounds, colors.track).corner_radii(px(scrollbar::TRACK_WIDTH / 2.)));
 }
 
 impl Frame {
@@ -1078,10 +1070,18 @@ impl Frame {
         let scrollbar_colors = theme::software_palette().scrollbar;
         for side in [Side::Preimage, Side::Postimage] {
             let frame = &self.sides[side_ix(side)];
-            if frame.thumb.as_ref().is_some_and(|t| t.shown) {
+            if frame
+                .thumb
+                .as_ref()
+                .is_some_and(|t| t.shown && (t.hovered || t.dragging))
+            {
                 paint_scrollbar_track(window, geom.track(side), scrollbar_colors);
             }
-            if frame.h_thumb.as_ref().is_some_and(|t| t.shown) {
+            if frame
+                .h_thumb
+                .as_ref()
+                .is_some_and(|t| t.shown && (t.hovered || t.dragging))
+            {
                 paint_scrollbar_track(window, geom.h_track(side), scrollbar_colors);
             }
             for thumb in frame

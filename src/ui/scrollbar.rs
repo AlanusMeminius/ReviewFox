@@ -20,7 +20,6 @@ pub(crate) const THUMB_WIDTH: f32 = 6.;
 pub(crate) const THUMB_HOVER_WIDTH: f32 = 8.;
 pub(crate) const THUMB_DRAG_WIDTH: f32 = 10.;
 pub(crate) const TRACK_WIDTH: f32 = 14.;
-pub(crate) const TRACK_OUTLINE_WIDTH: f32 = 1.;
 const MIN_THUMB: f32 = 24.;
 pub(crate) const PAD: f32 = 4.;
 pub(crate) const HIDE_DELAY: Duration = Duration::from_secs(1);
@@ -247,7 +246,14 @@ impl Render for VerticalScrollbar {
             .h(geom.track_height)
             .rounded_full()
             .opacity(if show_thumb { 1. } else { 0. })
-            .bg(colors.track_outline)
+            .bg(if self.hovered || dragging {
+                colors.track
+            } else {
+                gpui::Rgba {
+                    a: 0.,
+                    ..colors.track
+                }
+            })
             .cursor(CursorStyle::Arrow);
 
         let thumb = div()
@@ -260,13 +266,6 @@ impl Render for VerticalScrollbar {
             .bg(colors.thumb(self.hovered, dragging));
 
         track
-            .child(
-                div()
-                    .absolute()
-                    .inset(px(TRACK_OUTLINE_WIDTH))
-                    .rounded_full()
-                    .bg(colors.track),
-            )
             .child(thumb)
             .child(
                 canvas(
@@ -407,7 +406,7 @@ mod tests {
         assert_eq!(thumb_width(true, false), 8.);
         assert_eq!(thumb_width(false, true), 10.);
         assert_eq!(thumb_width(true, true), 10.);
-        assert!(TRACK_WIDTH - thumb_width(true, true) >= 2. * (TRACK_OUTLINE_WIDTH + 1.));
+        assert!(TRACK_WIDTH > thumb_width(true, true));
     }
 
     #[test]

@@ -74,7 +74,7 @@ impl RenderOnce for IconButton {
         } else if self.pressed {
             palette.field.focused_border
         } else {
-            palette.text.secondary
+            palette.text.chrome_icon
         };
         let pressed = self.pressed;
         let enabled = !self.disabled;
@@ -87,8 +87,8 @@ impl RenderOnce for IconButton {
             .items_center()
             .justify_center()
             .rounded_md()
-            // Reserve the outline in every state so the disabled cue does not
-            // move the glyph or change the button's size.
+            // Reserve the border in every state so disabling a button does not
+            // shift its glyph; enabled idle stays clear over the titlebar.
             .border_1()
             .border_color(if self.disabled {
                 palette.control.disabled_outline
@@ -98,10 +98,8 @@ impl RenderOnce for IconButton {
                     ..palette.control.disabled_outline
                 }
             })
-            .bg(if self.disabled {
-                palette.control.disabled_surface
-            } else {
-                palette.control.idle
+            .when(self.disabled, |button| {
+                button.bg(palette.control.disabled_surface)
             })
             .when(pressed && enabled, |button| {
                 button.bg(palette.control.selected)

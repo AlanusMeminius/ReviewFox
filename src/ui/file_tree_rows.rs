@@ -16,9 +16,6 @@ use super::theme;
 const ROW_RADIUS: f32 = 4.;
 /// Base left padding before depth indent (`depth * 12`).
 const ROW_INDENT_BASE: f32 = 8.;
-const ROW_INDICATOR_IDLE_WIDTH: f32 = 2.;
-const ROW_INDICATOR_HOVER_WIDTH: f32 = 4.;
-const ROW_INDICATOR_PRESSED_WIDTH: f32 = 6.;
 /// Gap between [`RowSurface::Desk`] rows so neighbouring capsules never touch.
 const DESK_ROW_GAP: f32 = 2.;
 /// Scroll `px_1` (4×2) + row `mx_1` (4×2).
@@ -28,8 +25,8 @@ const ICON_SLOT: f32 = 16.;
 const STATUS_SLOT: f32 = 16.;
 const ROW_GAP: f32 = 4.;
 
-fn row_content_padding(depth: u32, indicator_width: f32) -> f32 {
-    ROW_INDENT_BASE + depth as f32 * 12. - indicator_width
+fn row_content_padding(depth: u32) -> f32 {
+    ROW_INDENT_BASE + depth as f32 * 12.
 }
 
 /// What the tree sits on, which decides its hover / selected fills.
@@ -52,7 +49,6 @@ impl RowSurface {
 }
 
 fn row_base(id: ElementId, depth: u32, surface: RowSurface, pane_width: f32) -> Stateful<Div> {
-    let colors = surface.colors();
     div()
         .id(id)
         .mx_1()
@@ -60,10 +56,8 @@ fn row_base(id: ElementId, depth: u32, surface: RowSurface, pane_width: f32) -> 
         .w(px((pane_width - ROW_H_INSET).max(0.)))
         .min_w(px(0.))
         .h(px(22.))
-        .pl(px(row_content_padding(depth, ROW_INDICATOR_IDLE_WIDTH)))
+        .pl(px(row_content_padding(depth)))
         .pr_1()
-        .border_l(px(ROW_INDICATOR_IDLE_WIDTH))
-        .border_color(colors.idle_indicator)
         .rounded(px(ROW_RADIUS))
         .overflow_hidden()
         .flex()
@@ -156,8 +150,8 @@ pub fn dir_row(
     );
     row_base(id.into(), depth, surface, pane_width)
         .cursor_pointer()
-        .hover(move |d| d.bg(colors.hover).border_color(colors.hover_indicator))
-        .active(move |d| d.bg(colors.pressed).border_color(colors.pressed_indicator))
+        .hover(move |d| d.bg(colors.hover))
+        .active(move |d| d.bg(colors.pressed))
         .child(
             div()
                 .size(px(16.))
@@ -237,21 +231,12 @@ pub fn file_row(
     row_base(id.into(), depth, surface, pane_width)
         .when(selected, |d| {
             d.bg(colors.selected)
-                .border_color(colors.selected_indicator)
-                .hover(|d| {
-                    d.bg(colors.selected_hover)
-                        .border_l(px(ROW_INDICATOR_HOVER_WIDTH))
-                        .pl(px(row_content_padding(depth, ROW_INDICATOR_HOVER_WIDTH)))
-                })
-                .active(|d| {
-                    d.bg(colors.selected_pressed)
-                        .border_l(px(ROW_INDICATOR_PRESSED_WIDTH))
-                        .pl(px(row_content_padding(depth, ROW_INDICATOR_PRESSED_WIDTH)))
-                })
+                .hover(|d| d.bg(colors.selected_hover))
+                .active(|d| d.bg(colors.selected_pressed))
         })
         .when(!selected, |d| {
-            d.hover(move |d| d.bg(colors.hover).border_color(colors.hover_indicator))
-                .active(move |d| d.bg(colors.pressed).border_color(colors.pressed_indicator))
+            d.hover(move |d| d.bg(colors.hover))
+                .active(move |d| d.bg(colors.pressed))
         })
         .child(
             div()
@@ -298,23 +283,6 @@ pub fn file_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn selected_row_cue_grows_without_moving_indented_content() {
-        let widths = [
-            ROW_INDICATOR_IDLE_WIDTH,
-            ROW_INDICATOR_HOVER_WIDTH,
-            ROW_INDICATOR_PRESSED_WIDTH,
-        ];
-        assert_eq!(widths, [2., 4., 6.]);
-        for depth in [0, 1, 3] {
-            let content_x = ROW_INDENT_BASE + depth as f32 * 12.;
-            for width in widths {
-                assert!(row_content_padding(depth, width) >= 0.);
-                assert_eq!(width + row_content_padding(depth, width), content_x);
-            }
-        }
-    }
 
     #[test]
     fn name_max_width_shrinks_with_depth_and_trailing() {

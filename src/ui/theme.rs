@@ -53,8 +53,6 @@ pub struct MetadataColors {
     pub range: Rgba,
     pub range_hover: Rgba,
     pub range_pressed: Rgba,
-    pub row_indicator: Rgba,
-    pub range_indicator: Rgba,
     pub link: Rgba,
 }
 
@@ -94,12 +92,10 @@ pub struct SettingsRowColors {
     pub selected: Rgba,
     pub selected_hover: Rgba,
     pub selected_pressed: Rgba,
-    pub indicator: Rgba,
 }
 
 #[derive(Clone, Copy)]
 pub struct ControlColors {
-    pub idle: Rgba,
     pub pill: Rgba,
     pub pill_hover: Rgba,
     pub pill_outline: Rgba,
@@ -145,10 +141,12 @@ pub struct SurfaceColors {
     pub island: Rgba,
     pub popover: Rgba,
     pub divider: Rgba,
+    /// Continuous material behind titlebar controls and labels.
+    pub titlebar_backing: Rgba,
     /// Stable backing for text that otherwise sits directly on window material.
     pub chrome_backing: Rgba,
-    /// Stable backing over the platform's frosted material. A small amount of
-    /// the material remains visible without letting the wallpaper set contrast.
+    /// Sidebar layer over the window material. Light appearance leaves the
+    /// native frosted material visible; dark appearance adds a translucent tint.
     pub sidebar_backing: Rgba,
     pub floating_overlay: Rgba,
     pub shadow_ink: Hsla,
@@ -164,6 +162,9 @@ pub struct TextColors {
     pub placeholder: Rgba,
     pub disabled: Rgba,
     pub link: Rgba,
+    /// Link/feedback text on the translucent titlebar material.
+    pub titlebar_link: Rgba,
+    pub chrome_icon: Rgba,
 }
 
 #[derive(Clone, Copy)]
@@ -179,7 +180,6 @@ pub struct FieldColors {
 #[derive(Clone, Copy)]
 pub struct ScrollbarColors {
     pub track: Rgba,
-    pub track_outline: Rgba,
     pub idle: Rgba,
     pub hover: Rgba,
     pub drag: Rgba,
@@ -199,15 +199,13 @@ impl ScrollbarColors {
 
 #[derive(Clone, Copy)]
 pub struct SidebarRowColors {
-    pub idle_indicator: Rgba,
-    pub hover_indicator: Rgba,
-    pub pressed_indicator: Rgba,
+    pub section_text: Rgba,
+    pub icon: Rgba,
     pub hover: Rgba,
     pub pressed: Rgba,
     pub selected: Rgba,
     pub selected_hover: Rgba,
     pub selected_pressed: Rgba,
-    pub selection_indicator: Rgba,
 }
 
 #[derive(Clone, Copy)]
@@ -223,15 +221,11 @@ pub struct TreeColors {
 #[derive(Clone, Copy)]
 pub struct TreeRowColors {
     pub backing: Rgba,
-    pub idle_indicator: Rgba,
     pub hover: Rgba,
     pub pressed: Rgba,
     pub selected: Rgba,
     pub selected_hover: Rgba,
     pub selected_pressed: Rgba,
-    pub hover_indicator: Rgba,
-    pub pressed_indicator: Rgba,
-    pub selected_indicator: Rgba,
     pub selected_text: Rgba,
 }
 
@@ -277,8 +271,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 range: rgb(0xf1f5ff),
                 range_hover: rgb(0xe4edff),
                 range_pressed: rgb(0xd3e2ff),
-                row_indicator: rgb(0x596579),
-                range_indicator: rgb(0x2457d6),
                 link: rgb(0x2457d6),
             },
             markdown: MarkdownColors {
@@ -295,7 +287,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 selection_outline: rgb(0x2457d6),
             },
             control: ControlColors {
-                idle: rgb(0xf4f5f7),
                 pill: rgb(0xffffff),
                 pill_hover: rgb(0xe4e7ed),
                 pill_outline: rgb(0x657184),
@@ -341,7 +332,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                     selected: rgb(0xdce8f8),
                     selected_hover: rgb(0xd1e1f7),
                     selected_pressed: rgb(0xc3d9f4),
-                    indicator: rgb(0x596579),
                 },
                 option_row: SettingsRowColors {
                     hover: rgb(0xe9ebef),
@@ -349,7 +339,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                     selected: rgb(0xdce8f8),
                     selected_hover: rgb(0xd1e1f7),
                     selected_pressed: rgb(0xc3d9f4),
-                    indicator: rgb(0x2457d6),
                 },
             },
             surface: SurfaceColors {
@@ -358,8 +347,9 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 island: rgb(0xffffff),
                 popover: rgb(0xffffff),
                 divider: rgb(0x7c8798),
+                titlebar_backing: CLEAR,
                 chrome_backing: gpui::rgba(0xf4f5f7f5),
-                sidebar_backing: gpui::rgba(0xf4f5f7e6),
+                sidebar_backing: CLEAR,
                 floating_overlay: gpui::rgba(0xfffffff5),
                 shadow_ink: hsla(220. / 360., 0.38, 0.14, 1.),
             },
@@ -371,6 +361,8 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 placeholder: rgb(0x4b5669),
                 disabled: rgb(0x657184),
                 link: rgb(0x2457d6),
+                titlebar_link: rgb(0x0b2858),
+                chrome_icon: rgb(0x263449),
             },
             field: FieldColors {
                 surface: rgb(0xffffff),
@@ -382,48 +374,37 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             },
             scrollbar: ScrollbarColors {
                 track: rgb(0xffffff),
-                track_outline: rgb(0x3b4048),
-                idle: rgb(0x858c98),
+                idle: rgb(0x828282),
                 hover: rgb(0x647b9e),
                 drag: rgb(0x3f78bc),
             },
             sidebar_row: SidebarRowColors {
-                idle_indicator: gpui::rgba(0x00000000),
-                hover_indicator: rgb(0x596579),
-                pressed_indicator: rgb(0x2457d6),
+                section_text: rgb(0x1f2d40),
+                icon: rgb(0x263449),
                 hover: rgb(0xe9ebef),
                 pressed: rgb(0xdde3ec),
                 selected: rgb(0xdce8f8),
                 selected_hover: rgb(0xd1e1f7),
                 selected_pressed: rgb(0xc3d9f4),
-                selection_indicator: rgb(0x2457d6),
             },
             tree: TreeColors {
                 directory_text: rgb(0x4b5669),
                 island: TreeRowColors {
                     backing: rgb(0xffffff),
-                    idle_indicator: gpui::rgba(0x00000000),
                     hover: rgb(0xe9ebef),
                     pressed: rgb(0xdde3ec),
                     selected: rgb(0x2457d6),
                     selected_hover: rgb(0x1e4ebf),
                     selected_pressed: rgb(0x183f9e),
-                    hover_indicator: rgb(0x596579),
-                    pressed_indicator: rgb(0x2457d6),
-                    selected_indicator: rgb(0xffffff),
                     selected_text: rgb(0xffffff),
                 },
                 desk: TreeRowColors {
                     backing: gpui::rgba(0xf4f5f7e6),
-                    idle_indicator: gpui::rgba(0x00000000),
                     hover: rgb(0xe9ebef),
                     pressed: rgb(0xdde3ec),
                     selected: rgb(0xdce8f8),
                     selected_hover: rgb(0xd1e1f7),
                     selected_pressed: rgb(0xc3d9f4),
-                    hover_indicator: rgb(0x596579),
-                    pressed_indicator: rgb(0x2457d6),
-                    selected_indicator: rgb(0x2457d6),
                     selected_text: rgb(0x172033),
                 },
                 added: rgb(0x0e6137),
@@ -470,8 +451,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 range: rgb(0x30384a),
                 range_hover: rgb(0x39465d),
                 range_pressed: rgb(0x435570),
-                row_indicator: rgb(0xc5cfde),
-                range_indicator: rgb(0x89c7f7),
                 link: rgb(0x89c7f7),
             },
             markdown: MarkdownColors {
@@ -488,7 +467,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 selection_outline: rgb(0x89c7f7),
             },
             control: ControlColors {
-                idle: rgb(0x1d2027),
                 pill: rgb(0x30343d),
                 pill_hover: rgb(0x39404a),
                 pill_outline: rgb(0xaeb7c5),
@@ -534,7 +512,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                     selected: rgb(0x344a65),
                     selected_hover: rgb(0x3b5574),
                     selected_pressed: rgb(0x435f81),
-                    indicator: rgb(0xaeb7c5),
                 },
                 option_row: SettingsRowColors {
                     hover: rgb(0x414a59),
@@ -542,7 +519,6 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                     selected: rgb(0x344a65),
                     selected_hover: rgb(0x3b5574),
                     selected_pressed: rgb(0x435f81),
-                    indicator: rgb(0x89c7f7),
                 },
             },
             surface: SurfaceColors {
@@ -551,6 +527,7 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 island: rgb(0x30343d),
                 popover: rgb(0x30343d),
                 divider: rgb(0x8993a3),
+                titlebar_backing: gpui::rgba(0x1d2027b3),
                 chrome_backing: gpui::rgba(0x1d2027e6),
                 sidebar_backing: gpui::rgba(0x1d202780),
                 floating_overlay: gpui::rgba(0x272b33f5),
@@ -564,6 +541,8 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
                 placeholder: rgb(0xc5cfde),
                 disabled: rgb(0x96a1b0),
                 link: rgb(0x89c7f7),
+                titlebar_link: rgb(0x89c7f7),
+                chrome_icon: rgb(0xaeb7c5),
             },
             field: FieldColors {
                 surface: rgb(0x30343d),
@@ -575,48 +554,37 @@ pub fn resolve_software_palette(mode: SoftwareThemeMode) -> SoftwarePalette {
             },
             scrollbar: ScrollbarColors {
                 track: rgb(0x1d2027),
-                track_outline: rgb(0xc5cfde),
-                idle: rgb(0x858c98),
+                idle: rgb(0x828282),
                 hover: rgb(0x6d85a5),
                 drag: rgb(0x4c80bb),
             },
             sidebar_row: SidebarRowColors {
-                idle_indicator: gpui::rgba(0x00000000),
-                hover_indicator: rgb(0xaeb7c5),
-                pressed_indicator: rgb(0x89c7f7),
+                section_text: rgb(0xe2e6ed),
+                icon: rgb(0xaeb7c5),
                 hover: rgb(0x343b47),
                 pressed: rgb(0x414a59),
                 selected: rgb(0x344a65),
                 selected_hover: rgb(0x3b5574),
                 selected_pressed: rgb(0x435f81),
-                selection_indicator: rgb(0x89c7f7),
             },
             tree: TreeColors {
                 directory_text: rgb(0xc5cfde),
                 island: TreeRowColors {
                     backing: rgb(0x30343d),
-                    idle_indicator: gpui::rgba(0x00000000),
                     hover: rgb(0x414a59),
                     pressed: rgb(0x4a5669),
                     selected: rgb(0x2457a8),
                     selected_hover: rgb(0x2b64bf),
                     selected_pressed: rgb(0x1c4f9a),
-                    hover_indicator: rgb(0xc5cfde),
-                    pressed_indicator: rgb(0x89c7f7),
-                    selected_indicator: rgb(0xffffff),
                     selected_text: rgb(0xffffff),
                 },
                 desk: TreeRowColors {
                     backing: gpui::rgba(0x1d202780),
-                    idle_indicator: gpui::rgba(0x00000000),
                     hover: rgb(0x343b47),
                     pressed: rgb(0x414a59),
                     selected: rgb(0x344a65),
                     selected_hover: rgb(0x3b5574),
                     selected_pressed: rgb(0x435f81),
-                    hover_indicator: rgb(0xc5cfde),
-                    pressed_indicator: rgb(0x89c7f7),
-                    selected_indicator: rgb(0x89c7f7),
                     selected_text: rgb(0xd5dae3),
                 },
                 added: rgb(0xb2eabc),
@@ -668,11 +636,6 @@ pub const SIDEBAR_ROW_GAP: f32 = 4.;
 pub const SIDEBAR_ROW_INSET: f32 = 8.;
 /// Inner pad inside the capsule so the icon's left edge sits at 14 (inset + this).
 pub const SIDEBAR_ROW_PAD_X: f32 = 6.;
-/// Selected row's blue edge grows with interaction; matching pad adjustments
-/// keep the icon and label fixed at their regular positions.
-pub const SIDEBAR_ROW_INDICATOR_IDLE_WIDTH: f32 = 2.;
-pub const SIDEBAR_ROW_INDICATOR_HOVER_WIDTH: f32 = 4.;
-pub const SIDEBAR_ROW_INDICATOR_PRESSED_WIDTH: f32 = 6.;
 pub const SIDEBAR_ROW_RADIUS: f32 = 8.;
 /// Icon is 16 wide starting at 14; this gap puts the label at 34.
 pub const SIDEBAR_ICON_LABEL_GAP: f32 = 4.;
@@ -875,13 +838,31 @@ mod software_palette_tests {
         (light + 0.05) / (dark + 0.05)
     }
 
+    fn material_reference(mode: SoftwareThemeMode, wallpaper: Rgba, root: Rgba) -> Rgba {
+        // On macOS light appearance, NSVisualEffectMaterial::Sidebar replaces the
+        // raw wallpaper below the clear GPUI stage. Sample its light material
+        // range separately from the opaque/composited platform backings.
+        if cfg!(target_os = "macos") && mode == SoftwareThemeMode::Light {
+            if wallpaper == rgb(0x000000) {
+                rgb(0x929394)
+            } else {
+                rgb(0xf4f5f7)
+            }
+        } else {
+            root
+        }
+    }
+
     #[test]
     fn sidebar_text_survives_light_and_dark_wallpapers_and_row_states() {
         for mode in [SoftwareThemeMode::Light, SoftwareThemeMode::Dark] {
             let palette = resolve_software_palette(mode);
             for wallpaper in [rgb(0x000000), rgb(0xffffff)] {
                 let window = composite(palette.surface.window_backing, wallpaper);
-                let backing = composite(palette.surface.sidebar_backing, window);
+                let backing = composite(
+                    palette.surface.sidebar_backing,
+                    material_reference(mode, wallpaper, window),
+                );
                 let states = [
                     ("idle", backing),
                     ("hover", palette.sidebar_row.hover),
@@ -891,7 +872,7 @@ mod software_palette_tests {
                     ("selected pressed", palette.sidebar_row.selected_pressed),
                 ];
                 assert!(
-                    contrast(palette.text.section, backing) >= 4.5,
+                    contrast(palette.sidebar_row.section_text, backing) >= 4.5,
                     "{mode:?} section label on {wallpaper:?}"
                 );
                 for (name, surface) in states {
@@ -901,38 +882,9 @@ mod software_palette_tests {
                         contrast(palette.text.primary, surface)
                     );
                     assert!(
-                        contrast(palette.text.secondary, surface) >= 3.,
+                        contrast(palette.sidebar_row.icon, surface) >= 3.,
                         "{mode:?} icon on {name}: {}",
-                        contrast(palette.text.secondary, surface)
-                    );
-                }
-                for surface in [
-                    palette.sidebar_row.selected,
-                    palette.sidebar_row.selected_hover,
-                    palette.sidebar_row.selected_pressed,
-                ] {
-                    assert!(
-                        contrast(palette.sidebar_row.selection_indicator, surface) >= 3.,
-                        "{mode:?} selected row indicator: {}",
-                        contrast(palette.sidebar_row.selection_indicator, surface)
-                    );
-                }
-                for (name, indicator, surface) in [
-                    (
-                        "hover",
-                        palette.sidebar_row.hover_indicator,
-                        palette.sidebar_row.hover,
-                    ),
-                    (
-                        "pressed",
-                        palette.sidebar_row.pressed_indicator,
-                        palette.sidebar_row.pressed,
-                    ),
-                ] {
-                    assert!(
-                        contrast(indicator, surface) >= 3.,
-                        "{mode:?} {name} row indicator: {}",
-                        contrast(indicator, surface)
+                        contrast(palette.sidebar_row.icon, surface)
                     );
                 }
             }
@@ -953,23 +905,6 @@ mod software_palette_tests {
             for (index, color) in colors.iter().enumerate() {
                 assert!(colors[index + 1..].iter().all(|other| color != other));
             }
-        }
-    }
-
-    #[test]
-    fn selected_row_indicator_grows_on_hover_and_press_without_moving_content() {
-        let widths = [
-            SIDEBAR_ROW_INDICATOR_IDLE_WIDTH,
-            SIDEBAR_ROW_INDICATOR_HOVER_WIDTH,
-            SIDEBAR_ROW_INDICATOR_PRESSED_WIDTH,
-        ];
-        assert_eq!(widths, [2., 4., 6.]);
-        for pair in widths.windows(2) {
-            assert!(pair[1] - pair[0] >= 2.);
-        }
-        for width in widths {
-            assert!(width <= SIDEBAR_ROW_PAD_X);
-            assert_eq!(width + (SIDEBAR_ROW_PAD_X - width), SIDEBAR_ROW_PAD_X);
         }
     }
 
@@ -1028,7 +963,6 @@ mod software_palette_tests {
             assert_eq!(colors.thumb(true, false), colors.hover);
             assert_eq!(colors.thumb(true, true), colors.drag);
             assert_eq!(colors.thumb(false, true), colors.drag);
-            assert!(contrast(colors.track, colors.track_outline) >= 3.);
             for (name, thumb) in [
                 ("idle", colors.idle),
                 ("hover", colors.hover),
@@ -1048,10 +982,10 @@ mod software_palette_tests {
                     code_theme.slots.replaced_band,
                 ] {
                     assert!(
-                        contrast(colors.track, band).max(contrast(colors.track_outline, band))
-                            >= 3.,
-                        "{mode:?} track boundary on {} band {band:?}",
-                        code_theme.id
+                        contrast(colors.idle, band) >= 3.,
+                        "{mode:?} idle thumb on {} band {band:?}: {}",
+                        code_theme.id,
+                        contrast(colors.idle, band)
                     );
                 }
             }
@@ -1092,44 +1026,27 @@ mod software_palette_tests {
                             );
                         }
                     }
-                    for (state, fill, mark) in [
-                        ("hover", rows.hover, rows.hover_indicator),
-                        ("pressed", rows.pressed, rows.pressed_indicator),
-                        ("selected", rows.selected, rows.selected_indicator),
-                        (
-                            "selected hover",
-                            rows.selected_hover,
-                            rows.selected_indicator,
-                        ),
-                        (
-                            "selected pressed",
-                            rows.selected_pressed,
-                            rows.selected_indicator,
-                        ),
+                    for (state, fill) in [
+                        ("selected", rows.selected),
+                        ("selected hover", rows.selected_hover),
+                        ("selected pressed", rows.selected_pressed),
                     ] {
                         assert!(
-                            contrast(mark, fill) >= 3.,
-                            "{mode:?} {name} {state} indicator: {}",
-                            contrast(mark, fill)
+                            contrast(rows.selected_text, fill) >= 4.5,
+                            "{mode:?} {name} {state} name: {}",
+                            contrast(rows.selected_text, fill)
                         );
-                        if state.starts_with("selected") {
-                            assert!(
-                                contrast(rows.selected_text, fill) >= 4.5,
-                                "{mode:?} {name} {state} name: {}",
-                                contrast(rows.selected_text, fill)
-                            );
-                            if name == "desk" {
-                                for status in [
-                                    palette.tree.added,
-                                    palette.tree.deleted,
-                                    palette.tree.modified,
-                                ] {
-                                    assert!(
-                                        contrast(status, fill) >= 4.5,
-                                        "{mode:?} desk {state} status {status:?}: {}",
-                                        contrast(status, fill)
-                                    );
-                                }
+                        if name == "desk" {
+                            for status in [
+                                palette.tree.added,
+                                palette.tree.deleted,
+                                palette.tree.modified,
+                            ] {
+                                assert!(
+                                    contrast(status, fill) >= 4.5,
+                                    "{mode:?} desk {state} status {status:?}: {}",
+                                    contrast(status, fill)
+                                );
                             }
                         }
                     }
@@ -1151,7 +1068,6 @@ mod software_palette_tests {
                     ("island", settings.island),
                     ("card", settings.card),
                     ("popover", settings.popover),
-                    ("control idle", palette.control.idle),
                     ("control hover", palette.control.hover),
                     ("control pressed", palette.control.pressed),
                     ("control selected", palette.control.selected),
@@ -1207,19 +1123,12 @@ mod software_palette_tests {
                             "{mode:?} {name} {state} secondary icon/text"
                         );
                     }
-                    for fill in [rows.selected, rows.selected_hover, rows.selected_pressed] {
-                        assert!(
-                            contrast(rows.indicator, fill) >= 3.,
-                            "{mode:?} {name} selected indicator"
-                        );
-                    }
                     if name == "nav row" {
                         assert!(contrast(settings.focus_border, rows.selected) >= 3.);
                         assert!(contrast(settings.focus_border, rows.selected_hover) >= 3.);
                         assert!(contrast(settings.focus_border, rows.selected_pressed) >= 3.);
                     }
                     assert!(contrast(palette.text.secondary, rows.hover) >= 3.);
-                    assert!(contrast(rows.indicator, rows.pressed) >= 3.);
                 }
                 for surface in [settings.island, settings.card, settings.popover] {
                     assert!(contrast(settings.border, surface) >= 3.);
@@ -1239,10 +1148,6 @@ mod software_palette_tests {
                         palette.control.disabled_surface
                     ) >= 3.,
                     "{mode:?} disabled outline on disabled control surface"
-                );
-                assert!(
-                    contrast(palette.control.disabled_surface, palette.control.idle) >= 1.2,
-                    "{mode:?} disabled control backing must be distinguishable from enabled idle"
                 );
             }
             let tooltip = palette.tooltip;
@@ -1268,8 +1173,8 @@ mod software_palette_tests {
                 assert_eq!(desk, root, "{mode:?} desk must not compound window tint");
                 let chrome = composite(palette.surface.chrome_backing, desk);
                 for (name, fg) in [
-                    ("titlebar/status secondary", palette.text.secondary),
-                    ("titlebar feedback", palette.text.link),
+                    ("status secondary", palette.text.secondary),
+                    ("status feedback", palette.text.link),
                 ] {
                     assert!(
                         contrast(fg, chrome) >= 4.5,
@@ -1277,6 +1182,13 @@ mod software_palette_tests {
                         contrast(fg, chrome)
                     );
                 }
+                let titlebar = composite(
+                    palette.surface.titlebar_backing,
+                    material_reference(mode, wallpaper, desk),
+                );
+                assert!(contrast(palette.text.primary, titlebar) >= 4.5);
+                assert!(contrast(palette.text.titlebar_link, titlebar) >= 4.5);
+                assert!(contrast(palette.text.chrome_icon, titlebar) >= 3.);
                 for (name, surface) in [
                     ("island", palette.surface.island),
                     ("popover", palette.surface.popover),
@@ -1405,27 +1317,6 @@ mod software_palette_tests {
                 }
             }
             assert!(contrast(content.link, content.surface) >= 4.5);
-            for (name, indicator, backgrounds) in [
-                (
-                    "commit row",
-                    content.row_indicator,
-                    [content.row_hover, content.row_pressed],
-                ),
-                (
-                    "selected commit row",
-                    content.range_indicator,
-                    [content.range_hover, content.range_pressed],
-                ),
-            ] {
-                for bg in backgrounds {
-                    assert!(
-                        contrast(indicator, bg) >= 3.,
-                        "{mode:?} {name} interaction indicator: {}",
-                        contrast(indicator, bg)
-                    );
-                }
-            }
-            assert!(contrast(content.range_indicator, content.range) >= 3.);
             for (state, bg) in [
                 ("hover", content.copy_hover),
                 ("pressed", content.copy_pressed),

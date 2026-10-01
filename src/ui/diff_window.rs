@@ -1462,6 +1462,7 @@ fn render_titlebar(
     div()
         .id("diff-titlebar")
         .h(theme::TITLEBAR_HEIGHT)
+        .bg(theme::software_palette().surface.titlebar_backing)
         .flex_none()
         .flex()
         .items_center()
@@ -1592,12 +1593,8 @@ fn render_titlebar(
                 .children(view.export_status.as_ref().map(|status| {
                     div()
                         .flex_none()
-                        .px(px(4.))
-                        .py(px(2.))
-                        .rounded_md()
-                        .bg(theme::software_palette().surface.chrome_backing)
                         .ui_text_size(12., cx)
-                        .text_color(theme::software_palette().text.link)
+                        .text_color(theme::software_palette().text.titlebar_link)
                         .child(status.clone())
                 }))
                 .child(
@@ -2149,23 +2146,12 @@ fn render_comment_island(
                             Anchor::File { .. } => false,
                         };
                         let palette = theme::software_palette();
-                        let indicator = if selected {
-                            palette.text.link
-                        } else {
-                            palette.text.secondary
-                        };
                         div()
                             .id(("cmt", c.id as usize))
                             .mx_1()
                             .my_0p5()
                             .px_3()
                             .py_2()
-                            .border_1()
-                            .border_color(if selected {
-                                indicator
-                            } else {
-                                gpui::Rgba { a: 0., ..indicator }
-                            })
                             .rounded_lg()
                             .cursor_pointer()
                             .when(selected, |row| row.bg(palette.control.selected))
@@ -2175,9 +2161,6 @@ fn render_comment_island(
                                 } else {
                                     palette.control.hover
                                 })
-                                .border_color(indicator)
-                                .border_l_2()
-                                .pl(px(11.))
                             })
                             .active(move |row| {
                                 row.bg(if selected {
@@ -2185,9 +2168,6 @@ fn render_comment_island(
                                 } else {
                                     palette.control.pressed
                                 })
-                                .border_color(indicator)
-                                .border_l_4()
-                                .pl(px(9.))
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.select_comment(id, window, cx)
