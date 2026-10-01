@@ -5,8 +5,8 @@ use crate::ui::theme;
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
-/// Settings nav sidebar shell: fixed 200px, 10px padding, with a bounded
-/// backing so labels remain readable over the frosted desk.
+/// Settings nav sidebar shell: fixed 200px, 10px padding. The light appearance
+/// exposes the native frosted material; dark appearance adds a bounded tint.
 /// Focus, key context and actions live on the caller's wrapper.
 #[derive(IntoElement)]
 pub struct SettingsNav {
@@ -113,7 +113,7 @@ impl RenderOnce for NavItem {
         let label_color = if self.selected {
             palette.text.primary
         } else {
-            palette.text.secondary
+            palette.sidebar_row.section_text
         };
         let label = div()
             .flex_1()
@@ -181,7 +181,7 @@ impl RenderOnce for NavItem {
                                     } else {
                                         "chevron_right.svg"
                                     })
-                                    .text_color(palette.text.secondary),
+                                    .text_color(palette.sidebar_row.icon),
                             ),
                     )
                     .child(div().ui_label_size(14., cx).child(label)),

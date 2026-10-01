@@ -986,8 +986,8 @@ impl Render for SettingsView {
             .flex_col()
             .size_full()
             .overflow_hidden()
-            // The root tints the native material; the nav adds its own bounded
-            // backing so text contrast does not depend on the wallpaper.
+            // The nav uses the same light frosted material as the main sidebar.
+            // Dark appearance adds a bounded tint behind nav text.
             .bg(theme::software_palette().surface.window_backing)
             .font_family(appearance::ui_font(cx))
             // Unsized UI text inherits gpui's 1rem default (16px), scaled like the rest.

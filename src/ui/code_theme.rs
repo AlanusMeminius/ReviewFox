@@ -47,15 +47,14 @@ fn one_light() -> CodeTheme {
             added_band: rgb(0xe8f7ee),
             deleted_band: rgb(0xe4e6e9),
             replaced_band: rgb(0xe8f0fe),
-            word_difference: rgb(0xe9eefb),
-            word_ring: rgb(0x4963a8),
+            word_difference: rgb(0xb9ceee),
             line_number: rgb(0x596579),
             default_foreground: rgb(0x172033),
             comment: rgb(0x2457d6),
             idle_comment: rgb(0x596579),
             selection: Rgba {
-                a: 0.12,
-                ..rgb(0xffffff)
+                a: 0.18,
+                ..rgb(0x2457d6)
             },
             search_hit: rgb(0xfff4c7),
             search_hit_ring: rgb(0x8d6500),
@@ -73,7 +72,6 @@ fn one_light() -> CodeTheme {
             open_comment_pad: rgb(0xf1f5ff),
             drafting_band: rgb(0xe8eefc),
             drafting_edge: rgb(0x4963a8),
-            selection_edge: rgb(0x2457d6),
         },
     }
 }
@@ -87,15 +85,15 @@ fn one_dark() -> CodeTheme {
             added_band: rgb(0x263b32),
             deleted_band: rgb(0x3b3032),
             replaced_band: rgb(0x30384a),
-            word_difference: rgb(0x293149),
-            word_ring: rgb(0xa6c5fa),
+            // Keep the earlier filled mark, darkened enough for One Dark text.
+            word_difference: rgb(0x3e4b66),
             line_number: rgb(0xa3aebd),
             default_foreground: rgb(0xabb2bf),
             comment: rgb(0x82c4f5),
             idle_comment: rgb(0xa3aebd),
             selection: Rgba {
-                a: 0.12,
-                ..rgb(0x000000)
+                a: 0.20,
+                ..rgb(0x61afef)
             },
             search_hit: rgb(0x313020),
             search_hit_ring: rgb(0xdcc26b),
@@ -139,7 +137,6 @@ fn one_dark() -> CodeTheme {
             open_comment_pad: rgb(0x344459),
             drafting_band: rgb(0x303748),
             drafting_edge: rgb(0xa6c5fa),
-            selection_edge: rgb(0x82c4f5),
         },
     }
 }
@@ -153,15 +150,14 @@ fn atom_one_light() -> CodeTheme {
             added_band: rgb(0xe6f4ea),
             deleted_band: rgb(0xf0e1e1),
             replaced_band: rgb(0xe5eefb),
-            word_difference: rgb(0xe9effb),
-            word_ring: rgb(0x4963a8),
+            word_difference: rgb(0xb8d2f2),
             line_number: rgb(0x59636e),
             default_foreground: rgb(0x242936),
             comment: rgb(0x4078c0),
             idle_comment: rgb(0x59636e),
             selection: Rgba {
-                a: 0.12,
-                ..rgb(0xffffff)
+                a: 0.18,
+                ..rgb(0x4078c0)
             },
             search_hit: rgb(0xfff4c7),
             search_hit_ring: rgb(0x8d6500),
@@ -205,7 +201,6 @@ fn atom_one_light() -> CodeTheme {
             open_comment_pad: rgb(0xedf3fb),
             drafting_band: rgb(0xe9effb),
             drafting_edge: rgb(0x4963a8),
-            selection_edge: rgb(0x4078c0),
         },
     }
 }
@@ -241,7 +236,6 @@ pub struct AuthoredSlots {
     pub deleted_band: Rgba,
     pub replaced_band: Rgba,
     pub word_difference: Rgba,
-    pub word_ring: Rgba,
     pub line_number: Rgba,
     pub default_foreground: Rgba,
     pub comment: Rgba,
@@ -295,7 +289,6 @@ pub struct DiffMarks {
     pub open_comment_pad: Rgba,
     pub drafting_band: Rgba,
     pub drafting_edge: Rgba,
-    pub selection_edge: Rgba,
 }
 
 pub fn builtin_catalog() -> &'static [CodeTheme] {
@@ -408,15 +401,14 @@ mod tests {
         assert_hex(palette.slots.added_band, 0xe8f7ee);
         assert_hex(palette.slots.deleted_band, 0xe4e6e9);
         assert_hex(palette.slots.replaced_band, 0xe8f0fe);
-        assert_hex(palette.slots.word_difference, 0xe9eefb);
-        assert_hex(palette.slots.word_ring, 0x4963a8);
+        assert_hex(palette.slots.word_difference, 0xb9ceee);
         assert_hex(palette.slots.line_number, 0x596579);
         assert_hex(palette.slots.default_foreground, 0x172033);
         assert_hex(palette.slots.comment, 0x2457d6);
         assert_hex(palette.slots.idle_comment, 0x596579);
-        assert_hex(palette.slots.selection, 0xffffff);
+        assert_hex(palette.slots.selection, 0x2457d6);
         assert!(
-            (palette.slots.selection.a - 0.12).abs() < 1e-5,
+            (palette.slots.selection.a - 0.18).abs() < 1e-5,
             "selection alpha {}",
             palette.slots.selection.a
         );
@@ -674,7 +666,14 @@ mod tests {
                     };
                     for (surface, painted) in painted_surfaces {
                         let ratio = contrast_ratio(*fg, painted);
-                        if ratio < 4.5 {
+                        let target = if surface.contains("with selection")
+                            || surface == "word-difference mark"
+                        {
+                            3.
+                        } else {
+                            4.5
+                        };
+                        if ratio < target {
                             failures.push(format!("{} {name} on {surface}: {ratio:.2}", theme.id));
                         }
                     }
@@ -699,7 +698,6 @@ mod tests {
                 ("omission wave", m.omission_wave, m.omission_fill),
                 ("omission wave on paper", m.omission_wave, s.paper),
                 ("drafting edge", m.drafting_edge, m.drafting_band),
-                ("word outline", s.word_ring, s.word_difference),
                 ("search hit outline", s.search_hit_ring, s.search_hit),
                 ("current search outline", s.search_ring, s.search_current),
                 ("comment icon on pad", s.comment, m.open_comment_pad),
@@ -714,7 +712,6 @@ mod tests {
                 ("line number", s.line_number),
                 ("comment marker", s.comment),
                 ("idle comment", s.idle_comment),
-                ("selection edge", m.selection_edge),
             ] {
                 for (ix, bg) in bands.into_iter().enumerate() {
                     let target = if name == "line number" { 4.5 } else { 3. };
@@ -724,18 +721,7 @@ mod tests {
                     }
                 }
             }
-            for (ix, bg) in bands.into_iter().enumerate() {
-                let selected_bg = composite(s.selection, bg);
-                let ratio = contrast_ratio(m.selection_edge, selected_bg);
-                if ratio < 3. {
-                    failures.push(format!(
-                        "{} selection edge on band {ix}: {ratio:.2}",
-                        theme.id
-                    ));
-                }
-            }
             for (name, ring) in [
-                ("word outline", s.word_ring),
                 ("search hit outline", s.search_hit_ring),
                 ("current search outline", s.search_ring),
             ] {

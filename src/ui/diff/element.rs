@@ -1119,10 +1119,6 @@ impl Frame {
                         hline(x0, x1, row.y0, row.y1 - row.y0),
                         self.code_theme.slots.selection,
                     ));
-                    window.paint_quad(fill(
-                        hline(x0, x0 + 2., row.y0, row.y1 - row.y0),
-                        self.code_theme.marks.selection_edge,
-                    ));
                 }
                 if row.drafting {
                     window.paint_quad(fill(
@@ -1138,13 +1134,6 @@ impl Frame {
                 for &(a, b) in &row.marks {
                     let y = row.y0 + (self.row_h - mark_h) / 2.;
                     let rect = hline(text_x + a, text_x + b, y, mark_h);
-                    window.paint_quad(
-                        fill(
-                            hline(text_x + a - 1., text_x + b + 1., y - 1., mark_h + 2.),
-                            self.code_theme.slots.word_ring,
-                        )
-                        .corner_radii(px(3.)),
-                    );
                     window.paint_quad(
                         fill(rect, self.code_theme.slots.word_difference).corner_radii(px(2.)),
                     );

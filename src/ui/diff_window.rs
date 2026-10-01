@@ -1648,7 +1648,8 @@ fn render_tree_pane(
         .flex()
         .flex_col()
         .overflow_hidden()
-        // Stable backing keeps ChangedPath labels readable over native material.
+        // Light appearance exposes the native frosted material; dark appearance
+        // adds a bounded tint behind ChangedPath labels.
         .bg(theme::software_palette().tree.desk.backing)
         .child({
             let (scroll, sb) = scrollbar::vertical("diff-tree-sb", cx);
@@ -1824,6 +1825,7 @@ fn render_search_bar(
         .child(render_files_segment(files, cx))
         .child(
             IconButton::new("search-run", "search.svg", "Find")
+                .borderless()
                 .shortcut("Enter")
                 .disabled(total == 0)
                 .on_click(cx.listener(|this, _, _, cx| this.jump_search(1, cx))),
@@ -1837,18 +1839,21 @@ fn render_search_bar(
         )
         .child(
             IconButton::new("search-prev", "chevron_up.svg", "Previous Match")
+                .borderless()
                 .shortcut("Shift-Enter")
                 .disabled(total == 0)
                 .on_click(cx.listener(|this, _, _, cx| this.jump_search(-1, cx))),
         )
         .child(
             IconButton::new("search-next", "chevron_down.svg", "Next Match")
+                .borderless()
                 .shortcut("Enter")
                 .disabled(total == 0)
                 .on_click(cx.listener(|this, _, _, cx| this.jump_search(1, cx))),
         )
         .child(
             IconButton::new("search-close", "close.svg", "Close Find")
+                .borderless()
                 .shortcut("Esc")
                 .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx))),
         )

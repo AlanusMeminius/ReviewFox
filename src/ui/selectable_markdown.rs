@@ -6,7 +6,7 @@ use std::ops::Range;
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Entity, FocusHandle, Focusable, Global,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, Render, SharedString, Window, canvas, div, fill, point, prelude::*, px, size,
+    Point, Render, SharedString, Window, canvas, div, fill, point, prelude::*,
 };
 
 use super::appearance::{self, UiTextSize};
@@ -345,18 +345,6 @@ fn paint_selection_rect(
     colors: theme::MarkdownColors,
 ) {
     window.paint_quad(fill(bounds, colors.selection));
-    let width = bounds.size.width;
-    window.paint_quad(fill(
-        Bounds::new(point(bounds.left(), bounds.top()), size(width, px(1.))),
-        colors.selection_outline,
-    ));
-    window.paint_quad(fill(
-        Bounds::new(
-            point(bounds.left(), bounds.bottom() - px(1.)),
-            size(width, px(1.)),
-        ),
-        colors.selection_outline,
-    ));
 }
 
 fn index_for_position(
