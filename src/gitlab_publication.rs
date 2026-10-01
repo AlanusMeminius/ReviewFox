@@ -84,6 +84,11 @@ pub enum UpdateOutcome {
     Failed(String),
     Unknown(String),
 }
+pub enum DeleteOutcome {
+    Confirmed,
+    Failed(String),
+    Unknown(String),
+}
 
 impl GitLabPublication {
     pub fn new(http: Arc<dyn HttpClient>) -> Self {
@@ -444,6 +449,41 @@ impl GitLabPublication {
             Ok((status, _, _)) => {
                 UpdateOutcome::Unknown(format!("GitLab HTTP {status}; update may have succeeded"))
             }
+        }
+    }
+
+    pub async fn delete_known(
+        &self,
+        origin: &ReviewOrigin,
+        connection: &Connection,
+        record: &PublicationRecord,
+    ) -> DeleteOutcome {
+        let Ok(endpoint) = Self::endpoint(origin) else {
+            return DeleteOutcome::Failed("No GitLab target".into());
+        };
+        let Some(receipt) = record.receipt() else {
+            return DeleteOutcome::Failed("Remote identity unavailable".into());
+        };
+        let discussion_id = url::form_urlencoded::byte_serialize(receipt.discussion_id.as_bytes())
+            .collect::<String>();
+        let url = format!(
+            "{endpoint}/discussions/{discussion_id}/notes/{}",
+            receipt.note_id
+        );
+        match self
+            .request(http::Method::DELETE, url, &connection.pat, None)
+            .await
+        {
+            Ok((204, _, _)) => DeleteOutcome::Confirmed,
+            Ok((status, _, _))
+                if matches!(status, 400 | 401 | 403 | 404 | 405 | 409 | 413 | 422 | 429) =>
+            {
+                DeleteOutcome::Failed(status_message(status))
+            }
+            Ok((status, _, _)) => {
+                DeleteOutcome::Unknown(format!("GitLab HTTP {status}; deletion may have succeeded"))
+            }
+            Err(message) => DeleteOutcome::Unknown(message.into()),
         }
     }
 

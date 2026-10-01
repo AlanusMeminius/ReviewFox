@@ -62,7 +62,20 @@ impl OpenReview {
 
     pub fn with_publication_store(mut self, store: PublicationStore) -> Self {
         self.publication_store = Some(store);
+        self.complete_confirmed_deletions();
         self
+    }
+
+    fn complete_confirmed_deletions(&mut self) {
+        let ids: Vec<_> = self
+            .review
+            .comments
+            .iter()
+            .map(|comment| comment.id)
+            .collect();
+        for id in ids {
+            self.complete_delete(id);
+        }
     }
 
     pub fn unavailable(
@@ -153,6 +166,7 @@ impl OpenReview {
             self.origin = origin;
             self.set_path(path);
         }
+        self.complete_confirmed_deletions();
         self.snapshot(None)
     }
 
@@ -306,6 +320,32 @@ impl OpenReview {
         }
         self.persist();
         self.snapshot(None)
+    }
+
+    /// Complete a remote delete only for the saved body the user deleted. Later
+    /// local saves, active input and other targets' counterparts keep the draft.
+    pub fn complete_delete(&mut self, id: u64) -> PathView {
+        if self.dock.is_some_and(|dock| dock.editing == Some(id)) {
+            return self.snapshot(None);
+        }
+        let Some(store) = &self.publication_store else {
+            return self.snapshot(None);
+        };
+        match store.load(&self.review.comparison, &self.origin, id) {
+            Ok(Some(record))
+                if record.deletion == Some(crate::publication::DeleteStatus::Confirmed)
+                    && self.review.comments.iter().any(|comment| {
+                        comment.id == id && record.deletion_body.as_deref() == Some(&comment.body)
+                    }) =>
+            {
+                self.delete(id)
+            }
+            Ok(_) => self.snapshot(None),
+            Err(error) => {
+                self.storage_error = Some(format!("{error:#}"));
+                self.snapshot(None)
+            }
+        }
     }
 
     fn set_path(&mut self, path: String) {

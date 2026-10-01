@@ -1,5 +1,5 @@
 use crate::publication::{
-    Connection, EditStatus, PublicationRecord, PublicationService, PublicationState,
+    Connection, DeleteStatus, EditStatus, PublicationRecord, PublicationService, PublicationState,
     PublicationStore, ReviewOrigin,
 };
 use gpui::{
@@ -115,6 +115,8 @@ pub struct DiffView {
     publication_error: Option<String>,
     publishing: HashSet<(Comparison, ReviewOrigin, u64)>,
     updating: HashSet<(Comparison, ReviewOrigin, u64)>,
+    deleting: HashSet<(Comparison, ReviewOrigin, u64)>,
+    queued_deletes: HashSet<(Comparison, ReviewOrigin, u64)>,
     queued_updates: HashSet<(Comparison, ReviewOrigin, u64)>,
     refreshing: HashSet<(Comparison, ReviewOrigin)>,
     export_status: Option<String>,
@@ -305,6 +307,8 @@ impl DiffView {
             publication_error: None,
             publishing: HashSet::new(),
             updating: HashSet::new(),
+            deleting: HashSet::new(),
+            queued_deletes: HashSet::new(),
             queued_updates: HashSet::new(),
             refreshing: HashSet::new(),
             export_status: None,
@@ -384,14 +388,26 @@ impl DiffView {
         self.publishing
             .iter()
             .chain(self.updating.iter())
+            .chain(self.deleting.iter())
             .any(|(comparison, _, comment)| {
                 comparison == &self.open_review.review().comparison && *comment == id
             })
     }
     fn can_delete_comment(&self, id: u64) -> bool {
         self.publication_error.is_none()
-            && !self.publication_in_progress(id)
-            && !self.publication_protected.contains(&id)
+            && self.open_review.storage_error().is_none()
+            && match self.publication_records.get(&id) {
+                Some(record) => {
+                    !matches!(
+                        record.deletion,
+                        Some(DeleteStatus::Sending | DeleteStatus::Unknown(_))
+                    ) && (!matches!(record.state, PublicationState::Failed(_))
+                        || !self.publication_in_progress(id))
+                }
+                None => {
+                    !self.publication_in_progress(id) && !self.publication_protected.contains(&id)
+                }
+            }
     }
 
     fn can_publish(&self, id: u64) -> bool {
@@ -406,10 +422,21 @@ impl DiffView {
             && self.open_review.review().comments.iter().any(|c| {
                 c.id == id && matches!(&c.anchor, Anchor::Line { span, .. } if span.count==1)
             })
-            && self
-                .publication_records
-                .get(&id)
-                .is_none_or(|record| matches!(record.state, PublicationState::Failed(_)))
+            && self.publication_records.get(&id).is_none_or(|record| {
+                (matches!(record.state, PublicationState::Failed(_))
+                    || record.website_deleted
+                    || record.deletion == Some(DeleteStatus::Confirmed))
+                    && !matches!(
+                        record.deletion,
+                        Some(DeleteStatus::Sending | DeleteStatus::Unknown(_))
+                    )
+                    && !record.edit.as_ref().is_some_and(|edit| {
+                        matches!(
+                            edit.status,
+                            EditStatus::Sending { .. } | EditStatus::Unknown { .. }
+                        )
+                    })
+            })
     }
 
     fn publish_comment(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -423,8 +450,18 @@ impl DiffView {
         let contexts = self.open_review.contexts().clone();
         let origin = self.open_review.origin().clone();
         let key = (review.comparison.clone(), origin.clone(), id);
-        self.publishing.insert(key.clone());
         let service = PublicationService::new(cx.http_client(), store);
+        match service.queue_create(&review, &origin, id) {
+            Ok(record) => {
+                self.publication_records.insert(id, record);
+            }
+            Err(error) => {
+                self.publication_error = Some(format!("{error:#}"));
+                cx.notify();
+                return;
+            }
+        }
+        self.publishing.insert(key.clone());
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -466,6 +503,7 @@ impl DiffView {
                         this.queue_comment_update(id, cx);
                     }
                 }
+                this.continue_deletions(&key, cx);
                 cx.notify();
             });
         })
@@ -477,6 +515,125 @@ impl DiffView {
         self.publication_store
             .clone()
             .map(|store| PublicationService::new(cx.http_client(), store))
+    }
+    fn continue_deletions(
+        &mut self,
+        finished: &(Comparison, ReviewOrigin, u64),
+        cx: &mut Context<Self>,
+    ) {
+        let keys: Vec<_> = self
+            .queued_deletes
+            .iter()
+            .filter(|key| key.0 == finished.0 && key.2 == finished.2)
+            .cloned()
+            .collect();
+        for key in keys {
+            let Some(store) = &self.publication_store else {
+                continue;
+            };
+            let Ok(Some(record)) = store.load(&key.0, &key.1, key.2) else {
+                continue;
+            };
+            if record.deletion == Some(DeleteStatus::Confirmed) {
+                self.queued_deletes.remove(&key);
+                if self.open_review.review().comparison == key.0
+                    && self.open_review.origin().same_target(&key.1)
+                {
+                    let view = self.open_review.complete_delete(key.2);
+                    self.apply_review(&view, cx);
+                    self.reload_publications();
+                }
+            } else if record.receipt().is_some() && record.deletion == Some(DeleteStatus::Pending) {
+                self.start_delete(key, false, cx);
+            }
+        }
+    }
+    fn start_delete(
+        &mut self,
+        key: (Comparison, ReviewOrigin, u64),
+        confirm_changed_body: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .publishing
+            .iter()
+            .chain(self.updating.iter())
+            .chain(self.deleting.iter())
+            .any(|active| active.0 == key.0 && active.2 == key.2)
+        {
+            return;
+        }
+        let Some(service) = self.publication_service(cx) else {
+            return;
+        };
+        let Ok(Some(record)) = service.store.load(&key.0, &key.1, key.2) else {
+            return;
+        };
+        if record.receipt().is_none()
+            || record.website_deleted
+            || record.edit.as_ref().is_some_and(|edit| {
+                matches!(
+                    edit.status,
+                    EditStatus::Sending { .. } | EditStatus::Unknown { .. }
+                )
+            })
+        {
+            return;
+        }
+        self.queued_deletes.remove(&key);
+        self.queued_updates.remove(&key);
+        self.deleting.insert(key.clone());
+        let task_key = key.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    service
+                        .delete(
+                            &task_key.0,
+                            &task_key.1,
+                            task_key.2,
+                            &Self::saved_connection(),
+                            confirm_changed_body,
+                        )
+                        .await
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.deleting.remove(&key);
+                if this.open_review.review().comparison == key.0
+                    && this.open_review.origin().same_target(&key.1)
+                {
+                    match result {
+                        Ok(record) => {
+                            if record.deletion == Some(DeleteStatus::Confirmed) {
+                                let view = this.open_review.complete_delete(key.2);
+                                this.apply_review(&view, cx);
+                            }
+                            this.reload_publications();
+                        }
+                        Err(error) => {
+                            this.publication_error = Some(format!("Delete failed: {error:#}"));
+                        }
+                    }
+                }
+                this.continue_deletions(&key, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    fn retry_delete(&mut self, id: u64, confirm_changed_body: bool, cx: &mut Context<Self>) {
+        self.start_delete(
+            (
+                self.open_review.review().comparison.clone(),
+                self.open_review.origin().clone(),
+                id,
+            ),
+            confirm_changed_body,
+            cx,
+        );
     }
     fn saved_connection() -> Connection {
         Connection::new(
@@ -494,7 +651,12 @@ impl DiffView {
         let ids: Vec<_> = self
             .publication_records
             .iter()
-            .filter_map(|(id, record)| record.receipt().map(|_| *id))
+            .filter_map(|(id, record)| {
+                record
+                    .receipt()
+                    .filter(|_| record.deletion != Some(DeleteStatus::Confirmed))
+                    .map(|_| *id)
+            })
             .collect();
         if ids.is_empty() {
             return;
@@ -605,7 +767,8 @@ impl DiffView {
         let Some(record) = self.publication_records.get(&id) else {
             return;
         };
-        if record.website_deleted
+        if record.deletion.is_some()
+            || record.website_deleted
             || record.edit.as_ref().is_none_or(|edit| {
                 matches!(
                     edit.status,
@@ -664,6 +827,7 @@ impl DiffView {
                         this.update_comment(id, false, cx);
                     }
                 }
+                this.continue_deletions(&key, cx);
                 cx.notify();
             });
         })
@@ -1521,6 +1685,41 @@ impl DiffView {
     /// wash if it pointed at this comment's span.
     fn delete_comment(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_delete_comment(id) {
+            return;
+        }
+        if self.publication_records.get(&id).is_some_and(|record| {
+            !matches!(record.state, PublicationState::Failed(_))
+                && record.deletion != Some(DeleteStatus::Confirmed)
+        }) {
+            let Some(service) = self.publication_service(cx) else {
+                return;
+            };
+            let Some(body) = self
+                .open_review
+                .review()
+                .comments
+                .iter()
+                .find(|comment| comment.id == id)
+                .map(|comment| comment.body.clone())
+            else {
+                return;
+            };
+            let key = (
+                self.open_review.review().comparison.clone(),
+                self.open_review.origin().clone(),
+                id,
+            );
+            match service.queue_delete(&key.0, &key.1, id, &body) {
+                Ok(record) => {
+                    self.publication_records.insert(id, record);
+                    self.queued_deletes.insert(key.clone());
+                    self.start_delete(key, false, cx);
+                }
+                Err(error) => {
+                    self.publication_error = Some(format!("{error:#}"));
+                }
+            }
+            cx.notify();
             return;
         }
         let clear_wash = self.comment_target(id).is_some_and(|(side, span)| {
@@ -2900,7 +3099,7 @@ fn render_comment_island(
                                     .child(c.body),
                             )
                             .child(div().mt(px(4.)).ui_text_size(11., cx).text_color(palette.text.secondary).child(
-                                if view.publication_in_progress(id) { "Publishing to GitLab…".into() }
+                                if view.publication_in_progress(id) { "Syncing with GitLab…".into() }
                                 else if let Some(error) = &view.publication_error { error.clone() }
                                 else if let Some(record) = view.publication_records.get(&id) { record.status_label() }
                                 else if view.publication_protected.contains(&id) { "Published or awaiting confirmation on another MR".into() }
@@ -2913,7 +3112,18 @@ fn render_comment_island(
                                 let label=match (receipt.outdated,receipt.resolved) {(Some(true),Some(true))=>"Outdated · resolved on GitLab",(Some(true),_)=>"Outdated on GitLab",(_,Some(true))=>"Resolved on GitLab",_=>""};
                                 row.child(div().ui_text_size(11.,cx).text_color(palette.text.secondary).child(label))
                             })
-                            .when(view.publication_records.get(&id).is_some_and(|record|record.edit.is_some()),|row| {
+                            .when(view.publication_records.get(&id).is_some_and(|record|record.deletion.is_some()),|row| {
+                                let record=view.publication_records.get(&id).unwrap();
+                                match record.deletion.as_ref().unwrap() {
+                                    DeleteStatus::Conflict {website_body} => row
+                                        .child(div().mt(px(6.)).ui_text_size(11.,cx).child("Website body:").child(div().child(website_body.clone())))
+                                        .child(div().id(("confirm-delete",id as usize)).cursor_pointer().ui_text_size(11.,cx).text_color(palette.text.link).child("Delete this website comment").on_click(cx.listener(move|this,_,_,cx|{cx.stop_propagation();this.retry_delete(id,true,cx);}))),
+                                    DeleteStatus::Pending | DeleteStatus::Failed(_) if record.receipt().is_some() && !record.website_deleted => row
+                                        .child(div().id(("retry-delete",id as usize)).cursor_pointer().ui_text_size(11.,cx).text_color(palette.text.link).child("Retry delete").on_click(cx.listener(move|this,_,_,cx|{cx.stop_propagation();this.retry_delete(id,false,cx);}))),
+                                    _ => row,
+                                }
+                            })
+                            .when(view.publication_records.get(&id).is_some_and(|record|record.edit.is_some() && record.deletion.is_none()),|row| {
                                 let record=view.publication_records.get(&id).unwrap();
                                 match &record.edit.as_ref().unwrap().status {
                                     EditStatus::Conflict {website_body}=>row.child(div().mt(px(6.)).ui_text_size(11.,cx).child("Website body:").child(div().child(website_body.clone())))

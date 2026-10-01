@@ -8,7 +8,9 @@ Publish a local DraftComment explicitly from its complete GitLab MR Review. A PA
 
 Saving a published body updates its existing GitLab note. Opening a Review or clicking Refresh GitLab reads its known counterparts. Website-only edits are adopted; simultaneous local and website edits show both bodies for an explicit choice. Active editor input is preserved. Failed updates require a manual retry; uncertain outcomes retain the sent body and original correspondence. Reopening never sends writes.
 
-The pre-update read detects ordinary conflicts but is not an atomic conditional update: a website edit can still arrive between reading and writing. Remote placement and resolution are separate from synchronization; outdated status is shown only if the server supplies it.
+Deleting a published comment checks the same GitLab note first. A changed website body requires confirmation again; a website-deleted note retains local work and needs an explicit Publish to recreate it. Delete failures retain the correspondence for manual retry. A delete requested during a live create or update is saved and serialized after that request; uncertainty blocks another write. Confirmed deletion clears the local comment only when its body has not changed, no editor is active, and no other MR still owns a counterpart. Newer local work is retained.
+
+The read before an update or delete detects ordinary conflicts but is not an atomic conditional write: a website edit can still arrive between reading and writing. Remote placement and resolution are separate from synchronization; outdated status is shown only if the server supplies it.
 
 ## Requirements
 
