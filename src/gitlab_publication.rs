@@ -597,7 +597,7 @@ impl GitLabPublication {
                 http::Method::PUT,
                 url,
                 &connection.pat,
-                Some(serde_json::json!({"body":record.remote_body()})),
+                Some(serde_json::json!({"body":record.body})),
             )
             .await
         {
@@ -612,7 +612,7 @@ impl GitLabPublication {
                     Ok(note)
                         if note.id == receipt.note_id
                             && Some(note.author.id) == record.author_id
-                            && note.body == record.remote_body() =>
+                            && note.body == record.body =>
                     {
                         UpdateOutcome::Confirmed(RemoteNote {
                             body: record.body.clone(),

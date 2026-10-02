@@ -446,10 +446,14 @@ impl PublicationRecord {
                 .iter()
                 .map(|attempt| &attempt.operation_id),
         ) {
-            let marker = format!("<!-- reviewfox:operation={operation} -->");
-            body = body
-                .replace(&format!("\n\n{marker}"), "")
-                .replace(&marker, "");
+            // Website editors may remove whitespace inside HTML comments. Hide
+            // only our exact operation ID; other comments remain user content.
+            let marker = regex::Regex::new(&format!(
+                r"(?:\r?\n\r?\n)?<!--[ \t\r\n]*reviewfox:operation={}[ \t\r\n]*-->",
+                regex::escape(operation)
+            ))
+            .expect("escaped operation marker pattern");
+            body = marker.replace_all(&body, "").into_owned();
         }
         body
     }
@@ -597,16 +601,16 @@ pub struct PublicationBatch {
     pending: std::collections::VecDeque<(u64, String)>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
-#[derive(Clone)]
-pub struct BatchCancellation(Arc<std::sync::atomic::AtomicBool>);
-impl BatchCancellation {
+#[derive(Clone, Default)]
+pub struct PublicationCancellation(Arc<std::sync::atomic::AtomicBool>);
+impl PublicationCancellation {
     pub fn cancel(&self) {
         self.0.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 impl PublicationBatch {
-    pub fn cancellation(&self) -> BatchCancellation {
-        BatchCancellation(self.cancelled.clone())
+    pub fn cancellation(&self) -> PublicationCancellation {
+        PublicationCancellation(self.cancelled.clone())
     }
     pub fn remaining(&self) -> usize {
         self.pending.len()
@@ -1438,6 +1442,7 @@ impl PublicationService {
         Ok(current)
     }
 
+    #[cfg(test)]
     pub async fn publish(
         &self,
         review: &Review,
@@ -1448,6 +1453,25 @@ impl PublicationService {
     ) -> Result<PublicationRecord> {
         self.publish_with_cancellation(review, contexts, origin, comment_id, connection, None)
             .await
+    }
+    pub async fn publish_cancellable(
+        &self,
+        review: &Review,
+        contexts: &ReviewContexts,
+        origin: &ReviewOrigin,
+        comment_id: u64,
+        connection: &Connection,
+        cancellation: &PublicationCancellation,
+    ) -> Result<PublicationRecord> {
+        self.publish_with_cancellation(
+            review,
+            contexts,
+            origin,
+            comment_id,
+            connection,
+            Some(&cancellation.0),
+        )
+        .await
     }
     async fn publish_with_cancellation(
         &self,
@@ -1570,6 +1594,24 @@ impl PublicationService {
         }
         record.state = self.adapter.create(origin, connection, &record).await;
         self.save_create(&review.comparison, origin, comment_id, &mut record)?;
+        if record.receipt().is_some()
+            && record.edit.is_none()
+            && record.deletion.is_none()
+            && !cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            // This is part of the still-serialized create, never a replayable
+            // background edit. The native identity must be durable first.
+            if let UpdateOutcome::Failed(message) | UpdateOutcome::Unknown(message) =
+                self.adapter.update_known(origin, connection, &record).await
+            {
+                log::warn!("Published comment marker cleanup incomplete: {message}");
+            }
+            // A save/delete queued while cleanup was in flight still wins.
+            record = self
+                .store
+                .load(&review.comparison, origin, comment_id)?
+                .context("Published comment record unavailable after cleanup")?;
+        }
         Ok(record)
     }
 }
@@ -1624,6 +1666,36 @@ mod tests {
             .body(AsyncBody::from(value.to_string()))
             .unwrap()
     }
+    // Position fixtures focus on POST payloads; accept the subsequent body-only
+    // cleanup using the native note ID in its URL.
+    async fn accept_cleanup(
+        request: &mut http::Request<AsyncBody>,
+    ) -> Option<http::Response<AsyncBody>> {
+        if request.method() != http::Method::PUT {
+            return None;
+        }
+        let note_id: u64 = request
+            .uri()
+            .path()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut bytes = Vec::new();
+        request.body_mut().read_to_end(&mut bytes).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(payload.get("position").is_none());
+        assert!(
+            !payload["body"]
+                .as_str()
+                .unwrap()
+                .contains("reviewfox:operation=")
+        );
+        Some(response(
+            serde_json::json!({"id":note_id,"body":payload["body"],"author":{"id":42}}),
+        ))
+    }
     fn preflight(path: &str) -> Option<serde_json::Value> {
         if path.ends_with("/user") {
             Some(serde_json::json!({"id":42}))
@@ -1640,6 +1712,9 @@ mod tests {
         let open = drafted(directory, Side::Postimage, 2);
         let store = PublicationStore::new(directory.join("remote"));
         let client = FakeHttpClient::create(|mut request| async move {
+            if let Some(response) = accept_cleanup(&mut request).await {
+                return Ok(response);
+            }
             if let Some(value) = preflight(request.uri().path()) {
                 return Ok(response(value));
             }
@@ -1756,6 +1831,9 @@ mod tests {
         assert_eq!(reserved.body, "newer C");
         assert_eq!(reserved.absent_updates[0].sent_body, "sent B");
         let creating = FakeHttpClient::create(|mut request| async move {
+            if let Some(response) = accept_cleanup(&mut request).await {
+                return Ok(response);
+            }
             if let Some(value) = preflight(request.uri().path()) {
                 return Ok(response(value));
             }
@@ -1824,6 +1902,9 @@ mod tests {
             .reconcile(&comparison(), &origin(), 1, "please explain", false, read)
             .unwrap();
         let created_http = FakeHttpClient::create(|mut request| async move {
+            if let Some(response) = accept_cleanup(&mut request).await {
+                return Ok(response);
+            }
             if let Some(value) = preflight(request.uri().path()) {
                 return Ok(response(value));
             }
@@ -2145,6 +2226,9 @@ mod tests {
             let old_visible = reserved.visible_body(&lost.remote_body());
             assert_eq!(old_visible, "please explain");
             let success = FakeHttpClient::create(|mut request| async move {
+                if let Some(response) = accept_cleanup(&mut request).await {
+                    return Ok(response);
+                }
                 if let Some(value) = preflight(request.uri().path()) {
                     return Ok(response(value));
                 }
@@ -2419,6 +2503,9 @@ mod tests {
         }
         let store = PublicationStore::new(directory.path().join("remote"));
         let client = FakeHttpClient::create(|mut request| async move {
+            if let Some(response) = accept_cleanup(&mut request).await {
+                return Ok(response);
+            }
             if let Some(value) = preflight(request.uri().path()) {
                 return Ok(response(value));
             }
@@ -2470,6 +2557,9 @@ mod tests {
             vec![2]
         );
         let retry_http = FakeHttpClient::create(|mut request| async move {
+            if let Some(response) = accept_cleanup(&mut request).await {
+                return Ok(response);
+            }
             if let Some(value) = preflight(request.uri().path()) {
                 return Ok(response(value));
             }
@@ -2520,6 +2610,9 @@ mod tests {
         open.commit("second draft");
         let store = PublicationStore::new(directory.path().join("remote"));
         let client = FakeHttpClient::create(|mut request| async move {
+            if let Some(response) = accept_cleanup(&mut request).await {
+                return Ok(response);
+            }
             if let Some(value) = preflight(request.uri().path()) {
                 return Ok(response(value));
             }
@@ -2614,13 +2707,10 @@ mod tests {
         use futures::FutureExt;
         let directory = tempfile::tempdir().unwrap();
         let (mut open, store) = published(directory.path());
-        let original = store.load(&comparison(), &origin(), 1).unwrap().unwrap();
-        let marker = original.marker();
         let (release, wait) = futures::channel::oneshot::channel::<()>();
         let waiting = Arc::new(std::sync::Mutex::new(Some(wait)));
         let client = FakeHttpClient::create(move |mut request| {
             let waiting = waiting.clone();
-            let marker = marker.clone();
             async move {
                 if request.uri().path().ends_with("/user") {
                     return Ok(response(serde_json::json!({"id":42})));
@@ -2633,7 +2723,7 @@ mod tests {
                 let mut bytes = Vec::new();
                 request.body_mut().read_to_end(&mut bytes).await.unwrap();
                 let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                assert_eq!(payload["body"], format!("body B\n\n{marker}"));
+                assert_eq!(payload["body"], "body B");
                 let wait = waiting.lock().unwrap().take().unwrap();
                 wait.await.unwrap();
                 Ok(response(
@@ -2853,12 +2943,7 @@ mod tests {
             let mut bytes = Vec::new();
             request.body_mut().read_to_end(&mut bytes).await.unwrap();
             let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            assert!(
-                payload["body"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("local C\n\n<!-- reviewfox:operation=")
-            );
+            assert_eq!(payload["body"], "local C");
             Ok(response(
                 serde_json::json!({"id":51,"body":payload["body"],"author":{"id":42},"position":{"new_line":9}}),
             ))
@@ -2908,6 +2993,9 @@ mod tests {
             let client = FakeHttpClient::create(move |mut request| {
                 let fixture = fixture.clone();
                 async move {
+                    if let Some(response) = accept_cleanup(&mut request).await {
+                        return Ok(response);
+                    }
                     if request.uri().path().ends_with("/user") {
                         return Ok(response(serde_json::json!({"id":42})));
                     }
@@ -3043,6 +3131,9 @@ mod tests {
             let client = FakeHttpClient::create(move |mut request| {
                 let fixture = fixture.clone();
                 async move {
+                    if let Some(response) = accept_cleanup(&mut request).await {
+                        return Ok(response);
+                    }
                     if request.uri().path().ends_with("/user") {
                         return Ok(response(serde_json::json!({"id":42})));
                     }
@@ -3217,6 +3308,9 @@ mod tests {
             let client = FakeHttpClient::create(move |mut request| {
                 let fixture = fixture.clone();
                 async move {
+                    if let Some(response) = accept_cleanup(&mut request).await {
+                        return Ok(response);
+                    }
                     if request.uri().path().ends_with("/user") {
                         return Ok(response(serde_json::json!({"id":42})));
                     }
@@ -3339,6 +3433,9 @@ mod tests {
             let client = FakeHttpClient::create(move |mut request| {
                 let fixture = fixture.clone();
                 async move {
+                    if let Some(response) = accept_cleanup(&mut request).await {
+                        return Ok(response);
+                    }
                     if request.uri().path().ends_with("/user") {
                         return Ok(response(serde_json::json!({"id":42})));
                     }
@@ -3442,6 +3539,9 @@ mod tests {
                 let fixture = fixture.clone();
                 let expected = expected.clone();
                 async move {
+                    if let Some(response) = accept_cleanup(&mut request).await {
+                        return Ok(response);
+                    }
                     if request.uri().path().ends_with("/user") {
                         return Ok(response(serde_json::json!({"id":42})));
                     }
@@ -3757,6 +3857,9 @@ mod tests {
             assert_eq!(open.current().comments.len(), 1);
             if !denied {
                 let client = FakeHttpClient::create(|mut request| async move {
+                    if let Some(response) = accept_cleanup(&mut request).await {
+                        return Ok(response);
+                    }
                     if let Some(value) = preflight(request.uri().path()) {
                         return Ok(response(value));
                     }
@@ -4042,7 +4145,7 @@ mod tests {
     }
 
     #[test]
-    fn saving_a_published_body_updates_the_same_native_note_and_preserves_marker() {
+    fn saving_a_published_body_updates_the_same_native_note_without_marker() {
         let directory = tempfile::tempdir().unwrap();
         let (mut open, store) = published(directory.path());
         let old = store.load(&comparison(), &origin(), 1).unwrap().unwrap();
@@ -4070,7 +4173,7 @@ mod tests {
                 let mut bytes = Vec::new();
                 request.body_mut().read_to_end(&mut bytes).await.unwrap();
                 let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                assert_eq!(payload["body"], format!("new local body\n\n{marker}"));
+                assert_eq!(payload["body"], "new local body");
                 assert!(payload.get("position").is_none());
                 Ok(response(
                     serde_json::json!({"id":51,"body":payload["body"],"author":{"id":42},"position":{"new_line":2}}),
@@ -4094,6 +4197,109 @@ mod tests {
         assert_eq!(record.receipt().unwrap().confirmed_body, "new local body");
         assert!(record.edit.is_none());
         assert_eq!(open.current().comments[0].body, "new local body");
+    }
+
+    #[test]
+    fn marker_filter_preserves_other_comments_and_requires_complete_known_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let open = drafted(directory.path(), Side::Postimage, 2);
+        let mut record = PublicationRecord::fresh_create(&open.review().comments[0], None, false);
+        let operation = record.operation_id.clone();
+        record.prior_attempts.push(UncertainAttempt {
+            operation_id: "earlier-operation".into(),
+            sent_body: "old body".into(),
+            author_id: Some(42),
+            position: None,
+            candidates: vec![],
+        });
+        let content = format!(
+            "text\n<!--\tordinary comment\t-->\n<!--reviewfox:operation=another-operation-->\n\
+             <!--reviewfox:operation={operation}-suffix-->\n\
+             <!--reviewfox:operation={operation} extra-->"
+        );
+        for marker in [
+            record.marker(),
+            format!("<!--reviewfox:operation={operation}-->"),
+        ] {
+            let raw = format!("{content}\n\n{marker}");
+            assert_eq!(record.visible_body(&raw), content);
+        }
+        assert_eq!(
+            record.visible_body(&format!(
+                "{content}\r\n\r\n<!--\treviewfox:operation=earlier-operation\n-->"
+            )),
+            content
+        );
+        let incomplete = format!("text <!--reviewfox:operation={operation}");
+        assert_eq!(record.visible_body(&incomplete), incomplete);
+    }
+
+    #[test]
+    fn refresh_hides_reformatted_operation_markers_and_repairs_previously_adopted_bodies() {
+        for (whitespace, previously_adopted) in [("", false), ("\t\n", false), ("", true)] {
+            let directory = tempfile::tempdir().unwrap();
+            let (mut open, store) = published(directory.path());
+            let mut record = store.load(&comparison(), &origin(), 1).unwrap().unwrap();
+            let website_body = format!(
+                "website revision\n\n<!--{whitespace}reviewfox:operation={}{whitespace}-->",
+                record.operation_id
+            );
+            if previously_adopted {
+                open.adopt_body(1, &website_body);
+                let PublicationState::Published(receipt) = &mut record.state else {
+                    unreachable!()
+                };
+                receipt.confirmed_body = website_body.clone();
+                record.website_body = Some(website_body.clone());
+                store.save(&comparison(), &origin(), 1, &record).unwrap();
+            }
+            let client = FakeHttpClient::create(move |request| {
+                let website_body = website_body.clone();
+                async move {
+                    assert_eq!(request.method(), http::Method::GET);
+                    if request.uri().path().ends_with("/user") {
+                        return Ok(response(serde_json::json!({"id":42})));
+                    }
+                    assert!(request.uri().path().ends_with("/discussions/discussion-1"));
+                    Ok(response(serde_json::json!({"id":"discussion-1","notes":[{
+                        "id":51,"body":website_body,"author":{"id":42},"position":{"new_line":2}
+                    }]})))
+                }
+            });
+            let service = PublicationService::new(client, store.clone());
+            let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+            let remote =
+                futures::executor::block_on(service.read(&comparison(), &origin(), 1, &connection))
+                    .unwrap();
+            let result = service
+                .reconcile(
+                    &comparison(),
+                    &origin(),
+                    1,
+                    &open.current().comments[0].body,
+                    false,
+                    remote,
+                )
+                .unwrap();
+            assert_eq!(result.adopt_body.as_deref(), Some("website revision"));
+            open.adopt_body(1, result.adopt_body.as_deref().unwrap());
+            assert_eq!(
+                result.record.receipt().unwrap().confirmed_body,
+                "website revision"
+            );
+            assert!(result.record.edit.is_none());
+            assert!(
+                !crate::export::export_review(open.review(), open.contexts())
+                    .contains("reviewfox:operation")
+            );
+            let reopened = OpenReview::reopen(
+                comparison(),
+                "a.rs",
+                origin(),
+                ReviewStore::new(directory.path().join("local")),
+            );
+            assert_eq!(reopened.current().comments[0].body, "website revision");
+        }
     }
 
     #[test]
@@ -4305,6 +4511,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let open = drafted(directory.path(), Side::Postimage, 3);
         let client = FakeHttpClient::create(|mut request| async move {
+            if let Some(response) = accept_cleanup(&mut request).await {
+                return Ok(response);
+            }
             if let Some(value) = preflight(request.uri().path()) {
                 return Ok(response(value));
             }
@@ -4356,6 +4565,9 @@ mod tests {
         );
         open.commit("removed comment");
         let client = FakeHttpClient::create(|mut request| async move {
+            if let Some(response) = accept_cleanup(&mut request).await {
+                return Ok(response);
+            }
             if request.uri().path().ends_with("/user") {
                 return Ok(response(serde_json::json!({"id":42})));
             }
@@ -4445,6 +4657,297 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_failure_keeps_publication_confirmed_and_reopen_does_not_replay_it() {
+        for status in [403, 500, 0, 200] {
+            let directory = tempfile::tempdir().unwrap();
+            let open = drafted(directory.path(), Side::Postimage, 2);
+            let store = PublicationStore::new(directory.path().join("remote"));
+            let cleaned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = cleaned.clone();
+            let client = FakeHttpClient::create(move |mut request| {
+                let observed = observed.clone();
+                async move {
+                    if let Some(value) = preflight(request.uri().path()) {
+                        return Ok(response(value));
+                    }
+                    if request.method() == http::Method::PUT {
+                        observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        if status == 0 {
+                            anyhow::bail!("response lost");
+                        }
+                        return Ok(http::Response::builder()
+                            .status(status)
+                            .body(AsyncBody::from("unconfirmed cleanup"))
+                            .unwrap());
+                    }
+                    assert_eq!(request.method(), http::Method::POST);
+                    let mut bytes = Vec::new();
+                    request.body_mut().read_to_end(&mut bytes).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    Ok(response(serde_json::json!({"id":"discussion-1","notes":[{
+                        "id":51,"body":payload["body"],"author":{"id":42},"position":payload["position"]
+                    }]})))
+                }
+            });
+            let service = PublicationService::new(client, store.clone());
+            let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+            let result = futures::executor::block_on(service.publish(
+                open.review(),
+                open.contexts(),
+                &origin(),
+                1,
+                &connection,
+            ))
+            .unwrap();
+            assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(result.receipt().unwrap().note_id, 51);
+            assert_eq!(result.status_label(), "Published on GitLab");
+            assert!(result.edit.is_none());
+            let reopened = PublicationService::new(
+                FakeHttpClient::create(|_| async { panic!("do not replay creation or cleanup") }),
+                store,
+            );
+            assert_eq!(
+                reopened
+                    .restore_interrupted(&comparison(), &origin(), 1)
+                    .unwrap(),
+                result
+            );
+            assert_eq!(
+                futures::executor::block_on(reopened.publish(
+                    open.review(),
+                    open.contexts(),
+                    &origin(),
+                    1,
+                    &connection,
+                ))
+                .unwrap(),
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_edit_or_delete_during_create_skips_unsent_cleanup() {
+        use futures::FutureExt;
+        for action in ["cancel", "edit", "delete"] {
+            let directory = tempfile::tempdir().unwrap();
+            let open = drafted(directory.path(), Side::Postimage, 2);
+            let store = PublicationStore::new(directory.path().join("remote"));
+            let (release, waiting) = futures::channel::oneshot::channel::<()>();
+            let waiting = Arc::new(std::sync::Mutex::new(Some(waiting)));
+            let client = FakeHttpClient::create(move |mut request| {
+                let waiting = waiting.clone();
+                async move {
+                    if let Some(value) = preflight(request.uri().path()) {
+                        return Ok(response(value));
+                    }
+                    assert_eq!(
+                        request.method(),
+                        http::Method::POST,
+                        "cleanup must be skipped"
+                    );
+                    let mut bytes = Vec::new();
+                    request.body_mut().read_to_end(&mut bytes).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    let wait = waiting.lock().unwrap().take().unwrap();
+                    wait.await.unwrap();
+                    Ok(response(serde_json::json!({"id":"discussion-1","notes":[{
+                        "id":51,"body":payload["body"],"author":{"id":42},"position":payload["position"]
+                    }]})))
+                }
+            });
+            let service = PublicationService::new(client, store);
+            let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+            let cancellation = PublicationCancellation::default();
+            let target = origin();
+            let mut sending = Box::pin(service.publish_cancellable(
+                open.review(),
+                open.contexts(),
+                &target,
+                1,
+                &connection,
+                &cancellation,
+            ));
+            assert!(sending.as_mut().now_or_never().is_none());
+            match action {
+                "cancel" => cancellation.cancel(),
+                "edit" => {
+                    service
+                        .queue_edit(&comparison(), &target, 1, "newer body")
+                        .unwrap();
+                }
+                "delete" => {
+                    service
+                        .queue_delete(&comparison(), &target, 1, "please explain")
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            release.send(()).unwrap();
+            let result = futures::executor::block_on(sending).unwrap();
+            assert_eq!(result.receipt().unwrap().confirmed_body, "please explain");
+            if action == "edit" {
+                assert_eq!(result.edit.unwrap().body, "newer body");
+            }
+            if action == "delete" {
+                assert_eq!(result.deletion, Some(DeleteStatus::Pending));
+            }
+        }
+    }
+
+    #[test]
+    fn inflight_cleanup_preserves_newer_work_and_interruption_keeps_the_receipt() {
+        use futures::FutureExt;
+        for interrupted in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut open = drafted(directory.path(), Side::Postimage, 2);
+            let store = PublicationStore::new(directory.path().join("remote"));
+            let (release, waiting) = futures::channel::oneshot::channel::<()>();
+            let waiting = Arc::new(std::sync::Mutex::new(Some(waiting)));
+            let client = FakeHttpClient::create(move |mut request| {
+                let waiting = waiting.clone();
+                async move {
+                    if let Some(value) = preflight(request.uri().path()) {
+                        return Ok(response(value));
+                    }
+                    let mut bytes = Vec::new();
+                    request.body_mut().read_to_end(&mut bytes).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    if request.method() == http::Method::POST {
+                        return Ok(response(serde_json::json!({"id":"discussion-1","notes":[{
+                            "id":51,"body":payload["body"],"author":{"id":42},"position":payload["position"]
+                        }]})));
+                    }
+                    assert_eq!(request.method(), http::Method::PUT);
+                    assert_eq!(payload["body"], "please explain");
+                    let wait = waiting.lock().unwrap().take().unwrap();
+                    wait.await.unwrap();
+                    Ok(response(
+                        serde_json::json!({"id":51,"body":"please explain","author":{"id":42}}),
+                    ))
+                }
+            });
+            let service = PublicationService::new(client, store.clone());
+            let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+            let cancellation = PublicationCancellation::default();
+            let review = open.review().clone();
+            let contexts = open.contexts().clone();
+            let target = origin();
+            let mut sending = Box::pin(service.publish_cancellable(
+                &review,
+                &contexts,
+                &target,
+                1,
+                &connection,
+                &cancellation,
+            ));
+            assert!(sending.as_mut().now_or_never().is_none());
+            assert_eq!(
+                store
+                    .load(&comparison(), &target, 1)
+                    .unwrap()
+                    .unwrap()
+                    .receipt()
+                    .unwrap()
+                    .note_id,
+                51
+            );
+            open.begin_edit(1);
+            open.commit("newer body");
+            service
+                .queue_edit(&comparison(), &target, 1, "newer body")
+                .unwrap();
+            service
+                .queue_delete(&comparison(), &target, 1, "newer body")
+                .unwrap();
+            cancellation.cancel();
+            let result = if interrupted {
+                drop(sending);
+                drop(release);
+                let restarted = PublicationService::new(
+                    FakeHttpClient::create(|_| async { panic!("restart is read-only") }),
+                    store.clone(),
+                );
+                restarted
+                    .restore_interrupted(&comparison(), &target, 1)
+                    .unwrap()
+            } else {
+                release.send(()).unwrap();
+                futures::executor::block_on(sending).unwrap()
+            };
+            assert_eq!(result.receipt().unwrap().confirmed_body, "please explain");
+            assert_eq!(result.edit.unwrap().body, "newer body");
+            assert_eq!(result.deletion, Some(DeleteStatus::Pending));
+            assert_eq!(open.current().comments[0].body, "newer body");
+        }
+    }
+
+    #[test]
+    fn confirmed_creation_cleans_marker_only_after_saving_native_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let open = drafted(directory.path(), Side::Postimage, 2);
+        let store = PublicationStore::new(directory.path().join("remote"));
+        let observer = store.clone();
+        let cleaned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = cleaned.clone();
+        let client = FakeHttpClient::create(move |mut request| {
+            let observer = observer.clone();
+            let observed = observed.clone();
+            async move {
+                if let Some(value) = preflight(request.uri().path()) {
+                    return Ok(response(value));
+                }
+                let mut bytes = Vec::new();
+                request.body_mut().read_to_end(&mut bytes).await.unwrap();
+                let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                if request.method() == http::Method::POST {
+                    assert!(
+                        payload["body"]
+                            .as_str()
+                            .unwrap()
+                            .contains("reviewfox:operation=")
+                    );
+                    return Ok(response(serde_json::json!({"id":"discussion-1","notes":[{
+                        "id":51,"body":payload["body"],"author":{"id":42},"position":payload["position"]
+                    }]})));
+                }
+                assert_eq!(request.method(), http::Method::PUT);
+                assert!(
+                    request
+                        .uri()
+                        .path()
+                        .ends_with("/discussions/discussion-1/notes/51")
+                );
+                let saved = observer.load(&comparison(), &origin(), 1).unwrap().unwrap();
+                assert_eq!(saved.receipt().unwrap().note_id, 51);
+                assert_eq!(payload, serde_json::json!({"body":"please explain"}));
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(response(
+                    serde_json::json!({"id":51,"body":"please explain","author":{"id":42},"position":{"new_line":2}}),
+                ))
+            }
+        });
+        let service = PublicationService::new(client, store.clone());
+        let connection = Connection::new("https://gitlab.example.com".into(), "secret".into());
+        let result = futures::executor::block_on(service.publish(
+            open.review(),
+            open.contexts(),
+            &origin(),
+            1,
+            &connection,
+        ))
+        .unwrap();
+        assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(result.receipt().unwrap().confirmed_body, "please explain");
+        assert!(result.edit.is_none());
+        assert_eq!(
+            store.load(&comparison(), &origin(), 1).unwrap(),
+            Some(result)
+        );
+    }
+
+    #[test]
     fn explicit_publish_creates_single_line_with_marker_and_reopens_without_duplicate() {
         let directory = tempfile::tempdir().unwrap();
         let mut open = OpenReview::reopen(
@@ -4460,6 +4963,9 @@ mod tests {
         );
         open.commit("please explain");
         let client = FakeHttpClient::create(|mut request| async move {
+            if let Some(response) = accept_cleanup(&mut request).await {
+                return Ok(response);
+            }
             assert!(matches!(
                 request
                     .extensions()

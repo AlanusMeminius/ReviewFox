@@ -1,6 +1,7 @@
 use crate::publication::{
-    BatchCancellation, Connection, DeleteStatus, EditStatus, PublicationBatch, PublicationKey,
-    PublicationRecord, PublicationService, PublicationState, PublicationStore, ReviewOrigin,
+    Connection, DeleteStatus, EditStatus, PublicationBatch, PublicationCancellation,
+    PublicationKey, PublicationRecord, PublicationService, PublicationState, PublicationStore,
+    ReviewOrigin,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, AnyView, App, ClipboardItem, Context, Div, Entity,
@@ -84,7 +85,7 @@ fn selection_matches_span(selection: Option<(Side, u32, u32)>, side: Side, span:
 }
 
 struct ActiveBatch {
-    cancellation: BatchCancellation,
+    cancellation: PublicationCancellation,
     keys: Vec<PublicationKey>,
 }
 impl Drop for ActiveBatch {
@@ -124,6 +125,7 @@ pub struct DiffView {
     publication_protected: HashSet<u64>,
     publication_error: Option<String>,
     publishing: HashSet<PublicationKey>,
+    create_cancellation: PublicationCancellation,
     updating: HashSet<PublicationKey>,
     deleting: HashSet<PublicationKey>,
     queued_deletes: HashSet<PublicationKey>,
@@ -203,6 +205,12 @@ impl Render for DiffShell {
         self.view
             .update(cx, |view, cx| view.render_shell(window, cx))
             .unwrap_or_else(|_| div().into_any_element())
+    }
+}
+
+impl Drop for DiffView {
+    fn drop(&mut self) {
+        self.create_cancellation.cancel();
     }
 }
 
@@ -321,6 +329,7 @@ impl DiffView {
             publication_protected: HashSet::new(),
             publication_error: None,
             publishing: HashSet::new(),
+            create_cancellation: PublicationCancellation::default(),
             updating: HashSet::new(),
             deleting: HashSet::new(),
             queued_deletes: HashSet::new(),
@@ -643,6 +652,7 @@ impl DiffView {
         let origin = self.open_review.origin().clone();
         let key = PublicationKey::new(review.comparison.clone(), origin.clone(), id);
         self.publishing.insert(key.clone());
+        let cancellation = self.create_cancellation.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -655,7 +665,14 @@ impl DiffView {
                         crate::settings_store::load_pat().unwrap_or_default(),
                     );
                     service
-                        .publish(&review, &contexts, &origin, id, &connection)
+                        .publish_cancellable(
+                            &review,
+                            &contexts,
+                            &origin,
+                            id,
+                            &connection,
+                            &cancellation,
+                        )
                         .await
                 })
                 .await;
@@ -2156,6 +2173,7 @@ impl DiffView {
 
     /// Cmd/Ctrl+W: always close the Diff window.
     fn close_diff(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        self.create_cancellation.cancel();
         if let Some(active) = &self.active_batch {
             active.cancellation.cancel();
         }
