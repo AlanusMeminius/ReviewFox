@@ -189,45 +189,6 @@ pub struct PublicationReceipt {
     #[serde(default)]
     pub outdated: Option<bool>,
 }
-impl PublicationReceipt {
-    /// Server placement, resolution and outdated capability are independent of
-    /// local body synchronization and the Review's captured Anchor.
-    pub fn placement_label(&self) -> String {
-        let position = &self.remote_position;
-        let path = position
-            .get("new_path")
-            .and_then(|value| value.as_str())
-            .filter(|path| !path.is_empty())
-            .or_else(|| position.get("old_path").and_then(|value| value.as_str()));
-        let location = path
-            .map(|path| {
-                let line = position
-                    .get("new_line")
-                    .and_then(|value| value.as_u64())
-                    .map(|line| format!(" +{line}"))
-                    .or_else(|| {
-                        position
-                            .get("old_line")
-                            .and_then(|value| value.as_u64())
-                            .map(|line| format!(" −{line}"))
-                    })
-                    .unwrap_or_default();
-                format!("GitLab attachment: {path}{line}")
-            })
-            .unwrap_or_else(|| "GitLab attachment unavailable".into());
-        let outdated = match self.outdated {
-            Some(true) => "Outdated on GitLab",
-            Some(false) => "Current on GitLab",
-            None => "Outdated status unavailable",
-        };
-        let resolved = match self.resolved {
-            Some(true) => "Resolved on GitLab",
-            Some(false) => "Open on GitLab",
-            None => "Resolution status unavailable",
-        };
-        format!("{location} · {outdated} · {resolved}")
-    }
-}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PublicationState {
     Published(PublicationReceipt),
@@ -3387,7 +3348,6 @@ mod tests {
             assert_eq!(receipt.remote_position["new_line"], 77);
             assert_eq!(receipt.resolved, Some(true));
             assert_eq!(receipt.outdated, None);
-            assert!(receipt.placement_label().contains("unavailable"));
             assert_eq!(open.current().comments[0].anchor, before);
             assert_eq!(record.status_label(), "Published on GitLab");
         }

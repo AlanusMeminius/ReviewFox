@@ -5,6 +5,9 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, svg,
 };
 
+use gpui::{Animation, AnimationExt, Transformation, percentage};
+use std::time::Duration;
+
 use super::theme;
 use super::tooltip::Tooltip;
 
@@ -18,6 +21,7 @@ pub struct IconButton {
     shortcut: Option<SharedString>,
     pressed: bool,
     disabled: bool,
+    loading: bool,
     background: Option<Rgba>,
     on_click: Option<ClickHandler>,
 }
@@ -37,6 +41,7 @@ impl IconButton {
             shortcut: None,
             pressed: false,
             disabled: false,
+            loading: false,
             background: None,
             on_click: None,
         }
@@ -59,6 +64,12 @@ impl IconButton {
         self
     }
 
+    /// Network activity replaces the glyph and prevents duplicate clicks.
+    pub fn loading(mut self, loading: bool) -> Self {
+        self.loading = loading;
+        self
+    }
+
     /// A resting fill for controls on a floating surface, faded when disabled.
     pub fn background(mut self, background: Rgba) -> Self {
         self.background = Some(background);
@@ -77,7 +88,9 @@ impl IconButton {
 impl RenderOnce for IconButton {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let palette = theme::software_palette();
-        let color = if self.disabled {
+        let color = if self.loading {
+            palette.text.secondary
+        } else if self.disabled {
             palette.control.disabled_icon
         } else if self.pressed {
             palette.field.caret
@@ -85,7 +98,8 @@ impl RenderOnce for IconButton {
             palette.text.chrome_icon
         };
         let pressed = self.pressed;
-        let enabled = !self.disabled;
+        let enabled = !self.disabled && !self.loading;
+        let animation_id = self.id.clone();
         div()
             .id(self.id)
             .map(super::titlebar::consume_control_mouse_events)
@@ -132,14 +146,31 @@ impl RenderOnce for IconButton {
                     .cursor_pointer()
                     .on_click(move |event, window, cx| handler(event, window, cx))
             })
-            .child(
+            .child(if self.loading {
+                loading_icon(animation_id).into_any_element()
+            } else {
                 svg()
                     .size(theme::ICON_SIZE)
                     .flex_none()
                     .path(self.icon)
-                    .text_color(color),
-            )
+                    .text_color(color)
+                    .into_any_element()
+            })
     }
+}
+
+/// One revolution per two seconds, matching MR detail loading.
+pub fn loading_icon(id: impl Into<ElementId>) -> impl IntoElement {
+    svg()
+        .path("refresh.svg")
+        .size(theme::ICON_SIZE_SM)
+        .flex_none()
+        .text_color(theme::software_palette().text.secondary)
+        .with_animation(
+            id,
+            Animation::new(Duration::from_secs(2)).repeat(),
+            |icon, delta| icon.with_transformation(Transformation::rotate(percentage(delta))),
+        )
 }
 
 #[cfg(test)]
@@ -150,17 +181,18 @@ mod tests {
     fn titlebar_icon_consumes_repeated_presses_without_losing_clicks(
         cx: &mut gpui::TestAppContext,
     ) {
-        for disabled in [false, true] {
+        for (disabled, loading) in [(false, false), (true, false), (false, true)] {
             super::super::titlebar::tests::assert_consumes_clicks(
                 cx,
                 move |clicks| {
                     IconButton::new("test-icon", "folder.svg", "Open Repo")
                         .disabled(disabled)
+                        .loading(loading)
                         .on_click(move |_, _, _| clicks.set(clicks.get() + 1))
                         .into_any_element()
                 },
                 gpui::point(gpui::px(10.), gpui::px(10.)),
-                !disabled,
+                !disabled && !loading,
             );
         }
     }

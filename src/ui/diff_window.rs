@@ -87,6 +87,7 @@ fn selection_matches_span(selection: Option<(Side, u32, u32)>, side: Side, span:
 struct ActiveBatch {
     cancellation: PublicationCancellation,
     keys: Vec<PublicationKey>,
+    current: Option<u64>,
 }
 impl Drop for ActiveBatch {
     fn drop(&mut self) {
@@ -424,6 +425,22 @@ impl DiffView {
             .chain(self.checking.iter())
             .any(|key| key.comparison == *comparison && key.comment_id == id)
     }
+    /// Reserved batch items block writes, but only the current item spins.
+    fn publication_request_running(&self, id: u64) -> bool {
+        let comparison = &self.open_review.review().comparison;
+        let is_comment =
+            |key: &PublicationKey| key.comparison == *comparison && key.comment_id == id;
+        self.updating
+            .iter()
+            .chain(self.deleting.iter())
+            .chain(self.checking.iter())
+            .any(is_comment)
+            || (self.publishing.iter().any(is_comment)
+                && self.active_batch.as_ref().is_none_or(|batch| {
+                    !batch.keys.iter().any(is_comment) || batch.current == Some(id)
+                }))
+    }
+
     fn can_delete_comment(&self, id: u64) -> bool {
         self.publication_error.is_none()
             && self.open_review.storage_error().is_none()
@@ -523,6 +540,7 @@ impl DiffView {
                 self.publishing.extend(keys.iter().cloned());
                 self.active_batch = Some(ActiveBatch {
                     cancellation: batch.cancellation(),
+                    current: None,
                     keys,
                 });
                 self.batch_status = Some(format!(
@@ -554,6 +572,14 @@ impl DiffView {
         // Each task sends exactly one item. A closed window drops the returned queue,
         // so no detached loop can continue publishing after the view disappears.
         let next_id = batch.ids().next();
+        if let Some(active) = &mut self.active_batch {
+            active.current = next_id;
+            self.batch_status = Some(format!(
+                "Publishing draft {} of {}",
+                active.keys.len() - batch.remaining() + 1,
+                active.keys.len(),
+            ));
+        }
         cx.spawn(async move |this, cx| {
             let (batch, result) = cx
                 .background_executor()
@@ -611,8 +637,7 @@ impl DiffView {
                         }
                     }
                     this.reload_publications();
-                    this.batch_status =
-                        Some("Batch finished; each comment shows its result".into());
+                    this.batch_status = None;
                 } else {
                     this.publish_batch_step(batch, service, cx);
                 }
@@ -2697,42 +2722,72 @@ fn render_titlebar(
                         }
                     }),
                 )))
-                .child(capsule().child(nav_button(
-                    "export",
-                    "export.svg",
-                    "Copy Review to Clipboard",
-                    None,
-                    true,
-                    false,
-                    cx.listener(|this, _, _, cx| this.export_to_clipboard(cx)),
-                )))
                 .child(
-                    div()
-                        .id("publish-all-drafts")
-                        .px_2()
-                        .cursor_pointer()
-                        .opacity(if view.can_publish_batch() || view.active_batch.is_some() {
-                            1.0
-                        } else {
-                            0.4
-                        })
-                        .child(if view.active_batch.is_some() {
-                            "Cancel batch".to_string()
-                        } else {
-                            format!("Publish all drafts ({})", view.batch_draft_ids().len())
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if this.active_batch.is_some() {
-                                this.cancel_batch(cx);
-                            } else {
-                                this.publish_all(cx);
-                            }
-                        })),
-                )
-                .children(
-                    view.batch_status
-                        .as_ref()
-                        .map(|status| div().text_xs().child(status.clone())),
+                    capsule()
+                        .child(nav_button(
+                            "export",
+                            "export.svg",
+                            "Copy Review to Clipboard",
+                            None,
+                            true,
+                            false,
+                            cx.listener(|this, _, _, cx| this.export_to_clipboard(cx)),
+                        ))
+                        .child(
+                            div()
+                                .id("publish-all-drafts")
+                                .h_full()
+                                .w(px(24.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(NAV_BUTTON_RADIUS))
+                                .tooltip(Tooltip::text(
+                                    view.batch_status.clone().unwrap_or_else(|| {
+                                        format!(
+                                            "Publish all drafts ({})",
+                                            view.batch_draft_ids().len()
+                                        )
+                                    }),
+                                    None,
+                                ))
+                                .child(if view.active_batch.is_some() {
+                                    super::icon_button::loading_icon("publish-all-spinner")
+                                        .into_any_element()
+                                } else {
+                                    svg()
+                                        .path("publish.svg")
+                                        .text_color(if view.can_publish_batch() {
+                                            theme::software_palette().text.secondary
+                                        } else {
+                                            theme::software_palette().text.disabled
+                                        })
+                                        .size(theme::ICON_SIZE)
+                                        .flex_none()
+                                        .into_any_element()
+                                })
+                                .when(view.can_publish_batch(), |button| {
+                                    button
+                                        .cursor_pointer()
+                                        .hover(|b| b.bg(theme::software_palette().control.hover))
+                                        .active(|b| b.bg(theme::software_palette().control.pressed))
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.publish_all(cx)),
+                                        )
+                                }),
+                        )
+                        .when(view.active_batch.is_some(), |group| {
+                            group.child(nav_button(
+                                "cancel-publish-all",
+                                "close.svg",
+                                "Cancel remaining publications",
+                                None,
+                                true,
+                                false,
+                                cx.listener(|this, _, _, cx| this.cancel_batch(cx)),
+                            ))
+                        }),
                 )
                 .children(view.export_status.as_ref().map(|status| {
                     div()
@@ -3388,7 +3443,7 @@ fn render_comment_island(
                 .pt(px(10.))
                 .pb(px(8.))
                 .flex()
-                .items_baseline()
+                .items_center()
                 .gap_2()
                 .child(
                     div()
@@ -3397,7 +3452,26 @@ fn render_comment_island(
                         .text_color(theme::software_palette().text.section)
                         .child("COMMENTS"),
                 )
-                .child(div().id("refresh-publications").ui_text_size(11.,cx).text_color(theme::software_palette().text.link).cursor_pointer().child("Refresh GitLab").on_click(cx.listener(|this,_,_,cx|this.refresh_publications(cx))))
+                .when(
+                    view.publication_records.values().any(|record| {
+                        record.receipt().is_some()
+                            && record.deletion != Some(DeleteStatus::Confirmed)
+                    }),
+                    |header| {
+                        header.child(
+                            IconButton::new(
+                                "refresh-publications",
+                                "refresh.svg",
+                                "Refresh GitLab",
+                            )
+                            .loading(view.refreshing.contains(&(
+                                view.open_review.review().comparison.clone(),
+                                view.open_review.origin().clone(),
+                            )))
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_publications(cx))),
+                        )
+                    },
+                )
                 .when(n > 0, |header| {
                     header.child(
                         div()
@@ -3433,6 +3507,15 @@ fn render_comment_island(
                             Anchor::File { .. } => false,
                         };
                         let palette = theme::software_palette();
+                        let key = PublicationKey::new(
+                            view.open_review.review().comparison.clone(),
+                            view.open_review.origin().clone(),
+                            id,
+                        );
+                        let updating = view.updating.contains(&key);
+                        let deleting = view.deleting.contains(&key);
+                        let publishing =
+                            view.publication_request_running(id) && !updating && !deleting;
                         div()
                             .id(("cmt", c.id as usize))
                             .mx_1()
@@ -3479,22 +3562,31 @@ fn render_comment_island(
                                             .child(label),
                                     )
                                     .child(
-                                        div()
-                                            .id(("cmt-publish", id as usize))
-                                            .ui_text_size(11., cx)
-                                            .child(if view.publication_records.get(&id).is_some_and(|r| matches!(r.state, PublicationState::Failed(_))) { "Retry publish" } else { "Publish" })
-                                            .when(view.can_publish(id), |button| button.cursor_pointer().text_color(palette.text.link).on_click(cx.listener(move |this, _, _, cx| {
+                                        IconButton::new(
+                                            ("cmt-publish", id as usize),
+                                            "publish.svg",
+                                            publish_tooltip(view, id),
+                                        )
+                                        .disabled(!view.can_publish(id))
+                                        .loading(publishing)
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
                                                 cx.stop_propagation();
                                                 this.publish_comment(id, cx);
-                                            })))
-                                            .when(!view.can_publish(id), |button| button.text_color(palette.text.disabled)),
+                                            }),
+                                        ),
                                     )
                                     .child(
                                         IconButton::new(
                                             ("cmt-edit", id as usize),
                                             "pencil.svg",
-                                            "Edit DraftComment",
+                                            if updating {
+                                                "Updating GitLab…"
+                                            } else {
+                                                "Edit DraftComment"
+                                            },
                                         )
+                                        .loading(updating)
                                         .on_click(
                                             cx.listener(move |this, _, window, cx| {
                                                 cx.stop_propagation();
@@ -3506,9 +3598,17 @@ fn render_comment_island(
                                         IconButton::new(
                                             ("cmt-del", id as usize),
                                             "trash.svg",
-                                            "Delete DraftComment",
+                                            if deleting {
+                                                "Deleting from GitLab…"
+                                            } else {
+                                                "Delete DraftComment"
+                                            },
                                         )
-                                        .disabled(!view.can_delete_comment(id))
+                                        .loading(deleting)
+                                        .disabled(
+                                            !view.can_delete_comment(id)
+                                                || view.publication_in_progress(id),
+                                        )
                                         .on_click(
                                             cx.listener(move |this, _, window, cx| {
                                                 cx.stop_propagation();
@@ -3524,48 +3624,210 @@ fn render_comment_island(
                                     .text_color(theme::software_palette().text.primary)
                                     .child(c.body),
                             )
-                            .child(div().mt(px(4.)).ui_text_size(11., cx).text_color(palette.text.secondary).child(
-                                if view.publication_in_progress(id) { "Syncing with GitLab…".into() }
-                                else if let Some(error) = &view.publication_error { error.clone() }
-                                else if let Some(record) = view.publication_records.get(&id) { record.status_label() }
-                                else if view.publication_protected.contains(&id) { "Published or awaiting confirmation on another MR".into() }
-                                else if let Err(reason) = view.open_review.origin().preparation_eligibility(&view.open_review.review().comparison) { reason.into() }
-                                else if !matches!(&c.anchor, Anchor::Line { span, .. } if span.count>0) { "File comment publication unavailable".into() }
-                                else { "Local draft · publish explicitly".into() }
-                            ))
+                            .children(comment_status(view, id).map(|status| {
+                                div()
+                                    .mt(px(4.))
+                                    .ui_text_size(11., cx)
+                                    .text_color(palette.text.secondary)
+                                    .child(status)
+                            }))
                             .child(render_publication_recovery(view, id, cx))
-                            .when(view.publication_records.get(&id).and_then(|record|record.receipt()).is_some(),|row| {
-                                let receipt=view.publication_records.get(&id).and_then(|record|record.receipt()).unwrap();
-                                let label=receipt.placement_label();
-                                row.child(div().ui_text_size(11.,cx).text_color(palette.text.secondary).child(label))
-                            })
-                            .when(view.publication_records.get(&id).is_some_and(|record|record.deletion.is_some()),|row| {
-                                let record=view.publication_records.get(&id).unwrap();
-                                match record.deletion.as_ref().unwrap() {
-                                    DeleteStatus::Conflict {website_body} if !record.website_deleted => row
-                                        .child(div().mt(px(6.)).ui_text_size(11.,cx).child("Website body:").child(div().child(website_body.clone())))
-                                        .child(div().id(("confirm-delete",id as usize)).cursor_pointer().ui_text_size(11.,cx).text_color(palette.text.link).child("Delete this website comment").on_click(cx.listener(move|this,_,_,cx|{cx.stop_propagation();this.retry_delete(id,true,cx);}))),
-                                    DeleteStatus::Pending | DeleteStatus::Failed(_) if record.receipt().is_some() && !record.website_deleted => row
-                                        .child(div().id(("retry-delete",id as usize)).cursor_pointer().ui_text_size(11.,cx).text_color(palette.text.link).child("Retry delete").on_click(cx.listener(move|this,_,_,cx|{cx.stop_propagation();this.retry_delete(id,false,cx);}))),
-                                    _ => row,
-                                }
-                            })
-                            .when(view.publication_records.get(&id).is_some_and(|record|record.edit.is_some() && record.deletion.is_none()),|row| {
-                                let record=view.publication_records.get(&id).unwrap();
-                                match &record.edit.as_ref().unwrap().status {
-                                    EditStatus::Conflict {website_body}=>row.child(div().mt(px(6.)).ui_text_size(11.,cx).child("Website body:").child(div().child(website_body.clone())))
-                                        .child(div().id(("adopt-website",id as usize)).cursor_pointer().ui_text_size(11.,cx).text_color(palette.text.link).child("Adopt website body").on_click(cx.listener(move|this,_,window,cx|{cx.stop_propagation();this.adopt_website_body(id,window,cx);})))
-                                        .child(div().id(("overwrite-website",id as usize)).cursor_pointer().ui_text_size(11.,cx).text_color(palette.text.link).child("Overwrite with local body").on_click(cx.listener(move|this,_,_,cx|{cx.stop_propagation();this.update_comment(id,true,cx);}))),
-                                    EditStatus::Pending|EditStatus::Failed(_)=>row.child(div().id(("retry-update",id as usize)).cursor_pointer().ui_text_size(11.,cx).text_color(palette.text.link).child("Retry update").on_click(cx.listener(move|this,_,_,cx|{cx.stop_propagation();this.update_comment(id,false,cx);}))),
-                                    _=>row,
-                                }
-                            })
+                            .when(
+                                view.publication_records
+                                    .get(&id)
+                                    .and_then(|record| record.receipt())
+                                    .is_some_and(|receipt| receipt.outdated == Some(true)),
+                                |row| {
+                                    row.child(
+                                        div()
+                                            .ui_text_size(11., cx)
+                                            .text_color(palette.text.secondary)
+                                            .child("Outdated on GitLab"),
+                                    )
+                                },
+                            )
+                            .when(
+                                !view.publication_in_progress(id)
+                                    && view
+                                        .publication_records
+                                        .get(&id)
+                                        .is_some_and(|record| record.deletion.is_some()),
+                                |row| {
+                                    let record = view.publication_records.get(&id).unwrap();
+                                    match record.deletion.as_ref().unwrap() {
+                                        DeleteStatus::Conflict { website_body }
+                                            if !record.website_deleted =>
+                                        {
+                                            row.child(
+                                                div()
+                                                    .mt(px(6.))
+                                                    .ui_text_size(11., cx)
+                                                    .child("Website body:")
+                                                    .child(div().child(website_body.clone())),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(("confirm-delete", id as usize))
+                                                    .cursor_pointer()
+                                                    .ui_text_size(11., cx)
+                                                    .text_color(palette.text.link)
+                                                    .child("Delete this website comment")
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            cx.stop_propagation();
+                                                            this.retry_delete(id, true, cx);
+                                                        },
+                                                    )),
+                                            )
+                                        }
+                                        DeleteStatus::Pending | DeleteStatus::Failed(_)
+                                            if record.receipt().is_some()
+                                                && !record.website_deleted =>
+                                        {
+                                            row.child(
+                                                div()
+                                                    .id(("retry-delete", id as usize))
+                                                    .cursor_pointer()
+                                                    .ui_text_size(11., cx)
+                                                    .text_color(palette.text.link)
+                                                    .child("Retry delete")
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            cx.stop_propagation();
+                                                            this.retry_delete(id, false, cx);
+                                                        },
+                                                    )),
+                                            )
+                                        }
+                                        _ => row,
+                                    }
+                                },
+                            )
+                            .when(
+                                !view.publication_in_progress(id)
+                                    && view.publication_records.get(&id).is_some_and(|record| {
+                                        record.edit.is_some() && record.deletion.is_none()
+                                    }),
+                                |row| {
+                                    let record = view.publication_records.get(&id).unwrap();
+                                    match &record.edit.as_ref().unwrap().status {
+                                        EditStatus::Conflict { website_body } => row
+                                            .child(
+                                                div()
+                                                    .mt(px(6.))
+                                                    .ui_text_size(11., cx)
+                                                    .child("Website body:")
+                                                    .child(div().child(website_body.clone())),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(("adopt-website", id as usize))
+                                                    .cursor_pointer()
+                                                    .ui_text_size(11., cx)
+                                                    .text_color(palette.text.link)
+                                                    .child("Adopt website body")
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            cx.stop_propagation();
+                                                            this.adopt_website_body(id, window, cx);
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(("overwrite-website", id as usize))
+                                                    .cursor_pointer()
+                                                    .ui_text_size(11., cx)
+                                                    .text_color(palette.text.link)
+                                                    .child("Overwrite with local body")
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            cx.stop_propagation();
+                                                            this.update_comment(id, true, cx);
+                                                        },
+                                                    )),
+                                            ),
+                                        EditStatus::Pending | EditStatus::Failed(_) => row.child(
+                                            div()
+                                                .id(("retry-update", id as usize))
+                                                .cursor_pointer()
+                                                .ui_text_size(11., cx)
+                                                .text_color(palette.text.link)
+                                                .child("Retry update")
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.update_comment(id, false, cx);
+                                                })),
+                                        ),
+                                        _ => row,
+                                    }
+                                },
+                            )
                     })),
                 sb,
             )
             .into_any_element()
         })
         .into_any_element()
+}
+
+fn publish_tooltip(view: &DiffView, id: u64) -> String {
+    if view.publication_request_running(id) {
+        return "Syncing with GitLab…".into();
+    }
+    if view.publication_in_progress(id) {
+        return "Waiting to publish".into();
+    }
+    if let Some(error) = &view.publication_error {
+        return error.clone();
+    }
+    if let Err(reason) = view
+        .open_review
+        .origin()
+        .preparation_eligibility(&view.open_review.review().comparison)
+    {
+        return reason.into();
+    }
+    if view.open_review.review().comments.iter().any(|comment| {
+        comment.id == id && !matches!(&comment.anchor, Anchor::Line { span, .. } if span.count > 0)
+    }) {
+        return "File comment publication unavailable".into();
+    }
+    if let Some(record) = view.publication_records.get(&id) {
+        if view.can_publish(id) {
+            return "Retry publish on GitLab".into();
+        }
+        if record.receipt().is_some() {
+            return "Already published · edits sync on save".into();
+        }
+        return record.status_label();
+    }
+    "Publish on GitLab".into()
+}
+
+fn comment_status(view: &DiffView, id: u64) -> Option<String> {
+    if let Some(error) = &view.publication_error {
+        return Some(error.clone());
+    }
+    if view.publication_in_progress(id) {
+        return None;
+    }
+    if let Some(record) = view.publication_records.get(&id) {
+        let normal = matches!(record.state, PublicationState::Published(_))
+            && !record.website_deleted
+            && record.deletion.is_none()
+            && record.edit.is_none()
+            && record.website_body.as_ref().is_none_or(|body| {
+                record
+                    .receipt()
+                    .is_some_and(|receipt| body == &receipt.confirmed_body)
+            });
+        return (!normal).then(|| record.status_label());
+    }
+    if view.publication_protected.contains(&id) {
+        return Some("Published or awaiting confirmation on another MR".into());
+    }
+    Some("Local draft".into())
 }
 
 fn render_publication_recovery(view: &DiffView, id: u64, cx: &mut Context<DiffView>) -> AnyElement {
@@ -3589,8 +3851,13 @@ fn render_publication_recovery(view: &DiffView, id: u64, cx: &mut Context<DiffVi
         id,
     );
     let palette = theme::software_palette();
-    let mut controls = div().flex().flex_col().gap_1().ui_text_size(11., cx);
-    if uncertain {
+    let mut controls = div()
+        .mt(px(4.))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .ui_text_size(11., cx);
+    if uncertain && !view.publication_in_progress(id) {
         controls = controls
             .child(
                 div()
@@ -3618,13 +3885,18 @@ fn render_publication_recovery(view: &DiffView, id: u64, cx: &mut Context<DiffVi
         .open_review
         .origin()
         .web_url(record.receipt().map(|receipt| receipt.note_id))
+        .filter(|_| record.receipt().is_some() || uncertain)
     {
         controls = controls.child(
             div()
                 .id(("view-publication", id as usize))
                 .cursor_pointer()
                 .text_color(palette.text.link)
-                .child("View on GitLab")
+                .child(if record.receipt().is_some() {
+                    "View on GitLab"
+                } else {
+                    "Open merge request"
+                })
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
                     cx.open_url(&url);

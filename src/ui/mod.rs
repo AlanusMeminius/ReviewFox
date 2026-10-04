@@ -74,6 +74,7 @@ const ICON_ASSETS: &[(&str, &[u8])] = icon_assets![
     "folder_open.svg",
     "gitlab.svg",
     "export.svg",
+    "publish.svg",
     "gear.svg",
     "check.svg",
     "warning.svg",
