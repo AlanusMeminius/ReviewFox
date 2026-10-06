@@ -392,7 +392,8 @@ impl AppView {
         if matches!(key, "up" | "down") {
             if self.inbox.menu_open {
                 let (scroll, _) = scrollbar::vertical("inbox-filter-menu-sb", cx);
-                scroll.scroll_to_item(self.inbox.menu_index + 1);
+                let header_rows = usize::from(self.inbox.menu == Some(Menu::Period));
+                scroll.scroll_to_item(self.inbox.menu_index + header_rows);
             } else if let Some(index) = self
                 .inbox
                 .rows
@@ -534,7 +535,8 @@ pub(super) fn render_menu(view: &AppView, cx: &mut Context<AppView>) -> impl Int
             .collect(),
     };
     let toolbar_height = if menu == Menu::Repositories { 36. } else { 0. };
-    let height = (options.len() as f32 * 38. + 42. + toolbar_height).min(360.);
+    let heading_height = if menu == Menu::Period { 34. } else { 0. };
+    let height = (options.len() as f32 * 38. + 8. + heading_height + toolbar_height).min(360.);
     anchored()
         .position(gpui::point(
             bounds.origin.x,
@@ -589,7 +591,7 @@ pub(super) fn render_menu(view: &AppView, cx: &mut Context<AppView>) -> impl Int
                                         .cursor_pointer()
                                         .ui_text_size(12., cx)
                                         .text_color(palette.text.primary)
-                                        .bg(palette.control.pill)
+                                        .bg(palette.feedback.neutral.background)
                                         .hover(|d| d.bg(palette.control.pill_hover))
                                         .active(|d| d.bg(palette.control.pressed))
                                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -620,19 +622,17 @@ pub(super) fn render_menu(view: &AppView, cx: &mut Context<AppView>) -> impl Int
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child(
-                            div()
-                                .flex_none()
-                                .px_2()
-                                .py_2()
-                                .ui_text_size(11., cx)
-                                .text_color(palette.text.secondary)
-                                .child(if menu == Menu::Repositories {
-                                    "已加入的 GitLab 仓库（含 Pin）"
-                                } else {
-                                    "按更新时间 · 本地自然日"
-                                }),
-                        )
+                        .when(menu == Menu::Period, |d| {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .px_2()
+                                    .py_2()
+                                    .ui_text_size(11., cx)
+                                    .text_color(palette.text.secondary)
+                                    .child("按更新时间 · 本地自然日"),
+                            )
+                        })
                         .children(options.into_iter().enumerate().map(
                             |(index, (label, checked))| {
                                 div()
@@ -1282,12 +1282,13 @@ mod menu_layout_tests {
                 trigger.origin.x,
                 "dropdown outer edge must align with capsule outer edge"
             );
+            let first_index = usize::from(menu == Menu::Period);
             let option = scroll
-                .bounds_for_item(1)
+                .bounds_for_item(first_index)
                 .expect("first option must be laid out");
             assert!(option.size.height >= px(30.));
             let second = scroll
-                .bounds_for_item(2)
+                .bounds_for_item(first_index + 1)
                 .expect("second option must be laid out");
             assert!(
                 second.origin.y - option.bottom() >= px(4.),
@@ -1317,14 +1318,14 @@ mod menu_layout_tests {
             );
             let count = if menu == Menu::Period { 5 } else { 3 };
             let last = scroll
-                .bounds_for_item(count)
+                .bounds_for_item(first_index + count - 1)
                 .expect("last option must be laid out");
             assert!(
                 scroll.bounds().intersects(&last),
                 "last option must be visible"
             );
             assert!(
-                scroll.bounds_for_item(count + 1).is_none(),
+                scroll.bounds_for_item(first_index + count).is_none(),
                 "menu must render its own option set after switching"
             );
         }
