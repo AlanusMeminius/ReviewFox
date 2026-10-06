@@ -959,9 +959,8 @@ fn render_detail(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement 
     let palette = theme::software_palette();
     let (scroll, sb) = scrollbar::vertical("inbox-detail-sb", cx);
     let preview = view.inbox.preview.as_ref().and_then(|p| p.as_ref().ok());
-    let items = mr_detail::context_items(
-        &row.mr.source_branch,
-        &row.mr.target_branch,
+    let items = mr_detail::context_items(&row.mr.source_branch, &row.mr.target_branch);
+    let checks = mr_detail::check_items(
         preview.and_then(|p| p.merge_status.as_deref()),
         preview.map(|p| &p.checks),
     );
@@ -989,6 +988,7 @@ fn render_detail(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement 
                 title: &row.mr.title,
                 description: row.mr.description.as_deref(),
                 metadata: items,
+                checks,
                 notice,
             },
             cx,

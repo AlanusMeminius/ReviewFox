@@ -2514,8 +2514,6 @@ fn mr_entry_ready_lines(detail: &MergeRequestDetail, cx: &mut App) -> Vec<gpui::
     items.extend(mr_detail::context_items(
         &detail.source_branch,
         &detail.target_branch,
-        detail.merge_status.as_deref(),
-        Some(&detail.check_state),
     ));
     vec![
         mr_detail::render(
@@ -2524,6 +2522,10 @@ fn mr_entry_ready_lines(detail: &MergeRequestDetail, cx: &mut App) -> Vec<gpui::
                 title: &detail.title,
                 description: detail.description.as_deref(),
                 metadata: items,
+                checks: mr_detail::check_items(
+                    detail.merge_status.as_deref(),
+                    Some(&detail.check_state),
+                ),
                 notice: None,
             },
             cx,

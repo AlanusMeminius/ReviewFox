@@ -17,3 +17,9 @@ The two inbox islands use the existing splitter with independent session-only wi
 - Geometry coverage checks extreme drags and window shrinking.
 - Native fixture screenshots inspected for compact rows and shared detail layout. Dropdown placement is checked by the real GPUI rendering regression.
 - `cargo test --quiet`: 515 passed, 4 previously ignored; `cargo build --quiet` passed.
+
+## Comments
+
+- Follow-up: “更早” groups updates before yesterday within the selected time window. Keep that grouping unchanged.
+- Move Merge, Pipeline and Approvals below branch metadata in the shared renderer. Reserve the same 24px row for loading and completed checks; allow horizontal scrolling in narrow panes rather than wrapping and shifting the description. Error notices can still expand to show their full message.
+- Actual GPUI layout regression verifies the body keeps its vertical position when checks complete at both 600px and 216px widths. Full suite: 516 passed, 4 ignored. Build and diff checks passed.
