@@ -1,3 +1,5 @@
+mod mr_inbox;
+
 use gpui::{
     Animation, AnimationExt, App, Bounds, ClickEvent, ClipboardItem, Context, Corner, Div,
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
@@ -46,6 +48,8 @@ pub struct AppView {
     focus: FocusHandle,
     repos_collapsed: bool,
     state: MainState,
+    inbox: mr_inbox::Inbox,
+    mr_activation_generation: u64,
     /// Workspace set + last + pinned (mirrors disk).
     store: WorkspaceStore,
     diff_window: Option<WindowHandle<DiffView>>,
@@ -131,6 +135,8 @@ impl AppView {
             focus: cx.focus_handle(),
             repos_collapsed: window_geometry_store::snapshot().repos_collapsed,
             state,
+            inbox: mr_inbox::Inbox::default(),
+            mr_activation_generation: 0,
             store: workspace_store::load(),
             diff_window: None,
             branch_picker: None,
@@ -567,6 +573,9 @@ impl AppView {
     }
 
     fn select_repo(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.inbox.visible = false;
+        self.inbox.close_menu();
+        cx.notify();
         if let MainState::Ready(loaded) = &self.state {
             if loaded.repository().path() == path.as_path() {
                 return;
@@ -733,6 +742,8 @@ impl AppView {
     }
 
     fn spawn_mr_activate(&mut self, iid: u64, cx: &mut Context<Self>) {
+        self.mr_activation_generation = self.mr_activation_generation.wrapping_add(1);
+        let generation = self.mr_activation_generation;
         let repo_path = match &self.state {
             MainState::Ready(loaded) => loaded.repository().path().to_path_buf(),
             MainState::Empty | MainState::Error(_) => return,
@@ -750,6 +761,7 @@ impl AppView {
                 Err(_) => return,
             };
 
+            let expected_repo = repo_path.clone();
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
@@ -762,6 +774,11 @@ impl AppView {
             let result =
                 outcome.map_err(|failure| ErrorNote::new(failure.message, failure.settings_target));
             let _ = this.update(cx, |view, cx| {
+                if view.mr_activation_generation != generation
+                    || !matches!(&view.state, MainState::Ready(loaded) if loaded.repository().path() == expected_repo)
+                {
+                    return;
+                }
                 apply_mr_activate_finish(view, iid, result, cx);
             });
         })
@@ -867,10 +884,17 @@ impl AppView {
             self.empty_mr = false;
             self.pending_kind_restore = false;
         }
+        if self.inbox.visible {
+            self.show_inbox(cx);
+        }
         cx.notify();
     }
 
     fn handle_branch_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.inbox.visible {
+            self.handle_inbox_key(event, cx);
+            return;
+        }
         if event.keystroke.key.as_str() == "escape"
             && (self.repo_menu.is_some() || self.commit_menu.is_some())
         {
@@ -1090,6 +1114,8 @@ impl AppView {
                 }
                 match BranchBrowser::open(&root) {
                     Ok(bb) => {
+                        this.inbox.visible = false;
+                        this.inbox.close_menu();
                         this.state = MainState::Ready(LoadedBrowser::install(bb));
                         this.mr_entry = None;
                         this.clear_uncommitted();
@@ -1251,10 +1277,12 @@ impl Render for AppView {
                     && (view.branch_picker.is_some()
                         || view.mr_picker.is_some()
                         || view.repo_menu.is_some()
-                        || view.commit_menu.is_some())
+                        || view.commit_menu.is_some()
+                        || view.inbox.menu_open)
                 {
                     view.branch_picker = None;
                     view.mr_picker = None;
+                    view.inbox.close_menu();
                     view.repo_menu = None;
                     view.commit_menu = None;
                     cx.notify();
@@ -1329,8 +1357,11 @@ impl Render for AppView {
                             .min_w(px(splitter::MIN_COMMITS_WIDTH))
                             .overflow_hidden()
                             .bg(theme::software_palette().surface.desk)
-                            .when(!self.covering(), |d| d.child(render_commits(self, cx)))
-                            .child(render_files(self, cx))
+                            .when(self.inbox.visible, |d| d.child(mr_inbox::render(self, cx)))
+                            .when(!self.inbox.visible, |d| {
+                                d.when(!self.covering(), |d| d.child(render_commits(self, cx)))
+                                    .child(render_files(self, cx))
+                            })
                             .when(self.repos_collapsed, |d| {
                                 d.child(splitter::parked_leading_handle(
                                     "sidebar-parked-handle",
@@ -1340,6 +1371,9 @@ impl Render for AppView {
                             }),
                     ),
             )
+            .when(self.inbox.visible && self.inbox.menu_open, |d| {
+                d.child(deferred(mr_inbox::render_menu(self, cx)))
+            })
             .when(self.repo_menu.is_some(), |d| {
                 d.child(render_repo_menu(self, cx))
             })
@@ -1369,7 +1403,7 @@ fn render_sidebar(
     };
     let gitlab_base = settings_store::effective_base_url(&settings_store::load_file());
     let row = |path: PathBuf| {
-        let active = active_path.as_ref() == Some(&path);
+        let active = !view.inbox.visible && active_path.as_ref() == Some(&path);
         let gitlab = gitlab::repo_matches_settings_host(&path, &gitlab_base);
         let name = Repository::new(path.clone()).display_name();
         (path, name, active, gitlab)
@@ -1406,6 +1440,19 @@ fn render_sidebar(
                     .pt(px(theme::SIDEBAR_SCROLL_PAD_TOP))
                     .track_scroll(&scroll)
                     .overflow_y_scroll()
+                    .child(
+                        sidebar_nav_row(
+                            "merge-requests-inbox",
+                            "gitlab.svg",
+                            "Merge requests",
+                            view.inbox.visible,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.focus.focus(window);
+                            this.show_inbox(cx);
+                        })),
+                    )
                     .when_some(pin_section, |d, pinned_rows| {
                         d.child(sidebar_section_header("Pin", false, cx)).children(
                             pinned_rows.into_iter().enumerate().map(
@@ -1715,8 +1762,11 @@ fn render_titlebar(
         MainState::Empty | MainState::Error(_) => ("—".into(), "—".into(), "—".into()),
     };
     let show_gitlab = gitlab_chrome_visible(view);
-    let entry_chrome =
-        render_entry_chrome(view, &branch, &checkout, show_gitlab, cx).into_any_element();
+    let entry_chrome = if view.inbox.visible {
+        mr_inbox::render_filters(view, cx).into_any_element()
+    } else {
+        render_entry_chrome(view, &branch, &checkout, show_gitlab, cx).into_any_element()
+    };
 
     // Leading zone spans exactly what sits left of the stage, so the pills after it start on
     // the stage's left edge and share a left edge with the islands below.
@@ -1807,7 +1857,11 @@ fn render_titlebar(
                         .font_family(mono.clone())
                         .text_xs()
                         .text_color(theme::software_palette().text.primary)
-                        .child(label),
+                        .child(if view.inbox.visible {
+                            String::new()
+                        } else {
+                            label
+                        }),
                 )
                 .child(
                     // Doubles as the trailing inset when no caption buttons follow.
@@ -2346,7 +2400,7 @@ impl ErrorNote {
 /// Red failure text, with an "Open Settings" link when the fix lives there.
 /// `close_mr_picker`: the MR picker is a transient overlay, so leave it on click.
 fn render_error_note(
-    id: &'static str,
+    id: impl Into<gpui::ElementId>,
     note: &ErrorNote,
     close_mr_picker: bool,
     cx: &mut Context<AppView>,

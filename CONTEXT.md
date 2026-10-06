@@ -18,6 +18,10 @@ _Avoid_: session, last opened (as a domain term), MRU, concurrent Entries, entry
 How the user arrives at a Comparison inside a Workspace: a Branch Browser selection, a forge Merge Request (MR) / Pull Request label, or Uncommitted. Exactly one Entry is selected in a Workspace at a time. An MR Entry may carry read-only remote context—title, description, author, status, source/target branch labels, and forge check state (pipeline / approval)—to help understand the commits; that context is not Comparison identity and is never a publish target. The context arrives only together with the `diff_refs` Comparison; a failed open leaves the Entry without it. Discussion threads are out of this context for now. MR Entries for a Repository are discovered from the forge (project MR list) and may also be opened by URL/IID; the Comparison OID pair for an MR Entry is the forge-reported diff pair (`diff_refs`), not branch-tip guesswork. Typical use: Branch Entry for reviewing one's own work, MR Entry for reviewing someone else's—capability is not restricted by that story.
 _Avoid_: review mode, session mode, PR/MR as Comparison identity, workflow (as a domain type), published discussion, simultaneous selection of more than one Entry
 
+**MR Inbox**:
+A cross-Repository discovery surface for GitLab MRs, filtered by Repository and recent update time. Its selected preview is not a selected Entry or Comparison; opening a result selects that Repository's MR Entry.
+_Avoid_: Workspace, Review, MR Entry (for the preview itself)
+
 **Pin**:
 A user-pinned Workspace shown in the Pin section and excluded from the Repositories list; not Comparison identity.
 _Avoid_: favorite, bookmark, starred

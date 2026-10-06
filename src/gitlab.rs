@@ -1,5 +1,7 @@
 //! GitLab API helpers (Phase A: verify; Phase B: project; Phase C: MR list; Phase D: MR detail).
 
+pub mod inbox;
+
 use futures::AsyncReadExt;
 use gpui_http_client::{AsyncBody, HttpClient, http};
 use serde::Deserialize;

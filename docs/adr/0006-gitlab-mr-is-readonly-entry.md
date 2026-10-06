@@ -1,5 +1,7 @@
 # GitLab MR is a read-only Entry
 
+**Later discovery decision:** ADR-0019 adds the cross-Repository MR Inbox alongside the current project's open-MR picker.
+
 **Later decision:** ADR-0018 supersedes the no-publication restriction for the agreed GitLab Publication milestone. The body below records the original read-only milestone; its MR Entry/Comparison separation remains. Publishing uses the existing PAT connection with write-capable API permissions rather than this milestone's `read_api` guidance.
 
 GitLab Merge Requests are an Entry into a Comparison, not a second reviewable identity: DraftComments still attach only to `(repository, base_oid, head_oid)` (ADR-0002). The forge is read-only—title, description, author, status, source/target branch labels, and check state (pipeline / approval); no publishing comments back, and no discussion-thread UI in this milestone. The Comparison OID pair is GitLab’s `diff_refs` (not branch-tip guesswork), resolved via API then `git fetch` into the local Repository (system git, side-effect-free: ADR-0009). Discovery is the current project’s open MR list (URL/IID secondary). Workspace persistence of the selected MR Entry label (project + IID only, not a forge metadata snapshot) remains; ADR-0011 adds a separate last-MR memory that may survive while Branch Browser is the selected Entry.

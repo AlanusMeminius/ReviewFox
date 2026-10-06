@@ -2,6 +2,12 @@
 
 Local clipboard-oriented code review over a Git two-tree comparison: browse structured diffs, attach draft comments, and export plain text for pasting elsewhere.
 
+## GitLab MR inbox
+
+Choose **Merge requests** above Pin and Repositories to browse MRs from all added Repositories matching the configured GitLab host, including pinned ones. The titlebar filters by multiple Repositories and update time: today, two days, three days, one week, or one calendar month. Day ranges include today in local time; all MR states are included.
+
+Click an MR to preview its description and checks. Double-click or press Enter to open its existing MR Entry and Comparison. Return through **Merge requests** to keep the filters and selection. Refresh reloads the selected range; failures are reported per Repository so other results remain available.
+
 ## GitLab comments
 
 Implementation is covered by controlled tests; actual self-managed GitLab version and website behavior remain [pending live acceptance](docs/gitlab-publication-acceptance.md). No tested minimum server version is currently claimed.
