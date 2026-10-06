@@ -531,6 +531,8 @@ pub(super) fn render_menu(view: &AppView, cx: &mut Context<AppView>) -> impl Int
         .child(
             div()
                 .id("inbox-filter-menu")
+                .flex()
+                .flex_col()
                 .occlude()
                 .w(px(260.))
                 .h(px(height))
@@ -1059,5 +1061,101 @@ mod tests {
         assert_eq!(inbox.selected, Some((PathBuf::from("b"), 2)));
         assert!(inbox.finish_preview(12, Err(ErrorNote::plain("current failure"))));
         assert!(matches!(inbox.preview, Some(Err(_))));
+    }
+}
+
+#[cfg(test)]
+mod menu_layout_tests {
+    use super::*;
+
+    struct MenuHarness {
+        view: gpui::Entity<AppView>,
+    }
+    impl Render for MenuHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.view.update(cx, |view, cx| {
+                deferred(render_menu(view, cx)).into_any_element()
+            }))
+        }
+    }
+
+    #[gpui::test]
+    fn inbox_filter_menus_have_visible_options(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(appearance::resolve(&Default::default(), &[])));
+        let view = cx.new(|cx| AppView {
+            focus: cx.focus_handle(),
+            repos_collapsed: false,
+            state: MainState::Empty,
+            inbox: mr_inbox::Inbox::default(),
+            mr_activation_generation: 0,
+            store: WorkspaceStore::default(),
+            diff_window: None,
+            branch_picker: None,
+            mr_picker: None,
+            branch_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
+            mr_toggle_bounds: Rc::new(Cell::new(Bounds::default())),
+            mr_entry: None,
+            uncommitted_generation: 0,
+            uncommitted_paths_pending: false,
+            uncommitted_scan_error: None,
+            empty_mr: false,
+            pending_kind_restore: false,
+            repo_menu: None,
+            commit_menu: None,
+            activation_sub: None,
+            bounds_sub: None,
+            collapsed_dirs: HashSet::new(),
+            tree_path_fingerprint: Vec::new(),
+            sidebar_width: splitter::default_sidebar_width(),
+            sidebar_resize_state: Rc::new(ResizeState::with_drag_latch()),
+            files_width: splitter::default_files_width(),
+            files_resize_state: Rc::new(ResizeState::default()),
+            head_meta_height: splitter::MIN_HEAD_META_HEIGHT,
+            head_meta_height_user_set: false,
+            head_meta_resize_state: Rc::new(ResizeState::default()),
+            mr_detail_height: splitter::DEFAULT_MR_DETAIL_HEIGHT,
+            mr_detail_height_user_set: false,
+            mr_detail_resize_state: Rc::new(ResizeState::default()),
+            #[cfg(target_os = "macos")]
+            window_vibrancy: None,
+        });
+        let (_, cx) = cx.add_window_view(|_, _| MenuHarness { view: view.clone() });
+        for menu in [Menu::Period, Menu::Repositories] {
+            view.update(cx, |view, cx| {
+                view.inbox.menu = Some(menu);
+                view.inbox.repositories = vec![InboxRepository {
+                    path: PathBuf::from("/fixture/repo"),
+                    name: "Fixture repository".into(),
+                }];
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let (scroll, _) = cx.update(|_, cx| scrollbar::vertical("inbox-filter-menu-sb", cx));
+            assert!(
+                scroll.bounds().size.height >= px(100.),
+                "dropdown options are clipped: scroll viewport is {:?}",
+                scroll.bounds()
+            );
+            let option = scroll
+                .bounds_for_item(1)
+                .expect("first option must be laid out");
+            assert!(option.size.height >= px(30.));
+            assert!(
+                scroll.bounds().intersects(&option),
+                "first option must be visible"
+            );
+            let count = if menu == Menu::Period { 5 } else { 3 };
+            let last = scroll
+                .bounds_for_item(count)
+                .expect("last option must be laid out");
+            assert!(
+                scroll.bounds().intersects(&last),
+                "last option must be visible"
+            );
+            assert!(
+                scroll.bounds_for_item(count + 1).is_none(),
+                "menu must render its own option set after switching"
+            );
+        }
     }
 }
