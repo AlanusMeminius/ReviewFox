@@ -362,7 +362,7 @@ impl AppView {
         let key = event.keystroke.key.as_str();
         if let Some(menu) = self.inbox.menu {
             let len = match menu {
-                Menu::Repositories => self.inbox.repositories.len() + 2,
+                Menu::Repositories => self.inbox.repositories.len(),
                 Menu::Period => 5,
             };
             match key {
@@ -409,22 +409,9 @@ impl AppView {
     fn choose_inbox_option(&mut self, index: usize, cx: &mut Context<Self>) {
         match self.inbox.menu {
             Some(Menu::Repositories) => {
-                match index {
-                    0 => self.inbox.excluded.clear(),
-                    1 => {
-                        self.inbox.excluded = self
-                            .inbox
-                            .repositories
-                            .iter()
-                            .map(|r| r.path.clone())
-                            .collect()
-                    }
-                    _ => {
-                        if let Some(repo) = self.inbox.repositories.get(index - 2) {
-                            if !self.inbox.excluded.remove(&repo.path) {
-                                self.inbox.excluded.insert(repo.path.clone());
-                            }
-                        }
+                if let Some(repo) = self.inbox.repositories.get(index) {
+                    if !self.inbox.excluded.remove(&repo.path) {
+                        self.inbox.excluded.insert(repo.path.clone());
                     }
                 }
                 self.refresh_inbox(cx);
@@ -535,21 +522,19 @@ pub(super) fn render_menu(view: &AppView, cx: &mut Context<AppView>) -> impl Int
     };
     let (scroll, sb) = scrollbar::vertical("inbox-filter-menu-sb", cx);
     let options: Vec<(String, bool)> = match menu {
-        Menu::Repositories => std::iter::once(("全选".into(), false))
-            .chain(std::iter::once(("清空".into(), false)))
-            .chain(
-                view.inbox
-                    .repositories
-                    .iter()
-                    .map(|r| (r.name.clone(), !view.inbox.excluded.contains(&r.path))),
-            )
+        Menu::Repositories => view
+            .inbox
+            .repositories
+            .iter()
+            .map(|r| (r.name.clone(), !view.inbox.excluded.contains(&r.path)))
             .collect(),
         Menu::Period => Period::ALL
             .iter()
             .map(|p| (p.label().into(), view.inbox.period == *p))
             .collect(),
     };
-    let height = (options.len() as f32 * 34. + 42.).min(360.);
+    let toolbar_height = if menu == Menu::Repositories { 36. } else { 0. };
+    let height = (options.len() as f32 * 38. + 42. + toolbar_height).min(360.);
     anchored()
         .position(gpui::point(
             bounds.origin.x,
@@ -579,14 +564,65 @@ pub(super) fn render_menu(view: &AppView, cx: &mut Context<AppView>) -> impl Int
                         cx.notify();
                     }
                 }))
+                .when(menu == Menu::Repositories, |d| {
+                    d.child(
+                        div()
+                            .h(px(36.))
+                            .flex_none()
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .children(
+                                [
+                                    ("inbox-repos-all", "全选", true),
+                                    ("inbox-repos-clear", "清空", false),
+                                ]
+                                .into_iter()
+                                .map(|(id, label, select_all)| {
+                                    div()
+                                        .id(id)
+                                        .debug_selector(move || id.to_owned())
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .ui_text_size(12., cx)
+                                        .text_color(palette.text.primary)
+                                        .bg(palette.control.pill)
+                                        .hover(|d| d.bg(palette.control.pill_hover))
+                                        .active(|d| d.bg(palette.control.pressed))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if select_all {
+                                                this.inbox.excluded.clear();
+                                            } else {
+                                                this.inbox.excluded = this
+                                                    .inbox
+                                                    .repositories
+                                                    .iter()
+                                                    .map(|r| r.path.clone())
+                                                    .collect();
+                                            }
+                                            this.refresh_inbox(cx);
+                                            cx.notify();
+                                        }))
+                                        .child(label)
+                                }),
+                            ),
+                    )
+                })
                 .child(scrollbar::overlay_flex(
                     div()
                         .id("inbox-filter-options")
                         .size_full()
                         .track_scroll(&scroll)
                         .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
                         .child(
                             div()
+                                .flex_none()
                                 .px_2()
                                 .py_2()
                                 .ui_text_size(11., cx)
@@ -602,7 +638,9 @@ pub(super) fn render_menu(view: &AppView, cx: &mut Context<AppView>) -> impl Int
                                 div()
                                     .id(("inbox-filter-option", index))
                                     .h(px(34.))
-                                    .px_2()
+                                    .w(px(252.))
+                                    .flex_none()
+                                    .px_3()
                                     .rounded_md()
                                     .flex()
                                     .items_center()
@@ -613,8 +651,20 @@ pub(super) fn render_menu(view: &AppView, cx: &mut Context<AppView>) -> impl Int
                                     .when(index == view.inbox.menu_index, |d| {
                                         d.bg(palette.control.selected)
                                     })
-                                    .hover(|d| d.bg(palette.control.hover))
-                                    .active(|d| d.bg(palette.control.pressed))
+                                    .hover(|d| {
+                                        d.bg(if index == view.inbox.menu_index {
+                                            palette.control.selected_hover
+                                        } else {
+                                            palette.control.hover
+                                        })
+                                    })
+                                    .active(|d| {
+                                        d.bg(if index == view.inbox.menu_index {
+                                            palette.control.selected_pressed
+                                        } else {
+                                            palette.control.pressed
+                                        })
+                                    })
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.inbox.menu_index = index;
                                         this.choose_inbox_option(index, cx);
@@ -1205,10 +1255,12 @@ mod menu_layout_tests {
         for menu in [Menu::Period, Menu::Repositories] {
             view.update(cx, |view, cx| {
                 view.inbox.menu = Some(menu);
-                view.inbox.repositories = vec![InboxRepository {
-                    path: PathBuf::from("/fixture/repo"),
-                    name: "Fixture repository".into(),
-                }];
+                view.inbox.repositories = (0..3)
+                    .map(|i| InboxRepository {
+                        path: PathBuf::from(format!("/fixture/repo-{i}")),
+                        name: format!("Fixture repository {i}"),
+                    })
+                    .collect();
                 cx.notify();
             });
             cx.run_until_parked();
@@ -1234,6 +1286,31 @@ mod menu_layout_tests {
                 .bounds_for_item(1)
                 .expect("first option must be laid out");
             assert!(option.size.height >= px(30.));
+            let second = scroll
+                .bounds_for_item(2)
+                .expect("second option must be laid out");
+            assert!(
+                second.origin.y - option.bottom() >= px(4.),
+                "adjacent selected and hovered rows need visible spacing"
+            );
+            if menu == Menu::Repositories {
+                let all = cx
+                    .debug_bounds("inbox-repos-all")
+                    .expect("select-all button rendered");
+                let clear = cx
+                    .debug_bounds("inbox-repos-clear")
+                    .expect("clear button rendered");
+                assert_eq!(
+                    all.origin.y, clear.origin.y,
+                    "bulk buttons share the top row"
+                );
+                assert!(all.right() < clear.origin.x);
+                assert!(
+                    all.bottom() <= scroll.bounds().origin.y,
+                    "bulk actions stay above the scrolling repository options"
+                );
+                assert_eq!(all.origin.x, scroll.bounds().origin.x + px(8.));
+            }
             assert!(
                 scroll.bounds().intersects(&option),
                 "first option must be visible"
