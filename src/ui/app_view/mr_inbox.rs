@@ -1,7 +1,7 @@
 //! Native implementation of the selected time-inbox prototype (variant A).
 use super::*;
 use crate::gitlab::inbox::{self, InboxMr, Period, Preview};
-use chrono::{DateTime, Local};
+use chrono::Local;
 use futures::{StreamExt, stream};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -399,18 +399,8 @@ impl AppView {
                 .iter()
                 .position(|r| Some(r.key()) == self.inbox.selected)
             {
-                let now = Local::now();
-                let mut previous = String::new();
-                let mut groups = 0;
-                for row in &self.inbox.rows[..=index] {
-                    let group = date_group(row.mr.updated_at.with_timezone(&Local), now);
-                    if group != previous {
-                        groups += 1;
-                        previous = group;
-                    }
-                }
                 let (scroll, _) = scrollbar::vertical("inbox-list-sb", cx);
-                scroll.scroll_to_item(self.inbox.errors.len() + groups + index);
+                scroll.scroll_to_item(self.inbox.errors.len() + index);
             }
         }
         cx.notify();
@@ -667,27 +657,11 @@ pub(super) fn render(
 ) -> impl IntoElement {
     let palette = theme::software_palette();
     let (scroll, sb) = scrollbar::vertical("inbox-list-sb", cx);
-    let now = Local::now();
     let available = inbox_available_width(view, window);
     let detail_width = inbox_detail_width(view.inbox.detail_width, available);
     let row_width = (available - detail_width - 8.).max(0.);
-    let mut last_group = String::new();
     let mut children = Vec::new();
     for (index, row) in view.inbox.rows.iter().enumerate() {
-        let group = date_group(row.mr.updated_at.with_timezone(&Local), now);
-        if group != last_group {
-            last_group = group.clone();
-            children.push(
-                div()
-                    .px_4()
-                    .py_2()
-                    .ui_text_size(11., cx)
-                    .text_color(palette.text.secondary)
-                    .bg(palette.metadata.range)
-                    .child(group)
-                    .into_any_element(),
-            );
-        }
         let selected = view.inbox.selected.as_ref() == Some(&row.key());
         children.push(
             div()
@@ -1014,18 +988,6 @@ fn render_detail(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement 
             ),
         )
         .into_any_element()
-}
-
-fn date_group(updated: DateTime<Local>, now: DateTime<Local>) -> String {
-    let days = now
-        .date_naive()
-        .signed_duration_since(updated.date_naive())
-        .num_days();
-    match days {
-        0 => "今天".into(),
-        1 => "昨天".into(),
-        _ => "更早".into(),
-    }
 }
 
 #[cfg(test)]
