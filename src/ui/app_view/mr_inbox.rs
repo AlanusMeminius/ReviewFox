@@ -52,6 +52,8 @@ pub(super) struct Inbox {
     preview_task: Option<gpui::Task<()>>,
     repo_bounds: Rc<Cell<Bounds<Pixels>>>,
     period_bounds: Rc<Cell<Bounds<Pixels>>>,
+    detail_width: Option<f32>,
+    resize_state: Rc<ResizeState>,
 }
 
 impl Inbox {
@@ -111,7 +113,43 @@ impl Inbox {
     }
 }
 
+fn inbox_available_width(view: &AppView, window: &Window) -> f32 {
+    let rail = if view.repos_collapsed {
+        0.
+    } else {
+        view.sidebar_width + theme::CHANGES_SHADOW_GAP
+    };
+    (f32::from(window.viewport_size().width)
+        - rail
+        - theme::left_island_inset(!view.repos_collapsed)
+        - theme::CHANGES_INSET
+        - theme::CHANGES_SHADOW_GAP)
+        .max(0.)
+}
+
+fn inbox_detail_width(requested: Option<f32>, available: f32) -> f32 {
+    let minimum = 240_f32.min(available / 2.);
+    requested
+        .unwrap_or(available / 2.)
+        .clamp(minimum, available - minimum)
+}
+
 impl AppView {
+    fn inbox_resize_handler(&self, cx: &Context<Self>) -> splitter::ResizeHandler {
+        let view = cx.entity().downgrade();
+        Rc::new(move |raw, window, cx| {
+            view.update(cx, |this, cx| {
+                let width = inbox_detail_width(
+                    Some(raw - theme::CHANGES_INSET - theme::CHANGES_SHADOW_GAP / 2.),
+                    inbox_available_width(this, window),
+                );
+                this.inbox.detail_width = Some(width);
+                cx.notify();
+            })
+            .ok();
+        })
+    }
+
     pub(super) fn show_inbox(&mut self, cx: &mut Context<Self>) {
         self.refresh_store();
         self.inbox.visible = true;
@@ -468,6 +506,7 @@ fn filter_pill(
     let palette = theme::software_palette();
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .relative()
         .h(theme::TOGGLE_SIZE)
         .px_3()
@@ -484,7 +523,7 @@ fn filter_pill(
         .child(
             canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
                 .absolute()
-                .size_full(),
+                .inset_0(),
         )
         .child(label)
         .child(
@@ -590,7 +629,22 @@ pub(super) fn render_menu(view: &AppView, cx: &mut Context<AppView>) -> impl Int
                                         this.inbox.menu_index = index;
                                         this.choose_inbox_option(index, cx);
                                     }))
-                                    .child(div().w(px(16.)).child(if checked { "✓" } else { "" }))
+                                    .child(
+                                        div()
+                                            .w(px(16.))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .when(checked, |d| {
+                                                d.child(
+                                                    div()
+                                                        .size(px(5.))
+                                                        .rounded_full()
+                                                        .bg(palette.text.primary),
+                                                )
+                                            }),
+                                    )
                                     .child(
                                         div()
                                             .min_w(px(0.))
@@ -606,10 +660,17 @@ pub(super) fn render_menu(view: &AppView, cx: &mut Context<AppView>) -> impl Int
         .into_any_element()
 }
 
-pub(super) fn render(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement {
+pub(super) fn render(
+    view: &AppView,
+    window: &Window,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     let palette = theme::software_palette();
     let (scroll, sb) = scrollbar::vertical("inbox-list-sb", cx);
     let now = Local::now();
+    let available = inbox_available_width(view, window);
+    let detail_width = inbox_detail_width(view.inbox.detail_width, available);
+    let row_width = (available - detail_width - 8.).max(0.);
     let mut last_group = String::new();
     let mut children = Vec::new();
     for (index, row) in view.inbox.rows.iter().enumerate() {
@@ -631,23 +692,41 @@ pub(super) fn render(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
         children.push(
             div()
                 .id(("inbox-mr", index))
-                .px_4()
-                .py_3()
+                // Keep ellipsis and both rounded ends inside the island, including margins.
+                .w(px(row_width))
+                .tooltip(super::super::tooltip::Tooltip::text(
+                    format!(
+                        "{} · !{} · {}",
+                        row.repository.name, row.mr.iid, row.mr.author.username
+                    ),
+                    None,
+                ))
+                .mx_1()
+                .my_0p5()
+                .px_3()
+                .py_2()
+                .rounded_lg()
+                .min_w(px(0.))
+                .overflow_hidden()
                 .flex()
                 .flex_col()
-                .gap_2()
+                .gap_0p5()
                 .cursor_pointer()
-                .border_b_1()
-                .border_color(palette.control.hover)
-                .when(selected, |d| d.bg(palette.control.selected))
+                .when(selected, |d| d.bg(palette.metadata.range))
                 .hover(|d| {
                     d.bg(if selected {
-                        palette.control.selected_hover
+                        palette.metadata.range_hover
                     } else {
-                        palette.control.hover
+                        palette.metadata.row_hover
                     })
                 })
-                .active(|d| d.bg(palette.control.pressed))
+                .active(|d| {
+                    d.bg(if selected {
+                        palette.metadata.range_pressed
+                    } else {
+                        palette.metadata.row_pressed
+                    })
+                })
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     this.focus.focus(window);
                     this.select_inbox_row(index, cx);
@@ -658,38 +737,45 @@ pub(super) fn render(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                 .child(
                     div()
                         .flex()
-                        .justify_between()
-                        .gap_2()
-                        .ui_text_size(11., cx)
-                        .text_color(palette.text.secondary)
-                        .child(format!("{} · !{}", row.repository.name, row.mr.iid))
-                        .child(
-                            row.mr
-                                .updated_at
-                                .with_timezone(&Local)
-                                .format("%m/%d %H:%M")
-                                .to_string(),
-                        ),
-                )
-                .child(
-                    div()
-                        .ui_text_size(13., cx)
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(palette.text.primary)
-                        .child(row.mr.title.clone()),
-                )
-                .child(
-                    div()
-                        .flex()
                         .items_center()
                         .gap_2()
+                        .min_w(px(0.))
+                        .ui_text_size(11., cx)
+                        .text_color(palette.metadata.label)
                         .child(status_badge(row.mr.status(), cx))
                         .child(
                             div()
-                                .ui_text_size(11., cx)
-                                .text_color(palette.text.secondary)
-                                .child(row.mr.author.username.clone()),
+                                .flex_1()
+                                .min_w(px(0.))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(format!(
+                                    "{} · !{} · {}",
+                                    row.repository.name, row.mr.iid, row.mr.author.username
+                                )),
+                        )
+                        .child(
+                            div().flex_none().child(
+                                row.mr
+                                    .updated_at
+                                    .with_timezone(&Local)
+                                    .format("%m/%d %H:%M")
+                                    .to_string(),
+                            ),
                         ),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .ui_text_size(14., cx)
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(palette.metadata.text)
+                        .child(row.mr.title.clone()),
                 )
                 .into_any_element(),
         );
@@ -748,7 +834,6 @@ pub(super) fn render(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
         .absolute()
         .inset_0()
         .flex()
-        .gap(px(theme::CHANGES_SHADOW_GAP))
         .pl(px(theme::left_island_inset(!view.repos_collapsed)))
         .pr(px(theme::CHANGES_INSET))
         .pt(px(theme::CHANGES_TOP_INSET))
@@ -801,12 +886,32 @@ pub(super) fn render(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElem
                         .child("单击预览 · 双击或 Enter 进入 MR"),
                 ),
         )
-        .child(render_detail(view, cx))
+        .child(splitter::handle(
+            "inbox-detail-resize",
+            Axis::HorizontalTrailing,
+            view.inbox_resize_handler(cx),
+            view.inbox.resize_state.clone(),
+            true,
+        ))
+        .child(
+            div()
+                .w(px(inbox_detail_width(
+                    view.inbox.detail_width,
+                    inbox_available_width(view, window),
+                )))
+                .flex_none()
+                .h_full()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .child(render_detail(view, cx)),
+        )
 }
 
 fn island(id: &'static str) -> gpui::Stateful<Div> {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .h_full()
         .min_w(px(0.))
         .min_h(px(0.))
@@ -853,110 +958,39 @@ fn render_detail(view: &AppView, cx: &mut Context<AppView>) -> impl IntoElement 
     };
     let palette = theme::software_palette();
     let (scroll, sb) = scrollbar::vertical("inbox-detail-sb", cx);
+    let preview = view.inbox.preview.as_ref().and_then(|p| p.as_ref().ok());
+    let items = mr_detail::context_items(
+        &row.mr.source_branch,
+        &row.mr.target_branch,
+        preview.and_then(|p| p.merge_status.as_deref()),
+        preview.map(|p| &p.checks),
+    );
+    let notice = match &view.inbox.preview {
+        None => {
+            Some(loading_row("inbox-preview-loading", "Loading checks…", cx).into_any_element())
+        }
+        Some(Err(error)) => Some(render_error_note("inbox-preview-error", error, false, cx)),
+        Some(Ok(_)) => None,
+    };
     let content = div()
         .id("inbox-detail-scroll")
         .size_full()
-        .p_4()
+        .px_3()
+        .py_2()
         .track_scroll(&scroll)
         .overflow_y_scroll()
-        .flex()
-        .flex_col()
-        .gap_3()
-        .child(
-            div()
-                .flex()
-                .justify_between()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .ui_text_size(12., cx)
-                        .text_color(palette.text.secondary)
-                        .child(format!("{} / !{}", row.project, row.mr.iid)),
-                )
-                .child(status_badge(row.mr.status(), cx)),
-        )
-        .child(
-            div()
-                .ui_text_size(20., cx)
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(palette.text.primary)
-                .child(row.mr.title.clone()),
-        )
-        .child(
-            div()
-                .ui_text_size(12., cx)
-                .text_color(palette.text.secondary)
-                .child(format!(
-                    "{} · 更新于 {}",
-                    row.mr.author.username,
-                    row.mr
-                        .updated_at
-                        .with_timezone(&Local)
-                        .format("%Y-%m-%d %H:%M")
-                )),
-        )
-        .child(
-            div()
-                .p_3()
-                .rounded_md()
-                .bg(palette.metadata.range)
-                .ui_text_size(12., cx)
-                .text_color(palette.text.primary)
-                .child(format!(
-                    "{} → {}",
-                    row.mr.source_branch, row.mr.target_branch
-                )),
-        )
-        .child(match &view.inbox.preview {
-            None => loading_row("inbox-preview-loading", "Loading checks…", cx).into_any_element(),
-            Some(Err(error)) => {
-                render_error_note("inbox-preview-error", error, false, cx).into_any_element()
-            }
-            Some(Ok(preview)) => metadata::row(
-                vec![
-                    metadata::Item {
-                        label: "Pipeline",
-                        value: preview
-                            .checks
-                            .pipeline_status
-                            .clone()
-                            .unwrap_or_else(|| "—".into()),
-                    },
-                    metadata::Item {
-                        label: "Approvals",
-                        value: preview
-                            .checks
-                            .approvals_label
-                            .clone()
-                            .unwrap_or_else(|| "—".into()),
-                    },
-                    metadata::Item {
-                        label: "Merge",
-                        value: preview.merge_status.clone().unwrap_or_else(|| "—".into()),
-                    },
-                ],
-                cx,
-            )
-            .into_any_element(),
-        })
-        .child(
-            div()
-                .ui_text_size(12., cx)
-                .text_color(palette.text.secondary)
-                .child("描述"),
-        )
-        .child(selectable_markdown::view(
+        .child(mr_detail::render(
             format!(
                 "inbox-desc-{}-{}",
                 row.repository.path.display(),
                 row.mr.iid
             ),
-            row.mr
-                .description
-                .clone()
-                .filter(|d| !d.trim().is_empty())
-                .unwrap_or_else(|| "暂无描述。".into()),
+            mr_detail::Content {
+                title: &row.mr.title,
+                description: row.mr.description.as_deref(),
+                metadata: items,
+                notice,
+            },
             cx,
         ));
     island("inbox-detail")
@@ -1014,6 +1048,15 @@ mod tests {
     }
 
     #[test]
+    fn inbox_split_keeps_both_panes_visible_when_dragged_or_window_shrinks() {
+        assert_eq!(inbox_detail_width(None, 1000.), 500.);
+        assert_eq!(inbox_detail_width(Some(-200.), 1000.), 240.);
+        assert_eq!(inbox_detail_width(Some(2000.), 1000.), 760.);
+        assert_eq!(inbox_detail_width(Some(760.), 600.), 360.);
+        assert_eq!(inbox_detail_width(Some(760.), 400.), 200.);
+    }
+
+    #[test]
     fn aggregate_keeps_same_iid_in_different_repositories_and_partial_errors() {
         let a = row("a", 1, "2026-10-06T01:00:00Z");
         let b = row("b", 1, "2026-10-06T02:00:00Z");
@@ -1068,21 +1111,8 @@ mod tests {
 mod menu_layout_tests {
     use super::*;
 
-    struct MenuHarness {
-        view: gpui::Entity<AppView>,
-    }
-    impl Render for MenuHarness {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().child(self.view.update(cx, |view, cx| {
-                deferred(render_menu(view, cx)).into_any_element()
-            }))
-        }
-    }
-
-    #[gpui::test]
-    fn inbox_filter_menus_have_visible_options(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| cx.set_global(appearance::resolve(&Default::default(), &[])));
-        let view = cx.new(|cx| AppView {
+    fn fixture(cx: &mut Context<AppView>) -> AppView {
+        AppView {
             focus: cx.focus_handle(),
             repos_collapsed: false,
             state: MainState::Empty,
@@ -1118,8 +1148,98 @@ mod menu_layout_tests {
             mr_detail_resize_state: Rc::new(ResizeState::default()),
             #[cfg(target_os = "macos")]
             window_vibrancy: None,
+        }
+    }
+
+    struct StageHarness {
+        view: gpui::Entity<AppView>,
+    }
+    impl Render for StageHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let left = self.view.read(cx).sidebar_width + theme::CHANGES_SHADOW_GAP;
+            let stage = self
+                .view
+                .update(cx, |view, cx| render(view, window, cx).into_any_element());
+            div().size_full().child(
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .child(stage),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn inbox_splitter_drag_resizes_only_inbox(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(appearance::resolve(&Default::default(), &[])));
+        let view = cx.new(fixture);
+        let (_, cx) = cx.add_window_view(|_, _| StageHarness { view: view.clone() });
+        cx.simulate_resize(gpui::size(px(1000.), px(700.)));
+        cx.run_until_parked();
+        let before = cx.debug_bounds("inbox-detail").unwrap();
+        let list = cx.debug_bounds("inbox-list").unwrap();
+        assert!((f32::from(before.size.width - list.size.width)).abs() < 1.);
+        let start = gpui::point(
+            before.origin.x - px(theme::CHANGES_SHADOW_GAP / 2.),
+            px(300.),
+        );
+        let end = gpui::point(start.x - px(50.), start.y);
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: start,
+            modifiers: Default::default(),
+            click_count: 1,
+            first_mouse: false,
         });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: end,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Default::default(),
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            button: MouseButton::Left,
+            position: end,
+            modifiers: Default::default(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+        let after = cx.debug_bounds("inbox-detail").unwrap();
+        assert!(
+            (f32::from(after.size.width - before.size.width) - 50.).abs() < 1.,
+            "drag must grow detail by 50px: {before:?} → {after:?}"
+        );
+        assert_eq!(
+            cx.read(|cx| view.read(cx).files_width),
+            splitter::default_files_width()
+        );
+    }
+
+    struct MenuHarness {
+        view: gpui::Entity<AppView>,
+    }
+    impl Render for MenuHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let filters = self
+                .view
+                .update(cx, |view, cx| render_filters(view, cx).into_any_element());
+            div()
+                .size_full()
+                .child(div().absolute().left(px(40.)).top(px(24.)).child(filters))
+                .child(self.view.update(cx, |view, cx| {
+                    deferred(render_menu(view, cx)).into_any_element()
+                }))
+        }
+    }
+
+    #[gpui::test]
+    fn inbox_filter_menus_have_visible_options(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(appearance::resolve(&Default::default(), &[])));
+        let view = cx.new(fixture);
         let (_, cx) = cx.add_window_view(|_, _| MenuHarness { view: view.clone() });
+        cx.run_until_parked();
         for menu in [Menu::Period, Menu::Repositories] {
             view.update(cx, |view, cx| {
                 view.inbox.menu = Some(menu);
@@ -1135,6 +1255,18 @@ mod menu_layout_tests {
                 scroll.bounds().size.height >= px(100.),
                 "dropdown options are clipped: scroll viewport is {:?}",
                 scroll.bounds()
+            );
+            let trigger = cx
+                .debug_bounds(if menu == Menu::Period {
+                    "inbox-period-filter"
+                } else {
+                    "inbox-repos-filter"
+                })
+                .expect("trigger rendered");
+            assert_eq!(
+                scroll.bounds().origin.x - px(4.),
+                trigger.origin.x,
+                "dropdown outer edge must align with capsule outer edge"
             );
             let option = scroll
                 .bounds_for_item(1)

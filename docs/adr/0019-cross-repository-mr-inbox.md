@@ -7,3 +7,5 @@ Selecting a row reads a discovery preview without changing the selected Workspac
 Design source: `prototype/gitlab-mr-inbox` branch, commit `3acad5e`, `prototype/gitlab-mr-inbox.html?variant=A`. B and C remain on that throwaway branch; no variant switcher is part of the application.
 
 API contract: GitLab's [project MR listing](https://docs.gitlab.com/api/merge_requests/#list-project-merge-requests) supports update-time filtering and all states; [REST pagination](https://docs.gitlab.com/api/rest/#pagination) supplies the next page. Discovery reads all matching pages before treating a Repository as loaded.
+
+The inbox list uses compact commit-style rounded selection: status, Repository, IID and author share the first line with update time; the second line is the single-line MR title. Inbox and opened MR details share one content renderer, with identity metadata omitted from the inbox detail because it is already in the list. The list/detail splitter follows ADR-0004 with independent session-only width and a 1:1 initial layout.

@@ -25,8 +25,8 @@ use super::icon_button::IconButton;
 #[cfg(target_os = "macos")]
 use super::mac_column_vibrancy::ColumnVibrancy;
 use super::metadata;
+use super::mr_detail;
 use super::scrollbar;
-use super::selectable_markdown;
 use super::settings;
 use super::splitter::{self, Axis, ResizeState};
 use super::theme;
@@ -1357,7 +1357,9 @@ impl Render for AppView {
                             .min_w(px(splitter::MIN_COMMITS_WIDTH))
                             .overflow_hidden()
                             .bg(theme::software_palette().surface.desk)
-                            .when(self.inbox.visible, |d| d.child(mr_inbox::render(self, cx)))
+                            .when(self.inbox.visible, |d| {
+                                d.child(mr_inbox::render(self, window, cx))
+                            })
                             .when(!self.inbox.visible, |d| {
                                 d.when(!self.covering(), |d| d.child(render_commits(self, cx)))
                                     .child(render_files(self, cx))
@@ -2495,27 +2497,6 @@ fn render_mr_entry_detail(
 }
 
 fn mr_entry_ready_lines(detail: &MergeRequestDetail, cx: &mut App) -> Vec<gpui::AnyElement> {
-    let mut lines: Vec<gpui::AnyElement> = vec![
-        div()
-            .ui_text_size(14., cx)
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(theme::software_palette().metadata.text)
-            .child(detail.title.clone())
-            .into_any_element(),
-        metadata::row(mr_metadata_items(detail), cx).into_any_element(),
-    ];
-
-    if let Some(desc) = detail.description.as_deref() {
-        lines.push(
-            selectable_markdown::view(format!("mr-desc-{}", detail.iid), desc.to_owned(), cx)
-                .into_any_element(),
-        );
-    }
-
-    lines
-}
-
-fn mr_metadata_items(detail: &MergeRequestDetail) -> Vec<metadata::Item> {
     let mut items = vec![
         metadata::Item {
             label: "ID",
@@ -2529,35 +2510,26 @@ fn mr_metadata_items(detail: &MergeRequestDetail) -> Vec<metadata::Item> {
             label: "Author",
             value: detail.author_username.clone(),
         },
-        metadata::Item {
-            label: "Branches",
-            value: format!("{} → {}", detail.source_branch, detail.target_branch),
-        },
     ];
-    if let Some(ms) = &detail.merge_status {
-        items.push(metadata::Item {
-            label: "Merge",
-            value: ms.clone(),
-        });
-    }
-    if let Some(pipe) = &detail.check_state.pipeline_status {
-        items.push(metadata::Item {
-            label: "Pipeline",
-            value: pipe.clone(),
-        });
-    }
-    if let Some(label) = &detail.check_state.approvals_label {
-        items.push(metadata::Item {
-            label: "Approvals",
-            value: label.clone(),
-        });
-    } else if detail.check_state.approved == Some(true) {
-        items.push(metadata::Item {
-            label: "Approvals",
-            value: "approved".into(),
-        });
-    }
-    items
+    items.extend(mr_detail::context_items(
+        &detail.source_branch,
+        &detail.target_branch,
+        detail.merge_status.as_deref(),
+        Some(&detail.check_state),
+    ));
+    vec![
+        mr_detail::render(
+            format!("mr-desc-{}", detail.iid),
+            mr_detail::Content {
+                title: &detail.title,
+                description: detail.description.as_deref(),
+                metadata: items,
+                notice: None,
+            },
+            cx,
+        )
+        .into_any_element(),
+    ]
 }
 
 fn picker_option_row(id: (&'static str, usize), width: f32, selected: bool) -> gpui::Stateful<Div> {

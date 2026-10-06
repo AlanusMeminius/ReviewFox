@@ -18,6 +18,7 @@ mod mac_column_vibrancy;
 mod mac_titlebar;
 mod markdown;
 mod metadata;
+mod mr_detail;
 mod scrollbar;
 mod selectable_markdown;
 mod settings;
